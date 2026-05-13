@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "styx-hermes"
+version = "1.0.0"
+description = "Styx как плагин Hermes Agent — тонкий HTTP-клиент к styx-core daemon."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Сергей Сомаров", email = "somarov@gmail.com" }]
+keywords = ["hermes", "agent", "plugin", "styx"]
+dependencies = [
+    "styx-core==1.0.0",
+    "requests>=2.32",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+styx-hermes-setup = "styx_hermes.setup_cli:main"
+
+# Entry-point для general plugin (StyxContextEngine + два Transport +
+# pre_llm_call hook). Hermes сканирует группу `hermes_agent.plugins`
+# через `importlib.metadata.entry_points()`. Value — module path
+# (без `:attr`), потому что `_load_entrypoint_module` делает `ep.load()`
+# и ожидает модуль с top-level функцией `register(ctx)`.
+#
+# Memory provider (`styx-memory`) загружается отдельным каналом
+# Hermes — directory shim в `$HERMES_HOME/plugins/styx-memory/`.
+# Установка shim'а — `styx-hermes-setup`.
+[project.entry-points."hermes_agent.plugins"]
+styx = "styx_hermes.plugin"
+
+[project.urls]
+Repository = "https://github.com/colibri11/styx"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/styx_hermes"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/styx_hermes/resources/plugins/styx-memory/__init__.py" = "styx_hermes/resources/plugins/styx-memory/__init__.py"
+"src/styx_hermes/resources/plugins/styx-memory/plugin.yaml" = "styx_hermes/resources/plugins/styx-memory/plugin.yaml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

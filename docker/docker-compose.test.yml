@@ -1,0 +1,293 @@
+# Styx integration test stack — пять сервисов.
+#
+# Архитектура (host-agnostic split, см. .design/host-agnostic-split-v1.md):
+#   postgres          — pgvector
+#   styx-daemon       — host-agnostic core, FastAPI HTTP API на 8788
+#   hermes-styx       — Hermes Agent + styx-hermes plugin, ходит в daemon по HTTP
+#   openclaw-gateway  — OpenClaw gateway (Node 22, :18789); LLM = zai/glm-5.1
+#                       через GLM_API_KEY → ZAI_API_KEY env. Под OpenClaw
+#                       plugin track (см. .design/NEXT.md).
+#   openclaw-cli      — sidecar для `openclaw plugins …` без `docker exec`,
+#                       shared network namespace с openclaw-gateway.
+#
+# Ollama — внешняя (LAN), хост через extra_hosts: `ollama:${OLLAMA_HOST_IP}`
+# из .env. Сейчас 172.16.3.32. styx-daemon и hermes-styx используют для
+# embedding (embeddinggemma:300m) + LLM (qwen3:4b-local). openclaw-gateway
+# Ollama не нужна — он использует zai/glm-5.1 через z.ai API.
+#
+# Запуск (из корня styx-репо):
+#   docker compose -f docker/docker-compose.test.yml --env-file .env up -d --wait
+#
+# Интеграционные тесты — Python (styx-core, styx-hermes plugin):
+#   docker compose -f docker/docker-compose.test.yml exec -T \
+#       -e STYX_TEST_DATABASE_URL=postgresql://postgres:test@postgres:5432/styx \
+#       hermes-styx /opt/hermes/.venv/bin/pytest /opt/styx-core/tests \
+#       --ignore=/opt/styx-core/tests/benchmarks -q
+#       # Ожидание: 1200 passed, 3 skipped (~160s; skip'ы — fail-open LLM)
+#   docker compose -f docker/docker-compose.test.yml exec -T \
+#       hermes-styx /opt/hermes/.venv/bin/pytest /opt/styx-hermes/tests/plugin -q
+#       # Ожидание: ~70 passed (тот же набор что host'овый)
+#
+# Интеграционные тесты — TS (styx OpenClaw plugin, появится в волне 26+):
+#   docker compose -f docker/docker-compose.test.yml exec openclaw-cli \
+#       node /app/dist/index.js plugins inspect styx --runtime --json
+#
+# Health-checks с хоста (любые curl-зонды для дебага):
+#   curl -fsS http://127.0.0.1:8788/healthz   # styx-daemon
+#   curl -fsS http://127.0.0.1:18789/healthz  # openclaw-gateway
+#
+# Тёрдаун (с volume'ами):
+#   docker compose -f docker/docker-compose.test.yml down -v
+#
+# Требует предварительной сборки hermes-agent:latest (один раз):
+#   cd ../hermes-agent && docker compose build gateway
+#
+# Bind-mounts:
+#   ../extensions/styx → /home/node/.openclaw/plugins/styx (rw, оба openclaw-сервиса)
+#     — TS plugin source. Папка-placeholder; реальный код будет вол. 26+.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: styx-test-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: styx
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d styx"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    networks:
+      - styx-test
+    ports:
+      # Phase E: expose'нут для host-side pytest интеграционных тестов
+      # (packages/styx-core/tests/integration/openclaw/test_openclaw_plugin.py).
+      # Тесты `psycopg.connect(STYX_TEST_DATABASE_URL=postgresql://...:15432/styx)`
+      # идут с хоста, потому что docker exec в hermes-styx видит только
+      # COPY-snapshot tests при build, не свежие правки. Порт 15432
+      # вместо 5432 — чтобы не конфликтовать с другими локальными PG.
+      - "${STYX_TEST_POSTGRES_PORT:-15432}:5432"
+
+  # styx-daemon — host-agnostic core, FastAPI на 8788. Применяет
+  # миграции на старте (через тот же образ, перед `daemon run`).
+  styx-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.styx-daemon
+    image: styx-daemon-test
+    container_name: styx-test-daemon
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STYX_DATABASE_URL: postgresql://postgres:test@postgres:5432/styx
+      STYX_LOG_LEVEL: INFO
+      STYX_HTTP_BIND: 0.0.0.0
+      STYX_HTTP_PORT: "8788"
+      STYX_HTTP_TOKEN: "${STYX_HTTP_TOKEN:-test-token-do-not-use-in-prod}"
+      STYX_OLLAMA_URL: "${STYX_OLLAMA_URL:-http://ollama:11434}"
+      STYX_EMBEDDING_MODEL: "${STYX_EMBEDDING_MODEL:-embeddinggemma:300m-qat-q8_0}"
+      STYX_EMBEDDING_DIM: "${STYX_EMBEDDING_DIM:-768}"
+      STYX_EMBEDDING_TIMEOUT_S: "${STYX_EMBEDDING_TIMEOUT_S:-30}"
+      STYX_LLM_URL: "${STYX_LLM_URL:-http://ollama:11434}"
+      STYX_LLM_MODEL: "${STYX_LLM_MODEL:-qwen3:4b-local}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8788/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks:
+      - styx-test
+    ports:
+      # Expose'нем для дебага с хоста (curl healthz, manual API probes).
+      # Токен — STYX_HTTP_TOKEN из .env.
+      - "${STYX_DAEMON_PORT:-8788}:8788"
+    extra_hosts:
+      - "ollama:${OLLAMA_HOST_IP:-127.0.0.1}"
+    # Стартует daemon после применения миграций.
+    command:
+      - sh
+      - -c
+      - |
+        styx migrate && exec styx daemon run --bind 0.0.0.0 --port 8788
+
+  # hermes-styx — Hermes Agent + styx-hermes plugin. Не держит state'а
+  # Styx'а, всё проксирует в styx-daemon по HTTP.
+  hermes-styx:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.styx-hermes
+      args:
+        HERMES_IMAGE: hermes-agent:latest
+    image: hermes-agent-styx-test
+    container_name: styx-test-hermes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      styx-daemon:
+        condition: service_healthy
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_UID: "${HERMES_UID:-10000}"
+      HERMES_GID: "${HERMES_GID:-10000}"
+      # styx-hermes plugin берёт URL и токен через ENV.
+      STYX_DAEMON_URL: "http://styx-daemon:8788"
+      STYX_HTTP_TOKEN: "${STYX_HTTP_TOKEN:-test-token-do-not-use-in-prod}"
+      STYX_DATABASE_URL: postgresql://postgres:test@postgres:5432/styx
+      STYX_LOG_LEVEL: INFO
+      STYX_ALLOW_HERMES_HOME: "1"
+      # Provider-ключи (Hermes-loop). z.ai/GLM три алиаса — Hermes
+      # читает первый непустой.
+      GLM_API_KEY: "${GLM_API_KEY:-}"
+      ZAI_API_KEY: "${ZAI_API_KEY:-}"
+      Z_AI_API_KEY: "${Z_AI_API_KEY:-}"
+      GLM_BASE_URL: "${GLM_BASE_URL:-}"
+    volumes:
+      - styx-hermes-home:/opt/data
+    networks:
+      - styx-test
+    extra_hosts:
+      - "ollama:${OLLAMA_HOST_IP:-127.0.0.1}"
+    # Bootstrap → sleep infinity — контейнер остаётся жив для
+    # `docker compose exec ... pytest`. Для запуска полноценного
+    # gateway: command: ["styx-bootstrap", "gateway", "run"].
+    command: ["styx-bootstrap", "sleep", "infinity"]
+    # Healthy после styx-bootstrap.sh: создан config.yaml + styx_hermes
+    # импортируется (значит styx-memory shim прописан и pip-пакет на месте).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "test -f /opt/data/config.yaml && /opt/hermes/.venv/bin/python -c 'import styx_hermes' || exit 1"
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+
+  # openclaw-gateway — OpenClaw runtime для теста OpenClaw plugin track'а.
+  # Видит styx-daemon по сети `styx-test` как http://styx-daemon:8788
+  # (это пригодится когда подключим styx plugin → /sync_turn etc.).
+  # Headless-init через openclaw-init.sh: `config set` пишет
+  # primary=zai/glm-5.1 при первом старте, потом стартует gateway.
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    container_name: styx-test-openclaw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      styx-daemon:
+        condition: service_healthy
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      # Пины путей внутри контейнера (см. issue openclaw/openclaw#77436):
+      # без этого host'овые пути из .env могут утечь в Linux runtime.
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:-test-openclaw-token-do-not-use-in-prod}"
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      # Bridge network не пускает mDNS multicast — отключаем.
+      # Для prod хоста (host networking) можно поставить 0.
+      # Phase E: ollama/qwen3:4b-local выбран как primary LLM (см.
+      # openclaw-init.sh + docker/config/openclaw-styx-test.json5).
+      # GLM_API_KEY оставляем в env, чтобы при ручном переключении на
+      # zai/glm-5.1 не нужно было перезапускать стик.
+      ZAI_API_KEY: "${GLM_API_KEY:-}"
+      GLM_BASE_URL: "${GLM_BASE_URL:-}"
+      # Styx daemon connection — пробрасывается в openclaw-init.sh для
+      # plugins.entries.styx.config.{daemonUrl,httpToken}.
+      STYX_DAEMON_URL: "http://styx-daemon:8788"
+      STYX_HTTP_TOKEN: "${STYX_HTTP_TOKEN:-test-token-do-not-use-in-prod}"
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      - styx-openclaw-home:/home/node/.openclaw
+      - ./openclaw-init.sh:/opt/styx/openclaw-init.sh:ro
+      # Plugin source live-mount поверх named volume — gateway видит
+      # любые правки .ts/.js без rebuild'а.
+      - ../extensions/styx:/home/node/.openclaw/plugins/styx:rw
+    networks:
+      - styx-test
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+    extra_hosts:
+      # Ollama с LAN (172.16.3.32) → имя `ollama:11434` для
+      # models.providers.ollama.baseUrl=http://ollama:11434.
+      - "ollama:${OLLAMA_HOST_IP:-127.0.0.1}"
+    init: true
+    restart: unless-stopped
+    entrypoint: ["/opt/styx/openclaw-init.sh"]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # openclaw-cli — sidecar для запуска CLI команд (`plugins install`,
+  # `plugins inspect`, `models list`, `chat`, etc.) без `docker exec` в
+  # gateway. Shared network namespace + общий named volume даёт CLI
+  # доступ и к gateway HTTP, и к одному openclaw.json/plugin source.
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    container_name: styx-test-openclaw-cli
+    network_mode: "service:openclaw-gateway"
+    depends_on:
+      openclaw-gateway:
+        condition: service_healthy
+    # NB. Phase A-D имели cap_drop: [NET_RAW, NET_ADMIN] +
+    # security_opt: no-new-privileges. В Phase E убрали — embedded
+    # `agent --local` нужен outbound HTTPS к api.z.ai, и при cap_drop
+    # NET_RAW резолв DNS работает (getent), но connect() в TCP-сокет
+    # на 443 падает с "Couldn't connect to server". Симптом — DNS OK,
+    # TCP failing. Cli sidecar не запускает каналы и не делает
+    # privileged ops — drop'ы не давали реальной защиты, только
+    # ломали outbound.
+    #
+    # TEST STACK ONLY — cap_drop removed для outbound HTTPS из openclaw-cli;
+    # DO NOT copy to prod без проверки реального TCP root cause через
+    # strace -f -e trace=connect.
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:-test-openclaw-token-do-not-use-in-prod}"
+      BROWSER: echo
+      # Phase E: cli-sidecar играет роль тестового агента. `openclaw
+      # agent --message ... --local` запускает embedded agent, читая
+      # тот же openclaw.json из shared volume styx-openclaw-home, поэтому
+      # plugins.entries.styx и agents.defaults.model.primary видны.
+      # ZAI_API_KEY оставляем для fallback'ов (ZAI provider если
+      # operator переключит модель в config'е).
+      ZAI_API_KEY: "${GLM_API_KEY:-}"
+      GLM_BASE_URL: "${GLM_BASE_URL:-}"
+      # Ollama не требует API key для local provider, но если plugin
+      # captures auth marker — runtime ожидает наличие env'а.
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-ollama-local}"
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      - styx-openclaw-home:/home/node/.openclaw
+      - ../extensions/styx:/home/node/.openclaw/plugins/styx:rw
+    # network_mode: service:openclaw-gateway → extra_hosts наследуется
+    # автоматически (shared netns), отдельный extra_hosts указывать
+    # запрещено docker compose. Ollama виден как ollama:11434.
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["sleep", "infinity"]
+
+networks:
+  styx-test:
+    driver: bridge
+
+volumes:
+  styx-hermes-home:
+  styx-openclaw-home:

@@ -1,0 +1,56 @@
+# Styx Hermes-shim image — наследует Hermes Agent + styx-core + styx-hermes.
+#
+# Hermes pin: adef1f33abfbb91030f00a92fdde758981c1f710 (v0.11.0)
+# См. .design/context/decisions.md § 15.
+#
+# Build:
+#   1. cd /Users/serg/OpenCode/hermes-agent && docker compose build gateway
+#      → собирает hermes-agent:latest
+#   2. cd /Users/serg/OpenCode/styx && docker compose -f docker/docker-compose.test.yml build hermes-styx
+#      → собирает hermes-agent-styx-test поверх
+
+ARG HERMES_IMAGE=hermes-agent:latest
+FROM ${HERMES_IMAGE}
+
+USER root
+
+# Bootstrap-скрипт. Hermes entrypoint в конце делает
+# `if command -v "$1" >/dev/null 2>&1; then exec "$@"; fi` —
+# поэтому передача `["styx-bootstrap", ...]` в CMD попадает в exec
+# напрямую, минуя `hermes` wrap.
+COPY --chmod=0755 docker/styx-bootstrap.sh /usr/local/bin/styx-bootstrap
+
+# styx-core + styx-hermes pip-packages. .dockerignore исключает
+# .venv/.git/__pycache__/etc.
+COPY --chown=hermes:hermes packages/styx-core /opt/styx-core/
+COPY --chown=hermes:hermes packages/styx-hermes /opt/styx-hermes/
+
+# Установка в Hermes venv:
+# - Hermes использует uv (не pip) — venv не имеет /opt/hermes/.venv/bin/pip.
+#   Используем `/usr/local/bin/uv pip install` чтобы ставить в нужный venv
+#   через VIRTUAL_ENV.
+# - --no-deps: Hermes уже привнёс openai/anthropic/yaml/etc через свой
+#   `uv pip install -e ".[all]"`; deps Styx указаны явно ниже.
+# - psycopg/fastapi/uvicorn/pydantic/pydantic-settings/httpx/requests —
+#   deps styx-core + styx-hermes, которых нет в Hermes base.
+ENV VIRTUAL_ENV=/opt/hermes/.venv
+RUN /usr/local/bin/uv pip install --no-deps -e /opt/styx-core && \
+    /usr/local/bin/uv pip install --no-deps -e /opt/styx-hermes && \
+    /usr/local/bin/uv pip install --no-cache \
+        "psycopg[binary]>=3.2" \
+        "psycopg-pool>=3.2" \
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.32" \
+        "pydantic>=2.10" \
+        "pydantic-settings>=2.7" \
+        "httpx>=0.27" \
+        "requests>=2.32" \
+        "pytest>=8.0" \
+        "pytest-asyncio>=0.24" \
+        "pypdf>=4.0" \
+        "python-docx>=1.1" \
+        "openpyxl>=3.1"
+
+# ENTRYPOINT наследуется от base (tini → /opt/hermes/docker/entrypoint.sh).
+# CMD передаётся через docker-compose.
+USER root

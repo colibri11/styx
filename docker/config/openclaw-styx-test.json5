@@ -1,0 +1,74 @@
+// OpenClaw config для интеграционного теста Styx plugin (Phase E).
+//
+// Применяется headless'но через `openclaw config set --batch-json` в
+// openclaw-init.sh поверх дефолтного openclaw.json. Содержит ровно
+// то, что отличается от дефолтов:
+//
+// - gateway.{mode,bind,controlUi}: minimum чтобы gateway стартовал в
+//   container'е.
+// - agents.defaults.model.primary = zai/glm-5.1 — z.ai/GLM, поддерживает
+//   tool-calling из коробки. Изначальная попытка ollama/qwen3:4b-local
+//   провалилась: Ollama metadata этой custom-модели не объявляет tools
+//   capability, embedded agent получает 400 "does not support tools".
+//   z.ai reachable из контейнера (404/401 от api.z.ai = network OK).
+//   ZAI_API_KEY мостится из GLM_API_KEY в compose.
+// - plugins.slots.contextEngine = "styx" — exclusive слот, наш plugin
+//   получает control над контекстным окном.
+// - plugins.entries.styx.config — daemonUrl/httpToken для core HTTP
+//   API + agentMapping="auto" (Styx сам создаёт UUID при первом use).
+//
+// JSON5: trailing commas + комментарии. openclaw config set парсит JSON,
+// поэтому файл расценивается как референс/документ — реальные правки
+// уходят через `node /app/dist/index.js config set --batch-json '[...]'`
+// в openclaw-init.sh (не bind-mount этого файла как-есть).
+{
+  gateway: {
+    mode: "local",
+    bind: "lan",
+    controlUi: {
+      allowedOrigins: [
+        "http://localhost:18789",
+        "http://127.0.0.1:18789",
+      ],
+    },
+  },
+
+  agents: {
+    defaults: {
+      model: {
+        // zai/glm-5.1 — tools-capable, ZAI_API_KEY из GLM_API_KEY в env.
+        primary: "zai/glm-5.1",
+      },
+    },
+  },
+
+  plugins: {
+    slots: {
+      // Styx занимает exclusive ContextEngine slot; legacy Pi
+      // auto-compaction отключается через ownsCompaction=true в
+      // entries.styx.config (см. ниже).
+      contextEngine: "styx",
+    },
+    entries: {
+      styx: {
+        enabled: true,
+        config: {
+          // styx-daemon видим как http://styx-daemon:8788 в шарной
+          // сети styx-test (см. docker-compose.test.yml).
+          daemonUrl: "http://styx-daemon:8788",
+          // Должен совпадать с STYX_HTTP_TOKEN на стороне daemon.
+          httpToken: "test-token-do-not-use-in-prod",
+          agentMapping: {
+            // "auto" — Styx core при первом использовании создаст
+            // новый UUID через POST /agent/initialize и закэширует
+            // mapping в module-global per-agent state.
+            "*": "auto",
+          },
+          requestTimeoutMs: 30000,
+          logging: true,
+          ownsCompaction: true,
+        },
+      },
+    },
+  },
+}
