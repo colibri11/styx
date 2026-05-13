@@ -10,6 +10,14 @@ salient memories, переосмысления, узлы графа знаний
 **LLM ≠ носитель `я`; LLM — канал выражения**, и `я` агента живёт в
 этой среде, а не возрождается заново на каждом prompt'е.
 
+Подключается к агент-фреймворкам [Hermes Agent][hermes] и
+[OpenClaw][openclaw] через тонкие плагины-клиенты, ходящие в core
+daemon по HTTP. Один daemon обслуживает несколько `agent_id`
+параллельно.
+
+[hermes]: https://github.com/NousResearch/hermes-agent
+[openclaw]: https://github.com/openclaw/openclaw
+
 > Концептуальный первоисточник — трактат [«Я есть. Я личность»][iambook],
 > публикация автора. Разделы ниже опираются на этот текст; ссылки вида
 > [§IV][iambook] / [§V][iambook] / [§VI][iambook] / [§VII][iambook] ведут
