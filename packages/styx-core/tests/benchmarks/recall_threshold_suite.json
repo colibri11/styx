@@ -1,0 +1,131 @@
+[
+  {
+    "id": "exact-01",
+    "category": "exact",
+    "query": "Используем embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
+    "content": "Используем embeddinggemma:300m-qat-q8_0, dim=768, multilingual."
+  },
+  {
+    "id": "exact-02",
+    "category": "exact",
+    "query": "Hermes pin зафиксирован в decisions § 15.",
+    "content": "Hermes pin зафиксирован в decisions § 15."
+  },
+  {
+    "id": "exact-03",
+    "category": "exact",
+    "query": "Single-worker invariant: один styx-worker процесс на одну БД.",
+    "content": "Single-worker invariant: один styx-worker процесс на одну БД."
+  },
+  {
+    "id": "exact-04",
+    "category": "exact",
+    "query": "Application-level WHERE по agent_id; RLS не используется.",
+    "content": "Application-level WHERE по agent_id; RLS не используется."
+  },
+  {
+    "id": "exact-05",
+    "category": "exact",
+    "query": "Sentiment hot-path: extract_vad inline в sync_turn после embed-after-commit, fail-open.",
+    "content": "Sentiment hot-path: extract_vad inline в sync_turn после embed-after-commit, fail-open."
+  },
+
+  {
+    "id": "paraphrase-01-parking-regression",
+    "category": "paraphrase",
+    "query": "какую embedding модель использует Styx",
+    "content": "Расскажи про embedding-модели Ollama для Styx. Используем embeddinggemma:300m-qat-q8_0, multilingual, 768-dim."
+  },
+  {
+    "id": "paraphrase-02",
+    "category": "paraphrase",
+    "query": "Как Styx изолирует данные между разными агентами?",
+    "content": "Изоляция данных в Styx — через колонку agent_id и application-level WHERE во всех запросах. RLS не используется."
+  },
+  {
+    "id": "paraphrase-03",
+    "category": "paraphrase",
+    "query": "когда запускается фоновый воркер и что он делает?",
+    "content": "Sidecar-процесс styx-worker drain'ит llm_tasks, выполняет importance scoring через qwen3:4b-local и пишет importance_final."
+  },
+  {
+    "id": "paraphrase-04",
+    "category": "paraphrase",
+    "query": "Расскажи про lifecycle переходы fresh → settled → dormant.",
+    "content": "Periodic sweep раз в час двигает memories по lifecycle: новые fresh оседают в settled при достаточном usage, а долго неиспользуемые settled уходят в dormant."
+  },
+  {
+    "id": "paraphrase-05",
+    "category": "paraphrase",
+    "query": "что делает classifier после recall?",
+    "content": "Post-hoc usage classifier определяет какие из recall'нутых memories agent реально использовал в ответе и проставляет recall_events.used_in_output = true."
+  },
+  {
+    "id": "paraphrase-06",
+    "category": "paraphrase",
+    "query": "Как Styx подготавливает recall-tool для LLM?",
+    "content": "Tool styx_recall(query, limit) регистрируется в get_tool_schemas; LLM вызывает его через Hermes tool-call протокол, провайдер делает search_similar и форматирует memories_text."
+  },
+
+  {
+    "id": "partial-01",
+    "category": "partial",
+    "query": "Расскажи про embedding-модели в Styx.",
+    "content": "Composite scoring в Styx использует 11 факторов: importance_final, lifecycle, usage_factor, emotional_resonance и другие. Формула — port из memorybox."
+  },
+  {
+    "id": "partial-02",
+    "category": "partial",
+    "query": "Как работает recall в Styx?",
+    "content": "Hermes Agent — целевой фрейм первой интеграции Styx. Styx занимает три слота: MemoryProvider, ContextEngine, Transport."
+  },
+  {
+    "id": "partial-03",
+    "category": "partial",
+    "query": "Почему Styx использует embeddinggemma а не другую модель?",
+    "content": "Latency embedding'а замерили 54-79 ms на сообщение через реальный Ollama-инстанс, sync блокировка после COMMIT не вредит."
+  },
+  {
+    "id": "partial-04",
+    "category": "partial",
+    "query": "Что хранится в таблице memories?",
+    "content": "Application-level WHERE по agent_id обязателен в queries.py. Каждый Styx-процесс знает один agent_id за всё время жизни процесса."
+  },
+  {
+    "id": "partial-05",
+    "category": "partial",
+    "query": "Как работает sentiment hot-path?",
+    "content": "Periodic emotional_tick в styx-worker раз в 60 секунд: apply_instant_decay (0.95^minutes, epsilon 0.005) + recompute_baseline EMA α=0.98."
+  },
+
+  {
+    "id": "unrelated-01",
+    "category": "unrelated",
+    "query": "Сколько весит interstellar travel в Star Wars?",
+    "content": "Используем embeddinggemma:300m-qat-q8_0, dim=768, multilingual."
+  },
+  {
+    "id": "unrelated-02",
+    "category": "unrelated",
+    "query": "Расскажи рецепт борща с пампушками.",
+    "content": "Hermes pin зафиксирован в decisions § 15: adef1f33abfbb91030f00a92fdde758981c1f710 (v0.11.0)."
+  },
+  {
+    "id": "unrelated-03",
+    "category": "unrelated",
+    "query": "Что такое квантовая запутанность?",
+    "content": "Sidecar-процесс styx-worker drain'ит llm_tasks и выполняет фоновую LLM-обработку через qwen3:4b-local."
+  },
+  {
+    "id": "unrelated-04",
+    "category": "unrelated",
+    "query": "Какая погода была в Москве в марте 1812 года?",
+    "content": "Single-worker invariant: один styx-worker процесс на одну БД. FOR UPDATE SKIP LOCKED делает claim safe при множественных воркерах."
+  },
+  {
+    "id": "unrelated-05",
+    "category": "unrelated",
+    "query": "Кто выиграл Eurovision в 2009 году?",
+    "content": "Lifecycle переходы fresh → settled → dormant двигаются periodic sweep'ом раз в час с advisory lock 9876543210."
+  }
+]

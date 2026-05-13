@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "styx-core"
+version = "1.0.0"
+description = "Дирижёр динамической части контекстного окна LLM-агента — host-agnostic ядро."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Сергей Сомаров", email = "somarov@gmail.com" }]
+keywords = ["agent", "llm", "memory", "context-engine"]
+dependencies = [
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx>=0.27",
+    # Document parsers (волна 28) — pure-Python без system deps.
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+styx = "styx.cli:main"
+
+[project.urls]
+Repository = "https://github.com/colibri11/styx"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/styx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

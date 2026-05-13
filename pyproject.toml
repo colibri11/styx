@@ -1,0 +1,14 @@
+# Styx monorepo workspace.
+# Два пакета:
+#   - packages/styx-core    — host-agnostic ядро + HTTP daemon
+#   - packages/styx-hermes  — тонкий Hermes plugin поверх HTTP API
+#
+# Версии и зависимости — внутри каждого packages/*/pyproject.toml.
+# Этот файл — только описание workspace для uv.
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+styx-core = { workspace = true }
+styx-hermes = { workspace = true }

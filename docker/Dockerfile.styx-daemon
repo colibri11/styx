@@ -1,0 +1,42 @@
+# Styx-core daemon image — host-agnostic (без Hermes).
+#
+# Минимальный slim Python + styx-core pip-package. Запускает FastAPI
+# HTTP API + worker pool в одном процессе через `styx daemon run`.
+#
+# Build:
+#   cd /home/user/OpenCode/styx
+#   docker compose -f docker/docker-compose.test.yml build styx-daemon
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_NO_CACHE=1
+
+# Системные deps: psycopg[binary] идёт с собственными бинарниками,
+# но libpq-dev иногда нужен для transitive build. uv ставится из pip.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv — для быстрой установки workspace. Через pip для простоты.
+RUN pip install --no-cache-dir "uv>=0.5.0"
+
+# Workspace монтируется в /opt/styx-core. Только packages/styx-core/ —
+# styx-hermes daemon'у не нужен.
+COPY packages/styx-core /opt/styx-core/
+WORKDIR /opt/styx-core
+
+# Ставим в системный Python (slim — нет venv поверх). --system флаг uv
+# чтобы не строить отдельный venv внутри контейнера.
+RUN uv pip install --system --no-cache /opt/styx-core
+
+# Метаданные для healthcheck'а на стороне compose.
+ENV STYX_HTTP_BIND=0.0.0.0 \
+    STYX_HTTP_PORT=8788
+
+EXPOSE 8788
+
+CMD ["styx", "daemon", "run", "--bind", "0.0.0.0", "--port", "8788"]

@@ -1,0 +1,85 @@
+{
+  "id": "styx",
+  "name": "Styx",
+  "description": "Locus — динамический оркестратор контекстного окна на PostgreSQL+pgvector. ContextEngine + structural memory + knowledge graph поверх styx-core HTTP daemon.",
+  "version": "0.1.0",
+  "kind": "context-engine",
+  "activation": {
+    "onStartup": true
+  },
+  "skills": ["./skills"],
+  "contracts": {
+    "tools": [
+      "styx_store",
+      "styx_recall",
+      "styx_search_archive",
+      "styx_reinterpret",
+      "styx_ingest_experience",
+      "styx_ingest_document",
+      "styx_dialogue_save",
+      "styx_dialogue_search",
+      "styx_dialogue_recent",
+      "styx_dialogue_sessions",
+      "styx_dialogue_prepare_summary",
+      "styx_relations_query",
+      "styx_graph_traverse",
+      "styx_analytics",
+      "styx_explain",
+      "styx_confirm_usage",
+      "styx_link"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "daemonUrl": {
+        "type": "string",
+        "description": "URL styx-core daemon (default: http://127.0.0.1:8788)"
+      },
+      "httpToken": {
+        "type": "string",
+        "description": "Bearer-токен для styx-core daemon (Authorization: Bearer), если daemon запущен с STYX_HTTP_TOKEN."
+      },
+      "agentMapping": {
+        "type": "object",
+        "additionalProperties": { "type": "string" },
+        "description": "OpenClaw agentId → Styx UUID (или \"auto\" для динамического создания через POST /agent/initialize)."
+      },
+      "requestTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 600000,
+        "description": "Таймаут HTTP-запросов к daemon (default: 30000)."
+      },
+      "logging": {
+        "type": "boolean",
+        "description": "Verbose logging для отладки."
+      },
+      "ownsCompaction": {
+        "type": "boolean",
+        "description": "Default true; false — Styx делегирует compaction OpenClaw legacy (для отладки)."
+      }
+    }
+  },
+  "uiHints": {
+    "daemonUrl": {
+      "label": "Styx daemon URL",
+      "placeholder": "http://127.0.0.1:8788"
+    },
+    "httpToken": {
+      "label": "Styx HTTP token",
+      "sensitive": true,
+      "help": "Bearer-токен; должен совпадать с STYX_HTTP_TOKEN на стороне daemon'а."
+    },
+    "agentMapping": {
+      "label": "Agent mapping",
+      "help": "OpenClaw agent id → Styx UUID. Используйте \"auto\" чтобы Styx сам создал новый UUID при первом use."
+    },
+    "logging": { "label": "Verbose logging" },
+    "ownsCompaction": {
+      "label": "Owns compaction",
+      "help": "Advanced: leave on. Off — Styx делегирует compaction OpenClaw legacy (для отладки)."
+    }
+  }
+}

@@ -1,0 +1,17 @@
+.venv
+.git
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.idea
+.vscode
+*.swp
+.DS_Store
+node_modules
+build
+dist
+*.egg-info
