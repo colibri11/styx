@@ -202,3 +202,79 @@ def test_documents_agent_isolation(conn: psycopg.Connection) -> None:
     assert rows["alpha"] == 1
     assert rows["beta"] == 1
     assert doc_alpha != doc_beta
+
+
+# ── chunks_without_embedding / update_chunk_embedding (Defect-fix A) ───
+
+
+def test_chunks_without_embedding_returns_only_null(conn: psycopg.Connection) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    doc_id = q.insert_document(source="ingest_document", char_count=500)
+    q.insert_chunks_batch(doc_id, [
+        (0, "chunk нулевой", None, 0, 13),
+        (1, "chunk первый", _embed(0.2), 13, 25),
+        (2, "chunk второй", None, 25, 37),
+    ])
+    conn.commit()
+
+    pending = q.chunks_without_embedding(doc_id)
+    # Только chunks 0 и 2 (без embedding'а), в порядке position.
+    assert [content for _, content in pending] == [
+        "chunk нулевой", "chunk второй",
+    ]
+
+
+def test_chunks_without_embedding_empty_when_all_embedded(
+    conn: psycopg.Connection,
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    doc_id = q.insert_document(source="ingest_document", char_count=100)
+    q.insert_chunks_batch(doc_id, [(0, "c", _embed(0.1), 0, 1)])
+    conn.commit()
+    assert q.chunks_without_embedding(doc_id) == []
+
+
+def test_chunks_without_embedding_agent_scoped(conn: psycopg.Connection) -> None:
+    """Документ чужого агента не виден."""
+    q_alpha = AgentScopedQueries(conn, agent_id="alpha")
+    q_beta = AgentScopedQueries(conn, agent_id="beta")
+    doc_id = q_alpha.insert_document(source="ingest_document", char_count=100)
+    q_alpha.insert_chunks_batch(doc_id, [(0, "c", None, 0, 1)])
+    conn.commit()
+    # beta не видит chunks документа alpha.
+    assert q_beta.chunks_without_embedding(doc_id) == []
+
+
+def test_update_chunk_embedding_sets_vector(conn: psycopg.Connection) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    doc_id = q.insert_document(source="ingest_document", char_count=100)
+    q.insert_chunks_batch(doc_id, [(0, "chunk без вектора", None, 0, 17)])
+    conn.commit()
+
+    [(chunk_id, _)] = q.chunks_without_embedding(doc_id)
+    q.update_chunk_embedding(chunk_id, _embed(0.9))
+    conn.commit()
+
+    # Больше нет chunks без embedding'а.
+    assert q.chunks_without_embedding(doc_id) == []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT (embedding IS NOT NULL) FROM chunks WHERE id = %s",
+            (chunk_id,),
+        )
+        assert cur.fetchone()[0] is True
+
+
+def test_update_chunk_embedding_agent_scoped(conn: psycopg.Connection) -> None:
+    """beta не может обновить chunk документа alpha."""
+    q_alpha = AgentScopedQueries(conn, agent_id="alpha")
+    q_beta = AgentScopedQueries(conn, agent_id="beta")
+    doc_id = q_alpha.insert_document(source="ingest_document", char_count=100)
+    q_alpha.insert_chunks_batch(doc_id, [(0, "c", None, 0, 1)])
+    conn.commit()
+    [(chunk_id, _)] = q_alpha.chunks_without_embedding(doc_id)
+
+    q_beta.update_chunk_embedding(chunk_id, _embed(0.5))
+    conn.commit()
+    # chunk остался без embedding'а — beta не его агент.
+    assert len(q_alpha.chunks_without_embedding(doc_id)) == 1

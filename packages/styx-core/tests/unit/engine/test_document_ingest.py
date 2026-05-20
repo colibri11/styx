@@ -1,7 +1,11 @@
-"""Unit-tests для document_ingest orchestrator (волна 28).
+"""Unit-tests для document_ingest orchestrator (волна 28 + Defect-fix A).
 
 Mock-based: AgentScopedQueries + Embedder заменяются stub'ами. Реальный
 INSERT в Postgres тестируется в `tests/integration/http/test_ingest_document.py`.
+
+Defect-fix A: file-ingest теперь создаёт tail-memory с МАРКЕРОМ АКТА
+архивации (раньше волна 28 tail не создавала). Документ-артефакт →
+архив, акт «я положил в архив документ» → память (IAmBook §V).
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ class _StubQueries:
         self.existing_hashes = existing_hashes or set()
         self.inserted_documents: list[dict] = []
         self.inserted_chunks: list[tuple[uuid.UUID, list]] = []
+        # Defect-fix A: file-ingest создаёт tail-memory с маркером акта.
+        self.inserted_memories: list[dict] = []
 
     def find_document_by_content_hash(
         self, content_hash: str
@@ -66,10 +72,10 @@ class _StubQueries:
         self.inserted_chunks.append((document_id, chunks))
 
     def insert_memory(self, **kwargs) -> uuid.UUID:
-        # Не должно вызываться — file-ingest НЕ создаёт tail-memory.
-        raise AssertionError(
-            "insert_memory вызван в file-ingest pipeline — должен быть skip"
-        )
+        # Defect-fix A: tail-memory с маркером акта архивации.
+        new_id = uuid.uuid4()
+        self.inserted_memories.append({"id": new_id, **kwargs})
+        return new_id
 
 
 def _store_cfg() -> StoreRoutingConfig:
@@ -197,9 +203,12 @@ def test_ingest_document_plaintext_full_flow() -> None:
     assert doc["content_hash"] == result.content_hash
     # Chunks INSERT — один batch.
     assert len(queries.inserted_chunks) == 1
-    # Embedder зван по числу chunks (НЕ +1 для summary —
-    # create_tail_memory=False).
-    assert len(embedder.calls) == result.chunks_count
+    # Defect-fix A: embedder зван по числу chunks + 1 раз на маркер
+    # акта (tail-memory). Маленький документ → chunks embed'ятся inline.
+    assert len(embedder.calls) == result.chunks_count + 1
+    # tail-memory с маркером акта создана.
+    assert len(queries.inserted_memories) == 1
+    assert result.act_marker_memory_id is not None
 
 
 def test_ingest_document_markdown_flow() -> None:
@@ -282,11 +291,16 @@ def test_ingest_document_unsupported_extension(tmp_path: Path) -> None:
         )
 
 
-def test_ingest_document_no_tail_memory_check() -> None:
-    """Защита: insert_memory НЕ вызывается (file-ingest pipeline)."""
+def test_ingest_document_creates_act_marker_tail() -> None:
+    """Defect-fix A: file-ingest создаёт tail-memory с маркером акта
+    архивации — НЕ обрезок содержания (IAmBook §V).
+
+    tail-memory: kind='note', kind_src='subjective_tail', role='summary'
+    (все валидны под CHECK constraint'ы memories). content — маркер
+    акта: «я положил в архив документ ...», без содержания документа.
+    """
     queries = _StubQueries()
     embedder = _StubEmbedder()
-    # _StubQueries.insert_memory кидает AssertionError если вызвался.
     ingest_document(
         queries,  # type: ignore[arg-type]
         embedder,
@@ -294,7 +308,16 @@ def test_ingest_document_no_tail_memory_check() -> None:
         config=DocumentIngestConfig(),
         store_routing=_store_cfg(),
     )
-    # Дошли сюда — значит insert_memory не звался.
+    assert len(queries.inserted_memories) == 1
+    mem = queries.inserted_memories[0]
+    assert mem["kind"] == "note"
+    assert mem["kind_src"] == "subjective_tail"
+    assert mem["role"] == "summary"
+    # content — маркер акта.
+    assert "положил в архив" in mem["content"]
+    assert "sample.txt" in mem["content"]
+    # archive_ref указывает на документ.
+    assert mem["archive_ref"]["kind"] == "document"
 
 
 def test_ingest_document_explicit_content_hash(tmp_path: Path) -> None:
@@ -340,3 +363,55 @@ def test_ingest_document_metadata_passthrough(tmp_path: Path) -> None:
     assert doc["metadata"]["upload_source"] == "openclaw"
     # parsed.metadata (line_count) тоже должен попасть.
     assert "line_count" in doc["metadata"]
+
+
+# ── async ingest большого документа (Defect-fix A) ──────────────────
+
+
+def test_ingest_document_async_when_over_chunk_threshold(tmp_path: Path) -> None:
+    """Документ режется на больше chunks чем порог → chunks_embedded_
+    inline=False, chunk-embedding'и НЕ делаются inline."""
+    target = tmp_path / "big.txt"
+    # Много абзацев → много chunks при store_routing chunk_size.
+    target.write_text("Параграф с текстом.\n\n" * 600)
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+
+    result = ingest_document(
+        queries,  # type: ignore[arg-type]
+        embedder,
+        raw_path=str(target),
+        config=DocumentIngestConfig(),
+        store_routing=_store_cfg(),
+        async_chunk_threshold=2,
+    )
+
+    assert result.chunks_count > 2
+    assert result.chunks_embedded_inline is False
+    # chunks записаны с embedding=None.
+    _, chunk_records = queries.inserted_chunks[0]
+    assert all(rec[2] is None for rec in chunk_records)
+    # Маркер акта всё равно embed'нут inline — ровно один embed call.
+    assert len(embedder.calls) == 1
+    assert result.act_marker_memory_id is not None
+
+
+def test_ingest_document_inline_when_under_chunk_threshold(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "small.txt"
+    target.write_text("Небольшой документ. Пара предложений.")
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+
+    result = ingest_document(
+        queries,  # type: ignore[arg-type]
+        embedder,
+        raw_path=str(target),
+        config=DocumentIngestConfig(),
+        store_routing=_store_cfg(),
+        async_chunk_threshold=100,
+    )
+    assert result.chunks_embedded_inline is True
+    _, chunk_records = queries.inserted_chunks[0]
+    assert all(rec[2] is not None for rec in chunk_records)

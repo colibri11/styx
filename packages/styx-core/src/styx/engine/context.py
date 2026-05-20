@@ -59,6 +59,7 @@ from styx.engine import (
     salient_bridge,
 )
 from styx.engine.eviction_relevance import apply_relevance_eviction
+from styx.engine.message_splitter import reassemble_message_groups
 from styx.engine.salient import build_salient_block
 from styx.observability.logging import log_event
 
@@ -227,6 +228,13 @@ class StyxComposer:
         # до того, как salient считается заново. Волны 26.5 + 30.
         messages = _sanitize_styx_blocks(messages)
 
+        # Defect-fix B: если во входе оказались ряды одной группы
+        # (длинная реплика дневника, разрезанная при записи —
+        # metadata.msg_group), пересобираем их обратно в один блок,
+        # чтобы LLM видел целостное сообщение, а не половину. Для
+        # runtime-messages без msg_group — no-op (идемпотентно).
+        messages = reassemble_message_groups(messages)
+
         handle = salient_bridge.get_handle(self.agent_id)
 
         # build_salient_block внутри observe'ит focus_tracker по last
@@ -380,6 +388,10 @@ class StyxComposer:
         # Sanitize input (волна 26.5) — вырезаем любые исторические
         # <styx>...</styx> блоки. Семантика идентична compress.
         messages = _sanitize_styx_blocks(messages)
+
+        # Defect-fix B: пересборка групп рядов (как в compress) —
+        # no-op для runtime-messages без msg_group.
+        messages = reassemble_message_groups(messages)
 
         # Salient — посчитан и обёрнут, но не инжектится в messages.
         handle = salient_bridge.get_handle(self.agent_id)

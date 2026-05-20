@@ -1533,3 +1533,49 @@ def test_compress_multimodal_sanitizes_family_tag() -> None:
     assert len(out) == 1
     assert out[0]["content"] == "trailing"
     assert get_styx_sanitized_blocks_by_tag() == {"recall": 1}
+
+
+# -- group reassembly (Defect-fix B) ---------------------------------------
+
+
+def test_compress_reassembles_message_groups() -> None:
+    """compress пересобирает ряды одной группы (msg_group) в один блок."""
+    e = StyxComposer("test-agent", context_length=128_000)
+    msgs = [
+        _msg("user", "Часть А. ", metadata={
+            "msg_group": "g1", "part": 0, "parts": 2,
+        }),
+        _msg("user", "Часть Б.", metadata={
+            "msg_group": "g1", "part": 1, "parts": 2,
+        }),
+        _msg("assistant", "ответ"),
+    ]
+    out = e.compress(msgs, current_tokens=None)
+    user_msgs = [m for m in out if m.get("role") == "user"]
+    assert len(user_msgs) == 1
+    assert user_msgs[0]["content"] == "Часть А. Часть Б."
+
+
+def test_compress_plain_messages_unaffected_by_reassembly() -> None:
+    """Runtime-messages без msg_group — пересборка no-op."""
+    e = StyxComposer("test-agent", context_length=128_000)
+    msgs = [_msg("user", "обычный вопрос"), _msg("assistant", "ответ")]
+    out = e.compress(msgs, current_tokens=None)
+    assert [m["content"] for m in out] == ["обычный вопрос", "ответ"]
+
+
+def test_assemble_for_runtime_reassembles_groups() -> None:
+    """assemble_for_runtime тоже пересобирает группы."""
+    e = StyxComposer("test-agent", context_length=128_000)
+    msgs = [
+        _msg("user", "p0. ", metadata={
+            "msg_group": "g1", "part": 0, "parts": 2,
+        }),
+        _msg("user", "p1.", metadata={
+            "msg_group": "g1", "part": 1, "parts": 2,
+        }),
+    ]
+    result = e.assemble_for_runtime(msgs, current_tokens=None)
+    user_msgs = [m for m in result["messages"] if m.get("role") == "user"]
+    assert len(user_msgs) == 1
+    assert user_msgs[0]["content"] == "p0. p1."

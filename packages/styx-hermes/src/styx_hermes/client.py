@@ -360,11 +360,13 @@ class StyxCoreClient:
         metadata: dict[str, Any] | None = None,
         content_hash: str | None = None,
     ) -> dict[str, Any]:
-        """POST /ingest_document — file-ingest pipeline (волна 28).
+        """POST /ingest_document — file-ingest pipeline (волна 28 +
+        Defect-fix A).
 
         Daemon читает файл по absolute path, парсит, режет на chunks,
-        embed'ит, INSERT'ит document + chunks. tail-memory НЕ создаётся
-        (D5 в waves/28). Идемпотентен по SHA256 file bytes.
+        embed'ит, INSERT'ит document + chunks. В memories пишется
+        tail-memory с маркером акта архивации (Defect-fix A; IAmBook
+        §V). Идемпотентен по SHA256 file bytes.
         """
         return self._post(
             "/ingest_document",

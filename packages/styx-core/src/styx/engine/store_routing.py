@@ -52,12 +52,17 @@ class RoutedWriteResult:
     ``summary_embedding`` (когда не None) возвращается caller'у чтобы
     auto-link для tail-memory мог обойтись без повторного embed'а —
     он уже посчитан внутри ``route_long_content``.
+
+    ``chunks_embedded_inline`` (Defect-fix A) — False означает, что
+    chunks записаны с ``embedding=NULL`` (async ingest большого
+    документа); caller обязан enqueue'ить embedding в worker pool.
     """
 
     tail_memory_id: uuid.UUID | None
     document_id: uuid.UUID
     chunks_count: int
     summary_embedding: list[float] | None
+    chunks_embedded_inline: bool = True
 
 
 class _Embedder(Protocol):
@@ -76,6 +81,11 @@ def make_tail_summary(content: str, *, limit: int) -> str:
     Для мультибайтовых символов длина считается в codepoint'ах (Python
     `len`), не в байтах. CHECK constraint memories.content_length тоже
     использует `length(content)` — codepoint'ы; consistency.
+
+    Используется для tail_mode='summary' — длинный *субъективный*
+    write (memory_store / dialogue consolidation): tail сохраняет
+    обрезок самого содержания. Для документов это неверно (документ ≠
+    память) — там tail_mode='act_marker', см. ``make_act_marker``.
     """
     if len(content) <= limit:
         return content
@@ -85,6 +95,58 @@ def make_tail_summary(content: str, *, limit: int) -> str:
         if last_ws > 0:
             cut = cut[:last_ws]
     return cut.rstrip() + "…"
+
+
+def make_act_marker(
+    *,
+    document_id: uuid.UUID,
+    original_name: str | None,
+    mime_type: str | None,
+    char_count: int,
+    source: str,
+    source_ref: str | None = None,
+    limit: int,
+) -> str:
+    """Собрать маркер акта архивации документа (Defect-fix A).
+
+    По концепции (IAmBook §V): документ — артефакт, его место архив
+    (``documents``+``chunks``). В память (``memories``) от документа
+    входит не обрезок содержания, а **маркер акта** — след того, что
+    «я положил в архив документ такого-то рода». Маркер несёт:
+    тип/происхождение (mime, source), о чём (имя), объём, ссылку на
+    архив (``locator``) — но НЕ содержание документа.
+
+    Результат гарантированно ≤ ``limit`` chars (CHECK constraint
+    memories.content). Имя файла усекается если маркер не влезает.
+    """
+    name = (original_name or "без имени").strip() or "без имени"
+    mime = (mime_type or "неизвестный тип").strip() or "неизвестный тип"
+    locator = f"styx://store/{document_id}"
+
+    def _compose(display_name: str) -> str:
+        parts = [
+            f"Я положил в архив документ «{display_name}»",
+            f"тип: {mime}",
+            f"объём: {char_count} симв.",
+            f"происхождение: {source}",
+        ]
+        if source_ref:
+            parts.append(f"источник: {source_ref}")
+        parts.append(f"архив: {locator}")
+        return "; ".join(parts) + "."
+
+    marker = _compose(name)
+    if len(marker) <= limit:
+        return marker
+    # Маркер не влезает — усекаем имя файла (служебные поля важнее).
+    overflow = len(marker) - limit
+    trimmed_len = max(8, len(name) - overflow - 1)
+    trimmed_name = name[:trimmed_len].rstrip() + "…"
+    marker = _compose(trimmed_name)
+    if len(marker) <= limit:
+        return marker
+    # Крайний случай (очень длинные служебные поля) — жёсткий рез.
+    return marker[: limit - 1].rstrip() + "…"
 
 
 def route_long_content(
@@ -102,6 +164,9 @@ def route_long_content(
     source: str,
     extra_archive_metadata: dict[str, Any] | None = None,
     create_tail_memory: bool = True,
+    tail_mode: str = "summary",
+    embed_chunks_inline: bool = True,
+    async_chunk_threshold: int | None = None,
     content_hash: str | None = None,
     file_path: str | None = None,
     original_name: str | None = None,
@@ -130,10 +195,31 @@ def route_long_content(
     - ``extra_archive_metadata`` — дополнительные ключи в archive_ref
       tail-memory'и (например, оригинальный `archive_ref` от dialogue
       batch handler'а — D11). Не применяется при create_tail_memory=False.
-    - ``create_tail_memory`` — False для pipeline channels (file-ingest
-      волны 28, IAmBook §V «архив vs память»). При False tail-memory
-      не создаётся, embed summary не делается, RoutedWriteResult
-      возвращает ``tail_memory_id=None`` и ``summary_embedding=None``.
+    - ``create_tail_memory`` — False → tail-memory не создаётся,
+      RoutedWriteResult возвращает ``tail_memory_id=None`` и
+      ``summary_embedding=None``.
+    - ``tail_mode`` (Defect-fix A) — режим tail-memory при
+      ``create_tail_memory=True``:
+      * ``'summary'`` (default) — tail = обрезок самого содержания
+        (``make_tail_summary``). Для длинного *субъективного* write'а
+        (memory_store / dialogue consolidation) — содержание и есть
+        память.
+      * ``'act_marker'`` — tail = маркер акта архивации документа
+        (``make_act_marker``): «я положил в архив документ такого-то
+        рода» — тип/происхождение/о чём/ссылка, БЕЗ содержания
+        (IAmBook §V: документ ≠ память; в линию `я` входит акт, не
+        артефакт). Используется documents-каналом (file-ingest).
+    - ``embed_chunks_inline`` (Defect-fix A) — True (default): chunks
+      embed'ятся синхронно. False: chunks INSERT'ятся с
+      ``embedding=NULL`` (caller потом enqueue'ит embedding в worker
+      pool — async ingest большого документа). tail-memory (если
+      создаётся) embed'ится всегда inline — это один embed, дёшево, и
+      маркер акта должен быть recallable сразу.
+    - ``async_chunk_threshold`` (Defect-fix A) — если задан и chunker
+      вернул больше chunks, чем порог, ``embed_chunks_inline``
+      принудительно становится False (большой документ → async). Это
+      позволяет решить inline/async за один проход chunking'а, не
+      дублируя его в caller'е.
     - ``content_hash`` — опц. SHA256 от source bytes (file-ingest)
       либо явный hash от caller'а. Пишется в documents.content_hash,
       работает с partial UNIQUE constraint для idempotency.
@@ -152,6 +238,12 @@ def route_long_content(
     Возвращает ``RoutedWriteResult`` с document_id, chunks_count и опц.
     tail_memory_id + summary_embedding.
     """
+    if tail_mode not in ("summary", "act_marker"):
+        raise ValueError(
+            f"route_long_content: tail_mode должен быть "
+            f"'summary'|'act_marker', получено {tail_mode!r}"
+        )
+
     chunks = chunk_text(
         content,
         size=config.chunk_size,
@@ -163,15 +255,22 @@ def route_long_content(
             "(degenerate input — whitespace-only?)"
         )
 
-    chunk_embeddings: list[list[float]] = [
-        embedder.embed(c.text) for c in chunks
-    ]
+    # Async-решение за один проход chunking'а: большой документ
+    # (chunks > порога) → embedding откладывается в worker pool.
+    chunks_inline = embed_chunks_inline
+    if (
+        async_chunk_threshold is not None
+        and len(chunks) > async_chunk_threshold
+    ):
+        chunks_inline = False
 
-    summary: str | None = None
-    summary_embedding: list[float] | None = None
-    if create_tail_memory:
-        summary = make_tail_summary(content, limit=config.summary_chars)
-        summary_embedding = embedder.embed(summary)
+    # embed_chunks_inline=False → chunks INSERT'ятся с embedding=NULL,
+    # caller enqueue'ит embedding в worker pool (async ingest).
+    chunk_embeddings: list[list[float] | None]
+    if chunks_inline:
+        chunk_embeddings = [embedder.embed(c.text) for c in chunks]
+    else:
+        chunk_embeddings = [None] * len(chunks)
 
     doc_metadata: dict[str, Any] = {"source_kind": kind}
     if extra_archive_metadata:
@@ -179,10 +278,17 @@ def route_long_content(
     if document_metadata_extra:
         doc_metadata.update(document_metadata_extra)
 
+    # documents.summary в режиме act_marker оставляем None — это поле
+    # хранит обрезок содержания (для summary-mode tail'а), а маркер
+    # акта содержания не несёт.
+    doc_summary: str | None = None
+    if create_tail_memory and tail_mode == "summary":
+        doc_summary = make_tail_summary(content, limit=config.summary_chars)
+
     document_id = queries.insert_document(
         source=source,
         char_count=len(content),
-        summary=summary,
+        summary=doc_summary,
         content_hash=content_hash,
         metadata=doc_metadata,
         file_path=file_path,
@@ -207,10 +313,25 @@ def route_long_content(
             document_id=document_id,
             chunks_count=len(chunks),
             summary_embedding=None,
+            chunks_embedded_inline=chunks_inline,
         )
 
-    assert summary is not None
-    assert summary_embedding is not None
+    # tail-memory: в summary-mode — обрезок содержания; в act_marker-
+    # mode — маркер акта архивации (Defect-fix A, IAmBook §V).
+    if tail_mode == "summary":
+        assert doc_summary is not None
+        tail_text = doc_summary
+    else:
+        tail_text = make_act_marker(
+            document_id=document_id,
+            original_name=original_name,
+            mime_type=mime_type,
+            char_count=len(content),
+            source=source,
+            source_ref=source_ref,
+            limit=config.summary_chars,
+        )
+    summary_embedding = embedder.embed(tail_text)
 
     archive_ref: dict[str, Any] = {
         "kind": "document",
@@ -223,7 +344,7 @@ def route_long_content(
 
     tail_id = queries.insert_memory(
         role=role,
-        content=summary,
+        content=tail_text,
         kind=kind,
         kind_src=kind_src,
         session_id=session_id,
@@ -238,4 +359,5 @@ def route_long_content(
         document_id=document_id,
         chunks_count=len(chunks),
         summary_embedding=summary_embedding,
+        chunks_embedded_inline=chunks_inline,
     )

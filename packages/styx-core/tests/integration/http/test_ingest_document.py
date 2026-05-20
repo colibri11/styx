@@ -1,13 +1,17 @@
 """POST /ingest_document integration: TestClient + real Postgres +
-Ollama (волна 28).
+Ollama (волна 28 + Defect-fix A).
 
 Plugin-side path-mode: core читает абсолютный path с диска (D1), парсит
 (pypdf/python-docx/openpyxl/builtin), режет на chunks, embed'ит,
-INSERT'ит document + chunks. tail-memory НЕ создаётся (D5).
+INSERT'ит document + chunks.
+
+Defect-fix A: file-ingest создаёт tail-memory с маркером акта
+архивации («я положил в архив документ»; IAmBook §V). Большой
+документ ingest'ится async (chunks embed'ятся в worker pool).
 
 Tested:
 - Все 5 форматов (PDF/DOCX/XLSX/MD/TXT) → 200, document + chunks
-  записаны, embedding'и не NULL, tail-memory нет.
+  записаны, маркер акта создан.
 - Идемпотентность (SHA256 file_bytes) — повторный POST → deduplicated.
 - 422 cases: relative path, file not found, unsupported extension,
   mime mismatch, empty text (blank PDF), file size exceeds limit.
@@ -180,8 +184,10 @@ def _chunks_count(dsn: str, document_id: str) -> tuple[int, int]:
 
 
 def _tail_memory_count(dsn: str, agent: str) -> int:
-    """Любые ряды в memories у agent'а (для проверки что file-ingest НЕ
-    создал tail-memory)."""
+    """Кол-во рядов memories у agent'а.
+
+    Defect-fix A: file-ingest создаёт ровно одну tail-memory — маркер
+    акта архивации («я положил в архив документ»; IAmBook §V)."""
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -190,6 +196,22 @@ def _tail_memory_count(dsn: str, agent: str) -> int:
             )
             row = cur.fetchone()
     return row[0]
+
+
+def _act_marker_memory(dsn: str, memory_id: str) -> dict:
+    """Достать tail-memory с маркером акта по id."""
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT content, kind, kind_src, role, archive_ref "
+                "FROM memories WHERE id = %s",
+                (memory_id,),
+            )
+            row = cur.fetchone()
+    return {
+        "content": row[0], "kind": row[1], "kind_src": row[2],
+        "role": row[3], "archive_ref": row[4],
+    }
 
 
 # ── Happy paths ─────────────────────────────────────────────────────
@@ -221,10 +243,20 @@ def test_ingest_plaintext(stack) -> None:
 
     total, with_emb = _chunks_count(dsn, body["document_id"])
     assert total == body["chunks_count"]
-    assert with_emb == total  # все chunk'и с embedding'ами
+    assert with_emb == total  # все chunk'и с embedding'ами (маленький doc)
+    assert body["chunks_embedded_inline"] is True
 
-    # tail-memory НЕ создаётся (D5).
-    assert _tail_memory_count(dsn, agent) == 0
+    # Defect-fix A: file-ingest создаёт ровно одну tail-memory —
+    # маркер акта архивации (IAmBook §V: документ ≠ память; в линию
+    # `я` входит акт «я положил в архив документ», не содержание).
+    assert _tail_memory_count(dsn, agent) == 1
+    assert body["act_marker_memory_id"] is not None
+    marker = _act_marker_memory(dsn, body["act_marker_memory_id"])
+    assert "положил в архив" in marker["content"]
+    assert "sample.txt" in marker["content"]
+    assert marker["kind"] == "note"
+    assert marker["kind_src"] == "subjective_tail"
+    assert marker["archive_ref"]["id"] == body["document_id"]
 
 
 def test_ingest_markdown(stack) -> None:
@@ -311,6 +343,11 @@ def test_ingest_idempotent_same_file(stack) -> None:
     assert fb["deduplicated"] is False
     assert sb["deduplicated"] is True
     assert sb["chunks_count"] == 0  # без INSERT'ов
+    # Defect-fix A: повторный ingest НЕ создаёт второй маркер акта —
+    # акт уже зафиксирован при первом ingest'е.
+    assert fb["act_marker_memory_id"] is not None
+    assert sb["act_marker_memory_id"] is None
+    assert _tail_memory_count(dsn, agent) == 1
 
 
 def test_ingest_explicit_hash_override(stack) -> None:

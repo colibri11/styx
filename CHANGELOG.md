@@ -4,6 +4,54 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Boевой инцидент `memories_content_length_check`.** User-реплика
+  15090 символов (документ-Markdown с вложением), приехавшая
+  turn-каналом, роняла запись по CHECK constraint'у и оставляла
+  daemon-соединение в aborted-state до рестарта. Исправлено в трёх
+  слоях:
+  - **rollback-guard**: блок insert+commit в `sync_turn` /
+    `ingest_single_message` обёрнут в try/except — при любой ошибке
+    `rollback()`, соединение остаётся рабочим.
+  - **core-инвариант**: `insert_message` **и** `insert_memory` бросают
+    `ContentTooLongError` при `content` длиннее лимита — симметричная
+    страховка до CheckViolation на обоих write-path'ах.
+  - **split больших реплик дневника**: реплика (user/assistant)
+    длиннее `STYX_MESSAGE_SPLIT_PART_CHARS` режется на N рядов
+    `memories` того же role/session (дневник = речь целиком; IAmBook
+    §V), группа помечается `msg_group`/`part`/`parts`; `StyxComposer`
+    и `recent_messages` пересобирают группу обратно в один блок,
+    группа не режется на границе `LIMIT`.
+- **Перехват вложений не теряет данные при сбое ingest.** Если
+  `/ingest_document` для media-вложения не отработал (файл не
+  резолвится / TTL-cleanup / endpoint упал), OpenClaw plugin
+  оставляет маркер вложения в turn-тексте вместо вырезания —
+  вложение деградирует в обычное сообщение дневника, а не исчезает
+  молча.
+- **Валидация `message_split_part_chars`.** `config.load()` отвергает
+  на старте конфигурацию, где `STYX_MESSAGE_SPLIT_PART_CHARS`
+  не строго меньше лимита `memories.content` (2400) — иначе сплиттер
+  выдавал бы части сверх CHECK constraint'а. Fail-fast, не clamp.
+
+### Changed
+
+- **Документ ≠ память (IAmBook §V).** `/ingest_document` теперь
+  создаёт tail-memory с **маркером акта** архивации («я положил в
+  архив документ такого-то рода» — тип/происхождение/о чём/ссылка),
+  вместо «no tail-memory» волны 28. Содержание документа в память не
+  входит — только акт.
+- **Async ingest больших документов.** Документ с числом chunks
+  больше `STYX_DOCUMENT_INGEST_ASYNC_CHUNK_THRESHOLD` ingest'ится
+  через worker pool (новый handler `document_chunk_embed`): chunks
+  INSERT'ятся с `embedding=NULL`, endpoint возвращается быстро.
+- **OpenClaw plugin** перехватывает media-вложения turn'а
+  (`media://inbound/...`) и шлёт документ documents-каналом
+  (`/ingest_document`), в turn-текст подставляя только ссылку —
+  документ не едет turn-каналом как 15K-символьный текст.
+
 ## [1.0.0] — 2026-05-13
 
 Первый публичный релиз.

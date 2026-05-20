@@ -253,6 +253,20 @@ def build_worker(config: StyxConfig) -> LlmWorker:
             fn=_memory_consolidation_apply_tick,
         )
 
+    # Defect-fix A — async embed chunks большого документа. file-ingest
+    # большого документа INSERT'ит chunks с embedding=NULL и enqueue'ит
+    # эту задачу; handler embed'ит chunks (не LLM-задача — только
+    # ctx.embedder).
+    from styx.workers.handlers.document_chunk_embed import (
+        DOCUMENT_CHUNK_EMBED_TASK_TYPE,
+        create_document_chunk_embed_handler,
+    )
+
+    worker.register_handler(
+        DOCUMENT_CHUNK_EMBED_TASK_TYPE,
+        create_document_chunk_embed_handler(),
+    )
+
     return worker
 
 

@@ -137,6 +137,81 @@ def test_sync_turn_skips_empty_content(styx_env) -> None:
         p.shutdown()
 
 
+def test_sync_turn_splits_oversized_message(styx_env) -> None:
+    """Defect-fix B + регрессия бага: реплика 15090 символов
+    (документ-Markdown через turn-канал) больше НЕ роняет
+    sync_turn по CHECK constraint memories_content_length_check.
+
+    Реплика режется на N рядов дневника ≤ лимита; пересборка через
+    recent_messages даёт обратно целостный блок.
+    """
+    p = StyxMemoryCore()
+    sid = str(uuid.uuid4())
+    p.initialize(session_id=sid, agent_identity="alpha")
+    try:
+        # 15090 символов — точный размер из боевого инцидента.
+        big_user = "Параграф документа с текстом.\n\n" * 503  # ~15090 chars
+        assert len(big_user) > 14000
+        # Раньше это бросало CheckViolation; теперь — успешный split.
+        p.sync_turn(big_user, "краткий ответ", session_id=sid)
+
+        # Сырые ряды: user разрезан на несколько частей, assistant — один.
+        raw = p.queries.recent_messages(
+            limit=50, session_id=uuid.UUID(sid), reassemble_groups=False,
+        )
+        user_parts = [m for m in raw if m.role == "user"]
+        assert len(user_parts) > 1
+        # Каждая часть ≤ CHECK constraint лимита.
+        assert all(len(m.content) <= 2400 for m in raw)
+        # Все части — одна группа.
+        groups = {m.metadata["msg_group"] for m in user_parts}
+        assert len(groups) == 1
+
+        # Пересборка: группа склеена обратно в один блок.
+        reassembled = p.queries.recent_messages(
+            limit=50, session_id=uuid.UUID(sid),
+        )
+        users = [m for m in reassembled if m.role == "user"]
+        assert len(users) == 1
+        assert users[0].content == big_user
+    finally:
+        p.shutdown()
+
+
+def test_sync_turn_rollback_guard_keeps_connection_usable(
+    styx_env, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defect-fix 2: при ошибке записи в sync_turn соединение
+    остаётся рабочим (rollback), а не aborted-state до рестарта."""
+    from styx.storage import queries as queries_mod
+
+    p = StyxMemoryCore()
+    sid = str(uuid.uuid4())
+    p.initialize(session_id=sid, agent_identity="alpha")
+    try:
+        # Эмулируем сбой записи: insert_message бросает исключение.
+        orig = queries_mod.AgentScopedQueries.insert_message
+
+        def _boom(self, **kwargs):  # noqa: ANN001
+            raise RuntimeError("эмулированный сбой записи")
+
+        monkeypatch.setattr(
+            queries_mod.AgentScopedQueries, "insert_message", _boom,
+        )
+        with pytest.raises(RuntimeError, match="эмулированн"):
+            p.sync_turn("реплика", "ответ", session_id=sid)
+
+        # Восстанавливаем insert_message — соединение должно быть рабочим.
+        monkeypatch.setattr(
+            queries_mod.AgentScopedQueries, "insert_message", orig,
+        )
+        # Следующий sync_turn проходит — connection не в aborted-state.
+        p.sync_turn("после сбоя", "и ответ", session_id=sid)
+        assert p.queries.count_messages(session_id=uuid.UUID(sid)) == 2
+    finally:
+        p.shutdown()
+
+
 def test_prefetch_and_system_prompt_block_empty_in_v1(styx_env) -> None:
     p = StyxMemoryCore()
     sid = str(uuid.uuid4())

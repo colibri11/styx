@@ -435,12 +435,21 @@ class IngestDocumentResponse(BaseModel):
     """Результат /ingest_document.
 
     - ``deduplicated=False`` — новый document создан, ``chunks_count``
-      реальное число chunks с embedding'ами.
+      реальное число chunks.
     - ``deduplicated=True``  — повторный ingest того же файла; existing
       ``document_id`` возвращён, chunks_count=0 (нет новых INSERT'ов).
 
     ``content_hash`` — что использовалось при INSERT'е (SHA256 file
     bytes либо explicit override).
+
+    ``act_marker_memory_id`` (Defect-fix A) — id tail-memory с
+    маркером акта архивации («я положил в архив документ»; IAmBook
+    §V). ``None`` при dedup.
+
+    ``chunks_embedded_inline`` (Defect-fix A) — False означает, что
+    документ большой: chunks записаны без embedding'а, embedding
+    выполняется async в worker pool. ``search_archive`` найдёт
+    документ после того как async-задача отработает.
     """
 
     document_id: str
@@ -451,6 +460,8 @@ class IngestDocumentResponse(BaseModel):
     size_bytes: int
     char_count: int
     content_hash: str
+    act_marker_memory_id: str | None = None
+    chunks_embedded_inline: bool = True
 
 
 class IngestExperienceResponse(BaseModel):

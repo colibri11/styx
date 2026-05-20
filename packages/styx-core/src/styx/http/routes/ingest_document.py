@@ -55,4 +55,6 @@ def ingest_document(req: IngestDocumentRequest) -> IngestDocumentResponse:
         size_bytes=outcome.size_bytes,
         char_count=outcome.char_count,
         content_hash=outcome.content_hash,
+        act_marker_memory_id=outcome.act_marker_memory_id,
+        chunks_embedded_inline=outcome.chunks_embedded_inline,
     )

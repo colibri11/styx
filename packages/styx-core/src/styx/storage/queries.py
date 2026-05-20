@@ -35,6 +35,25 @@ from .scoring import (
 from .search_weights import SearchConfig
 
 
+# CHECK constraint memories_content_length_check (миграция 0002):
+# length(content) <= 2400. 2400 — размер семантической единицы
+# (IAmBook §V): ряд memories embed'ится в одну вектор-точку. Это не
+# настройка БД — увеличивать нельзя, иначе память перестанет быть
+# точкой. insert_message страхует инвариант явной ошибкой ДО того как
+# Postgres вернёт CheckViolation.
+MEMORIES_CONTENT_LIMIT = 2400
+
+
+class ContentTooLongError(ValueError):
+    """content превышает MEMORIES_CONTENT_LIMIT — нарушение инварианта.
+
+    Бросается ``insert_message`` как страховка: ни один путь записи в
+    ``memories`` не должен писать content длиннее лимита. Если эта
+    ошибка всплыла — значит слой провайдера не разрезал реплику
+    заранее (см. ``engine.message_splitter`` / ``route_long_content``).
+    """
+
+
 @dataclass(frozen=True)
 class StoredMessage:
     id: uuid.UUID
@@ -209,6 +228,17 @@ class AgentScopedQueries:
         embedding: list[float] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> uuid.UUID:
+        if len(content) > MEMORIES_CONTENT_LIMIT:
+            # Страховка нижнего уровня (defense-in-depth): не позволяем
+            # CheckViolation'у memories_content_length_check дойти до
+            # Postgres и оставить транзакцию в aborted-state. Слой
+            # провайдера (sync_turn / ingest_single_message) обязан
+            # разрезать длинный content заранее через message_splitter.
+            raise ContentTooLongError(
+                f"insert_message: content {len(content)} chars > лимита "
+                f"{MEMORIES_CONTENT_LIMIT} — слой провайдера обязан был "
+                "разрезать реплику заранее (message_splitter)"
+            )
         sid = _as_uuid(session_id) if session_id is not None else None
         meta = metadata or {}
         with self._conn.cursor() as cur:
@@ -273,10 +303,30 @@ class AgentScopedQueries:
         *,
         limit: int,
         session_id: uuid.UUID | str | None = None,
+        reassemble_groups: bool = True,
     ) -> list[StoredMessage]:
+        """Последние ``limit`` рядов дневника, newest first (seq DESC).
+
+        Defect-fix B: длинная реплика хранится в ``memories`` как
+        группа рядов (``metadata.msg_group``). Чтобы свежее сообщение
+        не въехало в окно половиной:
+
+        - **LIMIT-boundary**: если ``limit`` обрывает группу на нижней
+          (старейшей) границе окна — добираем недостающие части группы
+          (ряды с меньшим ``seq``), чтобы группа попала в окно целиком.
+        - **Пересборка** (``reassemble_groups=True``, default): ряды
+          одной группы склеиваются обратно в один блок
+          (``reassemble_message_groups``). ``reassemble_groups=False``
+          возвращает сырые ряды с group-маркерами — для consumer'ов,
+          которым нужны отдельные части (re-embed CLI, audit).
+
+        Порядок результата — newest first (как до Defect-fix'а);
+        пересборка порядок не меняет (группа занимает позицию своего
+        первого ряда).
+        """
         params: list[Any] = [self._agent_id]
         sql = (
-            "SELECT id, session_id, role, content, metadata, created_at "
+            "SELECT id, session_id, role, content, metadata, created_at, seq "
             "FROM memories WHERE agent_id = %s"
         )
         if session_id is not None:
@@ -292,7 +342,30 @@ class AgentScopedQueries:
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-        return [
+        # LIMIT-boundary: самый старый из выбранных рядов (последний в
+        # DESC-порядке) может быть частью группы, у которой более
+        # ранние части (меньший seq) в окно не попали. Добираем их —
+        # иначе свежий блок въедет в окно обрезанным.
+        if rows:
+            oldest = rows[-1]
+            meta = oldest.get("metadata")
+            if isinstance(meta, dict):
+                group = meta.get("msg_group")
+                part = meta.get("part")
+                if (
+                    isinstance(group, str) and group
+                    and isinstance(part, int) and part > 0
+                ):
+                    extra = self._fetch_group_prefix(
+                        msg_group=group,
+                        below_seq=oldest["seq"],
+                    )
+                    # extra — ряды с меньшим seq в DESC-порядке;
+                    # дописываем в хвост (он и есть «старее»).
+                    rows = rows + extra
+
+        # Порядок newest-first (seq DESC) — как до Defect-fix'а.
+        out = [
             StoredMessage(
                 id=r["id"],
                 session_id=r["session_id"],
@@ -303,6 +376,59 @@ class AgentScopedQueries:
             )
             for r in rows
         ]
+        if not reassemble_groups:
+            return out
+
+        from styx.engine.message_splitter import reassemble_message_groups
+
+        merged = reassemble_message_groups(
+            [
+                {
+                    "id": m.id,
+                    "session_id": m.session_id,
+                    "role": m.role,
+                    "content": m.content,
+                    "metadata": m.metadata,
+                    "created_at": m.created_at,
+                }
+                for m in out
+            ]
+        )
+        return [
+            StoredMessage(
+                id=m["id"],
+                session_id=m["session_id"],
+                role=m["role"],
+                content=m["content"],
+                metadata=m["metadata"],
+                created_at=m["created_at"],
+            )
+            for m in merged
+        ]
+
+    def _fetch_group_prefix(
+        self,
+        *,
+        msg_group: str,
+        below_seq: int,
+    ) -> list[dict[str, Any]]:
+        """Добрать недостающие ранние части группы для recent_messages.
+
+        Возвращает ряды той же ``msg_group`` с ``seq < below_seq`` в
+        DESC-порядке по seq. Используется только когда LIMIT оборвал
+        группу на границе окна.
+        """
+        sql = (
+            "SELECT id, session_id, role, content, metadata, created_at, seq "
+            "FROM memories "
+            "WHERE agent_id = %s "
+            "  AND seq < %s "
+            "  AND metadata->>'msg_group' = %s "
+            "ORDER BY seq DESC"
+        )
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (self._agent_id, below_seq, msg_group))
+            return list(cur.fetchall())
 
     def count_messages(self, *, session_id: uuid.UUID | str | None = None) -> int:
         params: list[Any] = [self._agent_id]
@@ -575,6 +701,19 @@ class AgentScopedQueries:
 
         Не делает commit — caller управляет транзакцией.
         """
+        if len(content) > MEMORIES_CONTENT_LIMIT:
+            # Симметричная страховка к insert_message (defense-in-depth):
+            # не позволяем CheckViolation'у memories_content_length_check
+            # дойти до Postgres и оставить транзакцию в aborted-state.
+            # Легальные subjective-пути пишут ≤ store_routing_summary_chars
+            # (1500) — guard их не задевает; срабатывает только на
+            # нарушении инварианта (caller обязан был store-route'ить
+            # длинный content в documents+chunks).
+            raise ContentTooLongError(
+                f"insert_memory: content {len(content)} chars > лимита "
+                f"{MEMORIES_CONTENT_LIMIT} — caller обязан был store-"
+                "route'ить длинный content (engine.store_routing)"
+            )
         sid = _as_uuid(session_id) if session_id is not None else None
         meta = metadata or {}
         cols = [
@@ -1167,6 +1306,49 @@ class AgentScopedQueries:
                         int(char_end),
                     ),
                 )
+
+    def chunks_without_embedding(
+        self, document_id: uuid.UUID
+    ) -> list[tuple[uuid.UUID, str]]:
+        """Chunks документа с ``embedding IS NULL`` (Defect-fix A).
+
+        Используется async-handler'ом file-ingest'а: большой документ
+        INSERT'ится с chunks без embedding'а, handler потом их
+        embed'ит. agent_id-scope через JOIN на documents.
+
+        Возвращает list ``(chunk_id, content)`` в порядке position.
+        Не делает commit.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.id, c.content "
+                "  FROM chunks c "
+                "  JOIN documents d ON d.id = c.document_id "
+                " WHERE c.document_id = %s "
+                "   AND d.agent_id = %s "
+                "   AND c.embedding IS NULL "
+                " ORDER BY c.position ASC",
+                (document_id, self._agent_id),
+            )
+            return [(r[0], r[1]) for r in cur.fetchall()]
+
+    def update_chunk_embedding(
+        self, chunk_id: uuid.UUID, embedding: list[float]
+    ) -> None:
+        """Записать вектор в ``chunks.embedding`` (Defect-fix A).
+
+        agent_id-scope через EXISTS на documents — chunk нельзя
+        обновить, если его документ принадлежит другому агенту.
+        Не делает commit.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE chunks SET embedding = %s "
+                " WHERE id = %s "
+                "   AND document_id IN ("
+                "       SELECT id FROM documents WHERE agent_id = %s)",
+                (_vector_literal(embedding), chunk_id, self._agent_id),
+            )
 
     # -- search_archive (волна 20) ---------------------------------------
 

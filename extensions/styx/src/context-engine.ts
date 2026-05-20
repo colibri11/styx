@@ -52,6 +52,7 @@ import {
   type StyxLogger,
   type StyxMessage,
 } from "./client.js";
+import { interceptDocumentAttachments } from "./media-attachments.js";
 
 export type ResolveAgentId = (openclawAgentId: string) => Promise<string>;
 
@@ -249,13 +250,26 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
         return { ingested: false };
       }
       const m = message as Record<string, unknown>;
+      // Defect-fix A: документы-вложения single-message ingest'а тоже
+      // уходят documents-каналом, а не turn-каналом как текст.
+      const [intercepted] = await interceptDocumentAttachments(
+        [
+          {
+            role: asString(m["role"], "user"),
+            content: extractMessageContent(m["content"]),
+          },
+        ],
+        agentId,
+        client,
+        logger,
+      );
       try {
         const resp = await client.contextIngest({
           agent_id: agentId,
           session_id: sessionId || null,
           message: {
-            role: asString(m["role"], "user"),
-            content: asString(m["content"], ""),
+            role: asString(intercepted["role"], "user"),
+            content: asString(intercepted["content"], ""),
           },
           is_heartbeat: false,
         });
@@ -270,7 +284,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       if (Boolean(opts["isHeartbeat"])) {
         return { ingestedCount: 0 };
       }
-      const messages = extractMessages(opts);
+      let messages = extractMessages(opts);
       if (messages.length === 0) {
         return { ingestedCount: 0 };
       }
@@ -280,6 +294,15 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       if (agentId === null) {
         return { ingestedCount: 0 };
       }
+      // Defect-fix A: документы-вложения turn'а уходят
+      // documents-каналом (/ingest_document), а в turn-текст идёт
+      // только ссылка — документ не едет turn-каналом как текст.
+      messages = (await interceptDocumentAttachments(
+        messages as Array<Record<string, unknown>>,
+        agentId,
+        client,
+        logger,
+      )) as StyxMessage[];
       try {
         const resp = await client.contextIngestBatch({
           agent_id: agentId,
@@ -425,13 +448,20 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
         // /context/ingest_batch принимает только это; tool_calls/name
         // и прочие OpenClaw-специфичные поля игнорируются на core
         // (model_config extra=ignore).
-        const styxTail: StyxMessage[] = tail.map((m) => ({
+        let styxTail: StyxMessage[] = tail.map((m) => ({
           role: asString(m["role"], "user"),
           // extractMessageContent — handle multimodal AgentMessage shape
           // (content: string | Array<{type:'text', text:'...'}>) — без
           // него получим '[object Object]' в memories.
           content: extractMessageContent(m["content"]),
         }));
+        // Defect-fix A: документы-вложения turn'а → documents-канал.
+        styxTail = (await interceptDocumentAttachments(
+          styxTail as Array<Record<string, unknown>>,
+          agentId,
+          client,
+          logger,
+        )) as StyxMessage[];
         try {
           await client.contextIngestBatch({
             agent_id: agentId,

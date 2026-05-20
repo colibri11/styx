@@ -217,6 +217,14 @@
 | `STYX_INGEST_DOC_ROOTS` | (empty) | Colon-separated whitelist абсолютных директорий. Production: `/var/lib/styx/docs:/var/lib/styx/uploads`. Empty = lab mode (любой path). |
 | `STYX_INGEST_DOC_MAX_BYTES` | `52428800` | Hard cap размера файла (50 MiB). |
 
+> **OpenClaw media-store.** Когда OpenClaw plugin перехватывает
+> вложения turn'а, он шлёт `/ingest_document` path-mode'ом на файлы
+> из media-store OpenClaw (`media://inbound/...`). Если
+> `STYX_INGEST_DOC_ROOTS` непуст, директория media-store OpenClaw
+> **обязана быть в whitelist** — иначе resolved path не пройдёт
+> проверку и `/ingest_document` вернёт 422. В lab mode (пустой
+> whitelist) ограничения нет.
+
 ## Dialogue routes
 
 | Var | Default | Назначение |

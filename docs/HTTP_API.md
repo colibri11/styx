@@ -168,6 +168,18 @@ agent_id обновляет session_id и tools, не пересоздаёт sta
 Запись turn'а — INSERT memory, embedding-after-commit, sentiment hot-path,
 importance enqueue, classifier enqueue.
 
+**Defect-fix B — split больших реплик:** реплика (user/assistant)
+длиннее `STYX_MESSAGE_SPLIT_PART_CHARS` (default 2000) режется на N
+рядов дневника того же role/session, каждый ≤ лимита (CHECK
+constraint `memories_content_length_check`, 2400). Все ряды остаются
+в `memories` (дневник = речь целиком; IAmBook §V — в архив части НЕ
+уходят). Группа помечается в metadata `msg_group` (uuid) / `part`
+(индекс) / `parts` (всего); композиция (`StyxComposer`,
+`recent_messages`) пересобирает группу обратно в один блок. Inline-
+embed ограничен `STYX_MESSAGE_SPLIT_INLINE_EMBED_CAP` (default 4) —
+остаток embed'ит re-embed CLI / воркер. Реплика ≤ лимита → один ряд,
+поведение не меняется.
+
 **Request:**
 ```json
 {
@@ -797,11 +809,26 @@ wrapper'а, симметрия).
 
 ### `POST /ingest_document`
 
-File-ingest pipeline (волна 28) — core читает файл по абсолютному
-пути, парсит (PDF/DOCX/XLSX/Markdown/text), режет на chunks через
-`route_long_content`, embed'ит, INSERT'ит document + chunks.
-tail-memory НЕ создаётся (D5 в waves/28) — pull-only архив,
-доступен через `/search_archive`, не инжектится в recall.
+File-ingest pipeline (волна 28 + Defect-fix A) — core читает файл по
+абсолютному пути, парсит (PDF/DOCX/XLSX/Markdown/text), режет на
+chunks через `route_long_content`, embed'ит, INSERT'ит document +
+chunks. Документ-артефакт уходит в архив (`documents`+`chunks`),
+доступен через `/search_archive`.
+
+**Defect-fix A — маркер акта вместо «no tail-memory»:** документ ≠
+память (IAmBook §V). В `memories` пишется tail-memory с **маркером
+акта архивации** — «я положил в архив документ такого-то рода»
+(тип / происхождение / о чём / ссылка `styx://store/<id>`), БЕЗ
+содержания документа. Маркер — это след акта в линии `я`. Раньше
+(волна 28) tail-memory не создавалась вовсе.
+
+**Defect-fix A — async ingest большого документа:** документ, который
+chunker делит больше чем на `STYX_DOCUMENT_INGEST_ASYNC_CHUNK_
+THRESHOLD` chunks (default 12), ingest'ится async — chunks
+INSERT'ятся с `embedding=NULL`, embedding выполняется в worker pool
+(task `document_chunk_embed`), endpoint возвращается быстро
+(`chunks_embedded_inline=false`). Маркер акта embed'ится всегда
+inline (один embed — дёшево).
 
 **Lightweight plugin pattern (directive 2026-05-12):** plugin шлёт
 один POST с маленьким JSON `{path}`, core делает всё (disk read +
@@ -811,7 +838,6 @@ parse + chunk + embed + INSERT). Multipart upload не используется.
 - Selective gatekeeper НЕ применяется.
 - Auto-link НЕ применяется.
 - Classifier-enqueue / sentiment hot-path НЕ применяются.
-- tail-memory в `memories` НЕ создаётся (D5).
 
 **Request:**
 ```json
@@ -839,14 +865,24 @@ parse + chunk + embed + INSERT). Multipart upload не используется.
   "original_name": "spec.pdf",
   "size_bytes": 12345,
   "char_count": 5000,
-  "content_hash": "sha256-hex-64-chars"
+  "content_hash": "sha256-hex-64-chars",
+  "act_marker_memory_id": "uuid",
+  "chunks_embedded_inline": true
 }
 ```
 
 `deduplicated=true` — повторный ingest того же файла (matched
 `(agent_id, content_hash)` через partial UNIQUE index
 `uq_documents_agent_content_hash`); `document_id` указывает на
-existing ряд, `chunks_count=0` (нет новых INSERT'ов).
+existing ряд, `chunks_count=0` (нет новых INSERT'ов),
+`act_marker_memory_id=null` (новый маркер не создаётся — акт уже
+зафиксирован при первом ingest'е).
+
+`act_marker_memory_id` — id tail-memory с маркером акта архивации
+(Defect-fix A); `null` при dedup. `chunks_embedded_inline=false` —
+большой документ, chunks embed'ятся async в worker pool;
+`/search_archive` найдёт документ после того как async-задача
+отработает.
 
 **Path validation pipeline (D10):**
 1. Absolute path (`Path.is_absolute()`).
@@ -878,6 +914,9 @@ existing ряд, `chunks_count=0` (нет новых INSERT'ов).
   separated whitelist абсолютных директорий. Production:
   `STYX_INGEST_DOC_ROOTS=/var/lib/styx/docs:/var/lib/styx/uploads`.
 - `STYX_INGEST_DOC_MAX_BYTES` (default `52428800` = 50 MiB).
+- `STYX_DOCUMENT_INGEST_ASYNC_CHUNK_THRESHOLD` (default `12`) —
+  документ с числом chunks больше порога ingest'ится async
+  (Defect-fix A).
 
 **Plugin wrappers (D14):** OpenClaw plugin `styx_ingest_document`
 tool (factory + impl + lazy HTTP call). Hermes plugin —

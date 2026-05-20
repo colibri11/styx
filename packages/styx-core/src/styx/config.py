@@ -121,6 +121,19 @@ class StyxConfig:
     store_routing_chunk_size: int = 1600
     store_routing_chunk_overlap: int = 320
     store_routing_summary_chars: int = 1500
+    # Сплиттер больших реплик дневника (Defect-fix B). Реплику
+    # (user/assistant) длиннее store_routing_limit режем на ряды
+    # ≤ message_split_part_chars — каждый остаётся в memories (дневник
+    # = речь, не архив; IAmBook §V). message_split_inline_embed_cap —
+    # сколько частей embed'ить inline в hot-path; остаток embed'ит
+    # re-embed CLI / воркер (embedding NULL, как при EmbeddingError).
+    message_split_part_chars: int = 2000
+    message_split_inline_embed_cap: int = 4
+    # Async-порог file-ingest'а (Defect-fix A). Документ, который
+    # chunker делит больше чем на document_ingest_async_chunk_threshold
+    # chunks, ingest'ится через worker pool (endpoint возвращается
+    # быстро). Документ меньше — inline.
+    document_ingest_async_chunk_threshold: int = 12
     # File-ingest pipeline (волна 28). STYX_INGEST_DOC_ROOTS —
     # colon-separated whitelist абсолютных директорий (как PATH); empty
     # → no whitelist (lab mode). max_bytes — отказ при превышении.
@@ -421,6 +434,9 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "store_routing_chunk_size",
         "store_routing_chunk_overlap",
         "store_routing_summary_chars",
+        "message_split_part_chars",
+        "message_split_inline_embed_cap",
+        "document_ingest_async_chunk_threshold",
         "ingest_doc_enabled",
         "ingest_doc_roots",
         "ingest_doc_max_bytes",
@@ -481,6 +497,25 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "log_format",
     }
     extra = {k: v for k, v in merged.items() if k not in known}
+
+    # Валидация message_split_part_chars против CHECK constraint'а
+    # memories_content_length_check (MEMORIES_CONTENT_LIMIT = 2400):
+    # сплиттер режет реплику на части ≤ part_chars, каждая остаётся
+    # одним рядом memories. Если оператор выставит part_chars ≥ лимита
+    # — каждый длинный turn будет валиться с ContentTooLongError.
+    # Fail-fast на старте, не молчаливый clamp. Lazy import — чтобы не
+    # тянуть storage в config на уровне модуля.
+    from styx.storage.queries import MEMORIES_CONTENT_LIMIT
+
+    split_part_chars = int(merged.get("message_split_part_chars", 2000))
+    if split_part_chars >= MEMORIES_CONTENT_LIMIT:
+        raise ValueError(
+            f"message_split_part_chars ({split_part_chars}) должен быть "
+            f"строго меньше MEMORIES_CONTENT_LIMIT ({MEMORIES_CONTENT_LIMIT}): "
+            "иначе нарезанные части превысят CHECK constraint memories.content "
+            "и каждый длинный turn упадёт с ContentTooLongError. "
+            "Снизь STYX_MESSAGE_SPLIT_PART_CHARS / styx.json."
+        )
 
     ollama_default = merged.get("ollama_url", "http://ollama:11434")
     return StyxConfig(
@@ -553,6 +588,14 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         store_routing_chunk_overlap=int(merged.get("store_routing_chunk_overlap", 320)),
         store_routing_summary_chars=int(
             merged.get("store_routing_summary_chars", 1500)
+        ),
+        # split_part_chars вычислен и провалидирован выше — переиспользуем.
+        message_split_part_chars=split_part_chars,
+        message_split_inline_embed_cap=int(
+            merged.get("message_split_inline_embed_cap", 4)
+        ),
+        document_ingest_async_chunk_threshold=int(
+            merged.get("document_ingest_async_chunk_threshold", 12)
         ),
         ingest_doc_enabled=bool(merged.get("ingest_doc_enabled", True)),
         ingest_doc_roots=list(merged.get("ingest_doc_roots", []) or []),
@@ -917,6 +960,21 @@ def _read_env() -> dict[str, Any]:
         "store_routing_summary_chars": (
             int(os.environ["STYX_STORE_ROUTING_SUMMARY_CHARS"])
             if os.environ.get("STYX_STORE_ROUTING_SUMMARY_CHARS")
+            else None
+        ),
+        "message_split_part_chars": (
+            int(os.environ["STYX_MESSAGE_SPLIT_PART_CHARS"])
+            if os.environ.get("STYX_MESSAGE_SPLIT_PART_CHARS")
+            else None
+        ),
+        "message_split_inline_embed_cap": (
+            int(os.environ["STYX_MESSAGE_SPLIT_INLINE_EMBED_CAP"])
+            if os.environ.get("STYX_MESSAGE_SPLIT_INLINE_EMBED_CAP")
+            else None
+        ),
+        "document_ingest_async_chunk_threshold": (
+            int(os.environ["STYX_DOCUMENT_INGEST_ASYNC_CHUNK_THRESHOLD"])
+            if os.environ.get("STYX_DOCUMENT_INGEST_ASYNC_CHUNK_THRESHOLD")
             else None
         ),
         "ingest_doc_enabled": (

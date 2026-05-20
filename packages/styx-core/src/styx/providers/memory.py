@@ -327,6 +327,69 @@ class StyxMemoryCore:
 
     # -- write path ------------------------------------------------------
 
+    def _insert_message_parts(
+        self,
+        *,
+        role: str,
+        content: str,
+        session_id: uuid.UUID | None,
+    ) -> list[tuple[uuid.UUID, str]]:
+        """Вставить реплику дневника, разрезав её при необходимости.
+
+        Defect-fix B. Реплика ≤ ``message_split_part_chars`` пишется
+        одним рядом, без group-metadata — поведение не меняется.
+        Реплика длиннее режется ``message_splitter.split_message`` на N
+        non-overlapping частей того же ``role`` / session; каждая часть
+        — отдельный ряд ``memories`` (дневник = речь целиком, IAmBook
+        §V; в архив части НЕ уходят). Все ряды группы получают в
+        metadata ``msg_group`` (общий uuid), ``part`` (0-based индекс),
+        ``parts`` (всего) — композиция пересобирает их обратно.
+
+        Не делает commit — caller управляет транзакцией.
+
+        Возвращает list ``(memory_id, part_content)`` в порядке частей.
+        """
+        assert self._queries is not None
+        from styx.engine.message_splitter import split_message
+
+        part_chars = (
+            self._config.message_split_part_chars
+            if self._config is not None
+            else 2000
+        )
+        parts = split_message(content, part_chars=part_chars)
+
+        if len(parts) <= 1:
+            # Короткая реплика — один ряд без group-metadata.
+            mid = self._queries.insert_message(
+                role=role,
+                content=content,
+                session_id=session_id,
+            )
+            return [(mid, content)]
+
+        # Длинная реплика — группа рядов. Один turn-reply = одна группа.
+        group_id = str(uuid.uuid4())
+        out: list[tuple[uuid.UUID, str]] = []
+        for idx, part_text in enumerate(parts):
+            mid = self._queries.insert_message(
+                role=role,
+                content=part_text,
+                session_id=session_id,
+                metadata={
+                    "msg_group": group_id,
+                    "part": idx,
+                    "parts": len(parts),
+                },
+            )
+            out.append((mid, part_text))
+        log.info(
+            "sync_turn: реплика role=%s длиной %d разрезана на %d ряд(ов) "
+            "(msg_group=%s)",
+            role, len(content), len(parts), group_id,
+        )
+        return out
+
     def sync_turn(
         self,
         user_content: str,
@@ -349,30 +412,69 @@ class StyxMemoryCore:
             if self._queries is None:
                 log.warning("sync_turn: queries обнулены во время ожидания lock — пропуск")
                 return
-            if target_session is not None:
-                self._queries.upsert_session(target_session)
-            if user_content:
-                mid = self._queries.insert_message(
-                    role="user",
-                    content=user_content,
-                    session_id=target_session,
-                )
-                inserted_ids.append((mid, user_content))
-            if assistant_content:
-                mid = self._queries.insert_message(
-                    role="assistant",
-                    content=assistant_content,
-                    session_id=target_session,
-                )
-                inserted_ids.append((mid, assistant_content))
-            self._conn.commit()  # type: ignore[union-attr]
+            # Defect-fix 2 (rollback-guard): первый блок insert+commit
+            # обёрнут в try/except. Если запись упадёт (например,
+            # ContentTooLongError из insert_message при дефекте слоя
+            # выше) — делаем rollback, чтобы постоянное self._conn не
+            # осталось в aborted-состоянии (InFailedSqlTransaction до
+            # рестарта демона). Ошибку пробрасываем наружу: caller
+            # (HTTP route) увидит 500, но соединение останется рабочим
+            # для следующих запросов.
+            try:
+                if target_session is not None:
+                    self._queries.upsert_session(target_session)
+                # Defect-fix B: длинная реплика дневника режется на N
+                # рядов того же role/session (дневник = речь целиком,
+                # IAmBook §V), каждый ≤ message_split_part_chars.
+                # Группа помечается msg_group/part/parts в metadata.
+                if user_content:
+                    inserted_ids.extend(
+                        self._insert_message_parts(
+                            role="user",
+                            content=user_content,
+                            session_id=target_session,
+                        )
+                    )
+                if assistant_content:
+                    inserted_ids.extend(
+                        self._insert_message_parts(
+                            role="assistant",
+                            content=assistant_content,
+                            session_id=target_session,
+                        )
+                    )
+                self._conn.commit()  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 — rollback-guard
+                log.error("sync_turn insert упал: %s", exc)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:  # noqa: BLE001 — defensive
+                    pass
+                raise
 
             # Embed-after-commit (sync, decisions § 17.A1).
             # Любая ошибка Ollama → лог error, embedding остаётся NULL,
             # memory не подтягивается в recall до следующего успешного
             # embed (отдельный re-embed CLI — волна 7e).
+            #
+            # Defect-fix B: при split'е реплики на много рядов число
+            # inline-embed'ов за turn ограничено message_split_inline_
+            # embed_cap — остаток оставляем re-embed CLI / воркеру
+            # (embedding NULL, как при EmbeddingError).
             if self._embedding is not None:
-                for mid, content in inserted_ids:
+                embed_cap = (
+                    self._config.message_split_inline_embed_cap
+                    if self._config is not None
+                    else len(inserted_ids)
+                )
+                embed_targets = inserted_ids[:embed_cap]
+                if len(inserted_ids) > len(embed_targets):
+                    log.info(
+                        "sync_turn: %d рядов сверх inline-embed cap (%d) "
+                        "оставлены под re-embed",
+                        len(inserted_ids) - len(embed_targets), embed_cap,
+                    )
+                for mid, content in embed_targets:
                     try:
                         vec = self._embedding.embed(content)
                     except EmbeddingError as exc:
@@ -498,8 +600,13 @@ class StyxMemoryCore:
         требующие парности, тут не работают. Полный stack — через
         ``ingest_batch_pairwise`` / ``sync_turn``.
 
-        Возвращает memory_id если запись прошла; ``None`` — если queries
-        обнулены (core не initialized) или content пуст.
+        Defect-fix B: длинная реплика режется на N рядов того же
+        role/session (дневник = речь целиком; IAmBook §V) через
+        ``_insert_message_parts``. Возвращается id первого ряда группы.
+
+        Возвращает memory_id если запись прошла (для split'а — id
+        первой части); ``None`` — если queries обнулены (core не
+        initialized) или content пуст.
         """
         if self._queries is None:
             log.warning("ingest_single_message до initialize — пропуск")
@@ -513,40 +620,59 @@ class StyxMemoryCore:
             if self._queries is None:
                 log.warning("ingest_single_message: queries обнулены — пропуск")
                 return None
-            if target_session is not None:
-                self._queries.upsert_session(target_session)
-            mid = self._queries.insert_message(
-                role=role,
-                content=content,
-                session_id=target_session,
-            )
-            self._conn.commit()  # type: ignore[union-attr]
+            # Defect-fix 2 (rollback-guard): insert+commit обёрнут в
+            # try/except — при ошибке rollback, чтобы постоянное
+            # self._conn не осталось aborted. Ошибку пробрасываем.
+            try:
+                if target_session is not None:
+                    self._queries.upsert_session(target_session)
+                inserted = self._insert_message_parts(
+                    role=role,
+                    content=content,
+                    session_id=target_session,
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 — rollback-guard
+                log.error("ingest_single_message insert упал: %s", exc)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:  # noqa: BLE001 — defensive
+                    pass
+                raise
 
             # Embed-after-commit (sync). Любая ошибка Ollama → лог,
             # embedding остаётся NULL, recall не подтянет до re-embed.
+            # Inline-embed cap (Defect-fix B): при split'е на много
+            # рядов лишние оставляем под re-embed.
             if self._embedding is not None:
-                try:
-                    vec = self._embedding.embed(content)
-                except EmbeddingError as exc:
-                    log.warning(
-                        "embed-after-commit упал для memory %s: %s",
-                        mid, exc,
-                    )
-                    return mid
-                try:
-                    self._queries.update_embedding(mid, vec)
-                    self._conn.commit()  # type: ignore[union-attr]
-                except Exception as exc:  # pragma: no cover — defensive
-                    log.warning(
-                        "update_embedding упал для memory %s: %s",
-                        mid, exc,
-                    )
+                embed_cap = (
+                    self._config.message_split_inline_embed_cap
+                    if self._config is not None
+                    else len(inserted)
+                )
+                for mid, part_content in inserted[:embed_cap]:
                     try:
-                        self._conn.rollback()  # type: ignore[union-attr]
-                    except Exception:
-                        pass
+                        vec = self._embedding.embed(part_content)
+                    except EmbeddingError as exc:
+                        log.warning(
+                            "embed-after-commit упал для memory %s: %s",
+                            mid, exc,
+                        )
+                        continue
+                    try:
+                        self._queries.update_embedding(mid, vec)
+                        self._conn.commit()  # type: ignore[union-attr]
+                    except Exception as exc:  # pragma: no cover — defensive
+                        log.warning(
+                            "update_embedding упал для memory %s: %s",
+                            mid, exc,
+                        )
+                        try:
+                            self._conn.rollback()  # type: ignore[union-attr]
+                        except Exception:
+                            pass
 
-        return mid
+        return inserted[0][0] if inserted else None
 
     # -- subjective writes (волна 17) ------------------------------------
 
@@ -957,9 +1083,14 @@ class StyxMemoryCore:
             )
 
         from styx.engine.document_ingest import ingest_document
+        from styx.storage.queries import enqueue_llm_task
+        from styx.workers.handlers.document_chunk_embed import (
+            DOCUMENT_CHUNK_EMBED_TASK_TYPE,
+        )
 
         doc_cfg = self._config.document_ingest_config()
         store_cfg = self._config.store_routing_config()
+        async_threshold = self._config.document_ingest_async_chunk_threshold
 
         with self._write_lock:
             try:
@@ -973,7 +1104,29 @@ class StyxMemoryCore:
                     visibility=visibility,
                     metadata=metadata,
                     content_hash=content_hash,
+                    async_chunk_threshold=async_threshold,
                 )
+                # Defect-fix A: большой документ — chunks записаны с
+                # embedding=NULL, embedding откладывается в worker pool.
+                # Enqueue идёт в той же транзакции что и INSERT'ы:
+                # либо всё закоммитилось, либо всё откатилось.
+                if (
+                    not result.deduplicated
+                    and not result.chunks_embedded_inline
+                ):
+                    enqueue_llm_task(
+                        self._conn,
+                        task_type=DOCUMENT_CHUNK_EMBED_TASK_TYPE,
+                        payload={
+                            "agent_id": self._agent_id,
+                            "document_id": str(result.document_id),
+                        },
+                    )
+                    log.info(
+                        "ingest_document: документ %s (%d chunks) — "
+                        "embedding chunks отложен в worker pool",
+                        result.document_id, result.chunks_count,
+                    )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
@@ -988,6 +1141,12 @@ class StyxMemoryCore:
                 size_bytes=result.size_bytes,
                 char_count=result.char_count,
                 content_hash=result.content_hash,
+                act_marker_memory_id=(
+                    str(result.act_marker_memory_id)
+                    if result.act_marker_memory_id is not None
+                    else None
+                ),
+                chunks_embedded_inline=result.chunks_embedded_inline,
             )
 
     # -- dialogue tools (волна 24) --------------------------------------
@@ -2741,19 +2900,24 @@ class IngestOutcome:
 
 @dataclass(frozen=True)
 class IngestDocumentOutcome:
-    """Результат ``StyxMemoryCore.ingest_document`` (волна 28).
+    """Результат ``StyxMemoryCore.ingest_document`` (волна 28 + Defect-fix A).
 
-    Pipeline channel — НЕ создаёт tail-memory (D5 в waves/28). Документ
-    доступен через ``search_archive`` (pull-only).
+    Pipeline channel: документ-артефакт уходит в архив
+    (``documents``+``chunks``, доступен через ``search_archive`` —
+    pull-only). В память (``memories``) пишется tail-memory с маркером
+    акта архивации (Defect-fix A, IAmBook §V).
 
     - ``deduplicated=False`` — новый document INSERT'нут, chunks
-      посчитаны, embedding'и сохранены.
+      посчитаны, embedding'и сохранены, создан маркер акта.
     - ``deduplicated=True``  — повторный ingest того же файла (matched
       SHA256 content_hash); ``document_id`` указывает на existing
-      ряд, parser не вызывался, chunks_count=0.
+      ряд, parser не вызывался, chunks_count=0, новый маркер не
+      создаётся (акт уже зафиксирован при первом ingest'е).
 
     ``content_hash`` — SHA256 от file bytes либо explicit hash из
     request (D9 в waves/28).
+    ``act_marker_memory_id`` — id tail-memory с маркером акта (``None``
+    при dedup).
     """
 
     document_id: str
@@ -2764,6 +2928,8 @@ class IngestDocumentOutcome:
     size_bytes: int
     char_count: int
     content_hash: str
+    act_marker_memory_id: str | None = None
+    chunks_embedded_inline: bool = True
 
 
 # ── dialogue outcomes (волна 24) ────────────────────────────────────

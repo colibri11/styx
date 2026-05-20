@@ -62,6 +62,11 @@ class IngestDocumentResult:
     ``deduplicated=True`` — повторный ingest того же файла (matched
     content_hash); document не парсился заново, ``chunks_count``
     отражает существующий ряд (caller может re-query при необходимости).
+
+    ``act_marker_memory_id`` (Defect-fix A) — id tail-memory с
+    маркером акта архивации (``None`` при dedup или если tail не
+    создавался). Документ как артефакт лежит в архиве; в линию `я`
+    входит маркер акта «я положил в архив документ» (IAmBook §V).
     """
 
     document_id: uuid.UUID
@@ -72,6 +77,10 @@ class IngestDocumentResult:
     size_bytes: int
     char_count: int
     content_hash: str
+    act_marker_memory_id: uuid.UUID | None = None
+    # False — chunks записаны с embedding=NULL (большой документ);
+    # caller обязан enqueue'ить document_chunk_embed задачу.
+    chunks_embedded_inline: bool = True
 
 
 class _Embedder(Protocol):
@@ -154,6 +163,7 @@ def ingest_document(
     visibility: str | None = None,
     metadata: dict | None = None,
     content_hash: str | None = None,
+    async_chunk_threshold: int | None = None,
 ) -> IngestDocumentResult:
     """File-ingest entry point.
 
@@ -165,8 +175,15 @@ def ingest_document(
         4. mime detect + magic bytes verify (в parse).
         5. parse → ParsedDocument.
         6. empty text → ValueError «empty document».
-        7. route_long_content с create_tail_memory=False.
+        7. route_long_content с tail_mode='act_marker' (Defect-fix A:
+           документ-артефакт в архив, маркер акта в память).
         8. return IngestDocumentResult.
+
+    Defect-fix A: ``async_chunk_threshold`` — если документ режется на
+    больше chunks, чем порог, их embedding откладывается (chunks
+    INSERT'ятся с NULL, ``result.chunks_embedded_inline=False``);
+    caller обязан enqueue'ить ``document_chunk_embed`` задачу. Маркер
+    акта embed'ится всегда inline.
 
     Не делает commit. Транзакцией управляет caller.
 
@@ -218,16 +235,27 @@ def ingest_document(
     if metadata:
         doc_extra.update(metadata)
 
+    # Defect-fix A: документ как артефакт уходит в архив
+    # (documents+chunks), а в память (memories) пишется tail-memory с
+    # МАРКЕРОМ АКТА архивации — «я положил в архив документ такого-то
+    # рода» (IAmBook §V: документ ≠ память; в линию `я` входит акт, не
+    # содержание). tail_mode='act_marker'.
+    #
+    # kind='note' / kind_src='subjective_tail' — это и есть «tail-
+    # memory с archive_ref»; оба значения проходят CHECK constraint'ы
+    # memories (kind / kind_src), миграция не нужна.
     result: RoutedWriteResult = route_long_content(
         queries,
         embedder,
         content=parsed.text,
-        kind="document",
-        kind_src="file_ingest",
-        role="system",
+        kind="note",
+        kind_src="subjective_tail",
+        role="summary",
         config=store_routing,
         source="ingest_document",
-        create_tail_memory=False,
+        create_tail_memory=True,
+        tail_mode="act_marker",
+        async_chunk_threshold=async_chunk_threshold,
         content_hash=effective_hash,
         file_path=str(path),
         original_name=path.name,
@@ -247,4 +275,6 @@ def ingest_document(
         size_bytes=size,
         char_count=len(parsed.text),
         content_hash=effective_hash,
+        act_marker_memory_id=result.tail_memory_id,
+        chunks_embedded_inline=result.chunks_embedded_inline,
     )

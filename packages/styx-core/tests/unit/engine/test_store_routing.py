@@ -338,3 +338,203 @@ def test_session_id_and_importance_forwarded() -> None:
     assert tail_args["session_id"] == sid
     assert tail_args["importance_provisional"] == 0.7
     assert tail_args["metadata"] == {"k": "v"}
+
+
+# ── make_act_marker (Defect-fix A) ────────────────────────────────────
+
+
+def test_act_marker_carries_type_origin_and_locator() -> None:
+    from styx.engine.store_routing import make_act_marker
+
+    doc_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    marker = make_act_marker(
+        document_id=doc_id,
+        original_name="IAmBook.md",
+        mime_type="text/markdown",
+        char_count=15090,
+        source="ingest_document",
+        source_ref="media://inbound/abc.md",
+        limit=1500,
+    )
+    # Маркер несёт акт, тип, объём, происхождение, ссылку — но НЕ
+    # содержание документа.
+    assert "положил в архив" in marker
+    assert "IAmBook.md" in marker
+    assert "text/markdown" in marker
+    assert "15090" in marker
+    assert f"styx://store/{doc_id}" in marker
+    assert "media://inbound/abc.md" in marker
+    assert len(marker) <= 1500
+
+
+def test_act_marker_respects_limit_by_trimming_name() -> None:
+    from styx.engine.store_routing import make_act_marker
+
+    doc_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    marker = make_act_marker(
+        document_id=doc_id,
+        original_name="оченьдлинноеимя" * 50,
+        mime_type="application/pdf",
+        char_count=1000,
+        source="ingest_document",
+        limit=200,
+    )
+    assert len(marker) <= 200
+    # Служебные поля сохранены — усекается имя.
+    assert "application/pdf" in marker
+    assert f"styx://store/{doc_id}" in marker
+
+
+def test_act_marker_handles_missing_name_and_mime() -> None:
+    from styx.engine.store_routing import make_act_marker
+
+    doc_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    marker = make_act_marker(
+        document_id=doc_id,
+        original_name=None,
+        mime_type=None,
+        char_count=500,
+        source="ingest_document",
+        limit=1500,
+    )
+    assert "без имени" in marker
+    assert "неизвестный тип" in marker
+
+
+# ── route_long_content tail_mode='act_marker' (Defect-fix A) ──────────
+
+
+def test_act_marker_mode_tail_is_marker_not_content() -> None:
+    """tail_mode='act_marker' → tail-memory содержит маркер акта, а не
+    обрезок содержания документа."""
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+    cfg = _config()
+
+    route_long_content(
+        queries,  # type: ignore[arg-type]
+        embedder,
+        content=_LONG_CONTENT,
+        kind="note",
+        kind_src="subjective_tail",
+        role="summary",
+        config=cfg,
+        source="ingest_document",
+        tail_mode="act_marker",
+        original_name="doc.md",
+        mime_type="text/markdown",
+    )
+
+    tail_args = queries.insert_memory_args
+    assert tail_args is not None
+    tail_content = tail_args["content"]
+    # tail — маркер акта, не содержание.
+    assert "положил в архив" in tail_content
+    assert "doc.md" in tail_content
+    # Содержание документа в tail НЕ попало.
+    assert "Длинный текст про важные дела" not in tail_content
+    # documents.summary в act_marker-режиме — None (не обрезок).
+    assert queries.insert_document_args is not None
+    assert queries.insert_document_args["summary"] is None
+
+
+def test_summary_mode_tail_is_content_truncation() -> None:
+    """tail_mode='summary' (default) — tail остаётся обрезком содержания."""
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+    cfg = _config()
+
+    route_long_content(
+        queries,  # type: ignore[arg-type]
+        embedder,
+        content=_LONG_CONTENT,
+        kind="note",
+        kind_src="subjective_tail",
+        role="summary",
+        config=cfg,
+        source="memory_store",
+    )
+
+    tail_args = queries.insert_memory_args
+    assert tail_args is not None
+    # default summary-mode — tail начинается с содержания.
+    assert tail_args["content"].startswith("Длинный текст про важные дела")
+    assert queries.insert_document_args is not None
+    assert queries.insert_document_args["summary"] is not None
+
+
+def test_invalid_tail_mode_raises() -> None:
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+    with pytest.raises(ValueError, match="tail_mode"):
+        route_long_content(
+            queries,  # type: ignore[arg-type]
+            embedder,
+            content=_LONG_CONTENT,
+            kind="note",
+            kind_src="subjective_tail",
+            role="summary",
+            config=_config(),
+            source="x",
+            tail_mode="bogus",
+        )
+
+
+# ── route_long_content embed_chunks_inline / async (Defect-fix A) ─────
+
+
+def test_async_threshold_switches_chunks_to_null_embedding() -> None:
+    """Документ режется на больше chunks чем порог → chunks INSERT'ятся
+    с embedding=None, embedder.embed на chunks не вызывается."""
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+    cfg = _config()  # chunk_size=1000 → _LONG_CONTENT даёт несколько chunks
+
+    result = route_long_content(
+        queries,  # type: ignore[arg-type]
+        embedder,
+        content=_LONG_CONTENT,
+        kind="note",
+        kind_src="subjective_tail",
+        role="summary",
+        config=cfg,
+        source="ingest_document",
+        tail_mode="act_marker",
+        original_name="doc.md",
+        async_chunk_threshold=1,  # любой документ > 1 chunk → async
+    )
+
+    assert result.chunks_embedded_inline is False
+    chunks_args = queries.insert_chunks_batch_args
+    assert chunks_args is not None
+    _, chunk_records = chunks_args
+    # Все chunk-embedding'и — None (отложены в worker pool).
+    assert all(rec[2] is None for rec in chunk_records)
+    # Но маркер акта embed'ится inline — один embed call.
+    assert len(embedder.calls) == 1
+
+
+def test_below_async_threshold_embeds_chunks_inline() -> None:
+    queries = _StubQueries()
+    embedder = _StubEmbedder()
+    cfg = _config()
+
+    result = route_long_content(
+        queries,  # type: ignore[arg-type]
+        embedder,
+        content=_LONG_CONTENT,
+        kind="note",
+        kind_src="subjective_tail",
+        role="summary",
+        config=cfg,
+        source="ingest_document",
+        tail_mode="act_marker",
+        original_name="doc.md",
+        async_chunk_threshold=10_000,  # документ заведомо ниже порога
+    )
+
+    assert result.chunks_embedded_inline is True
+    chunks_args = queries.insert_chunks_batch_args
+    assert chunks_args is not None
+    _, chunk_records = chunks_args
+    assert all(isinstance(rec[2], list) for rec in chunk_records)
