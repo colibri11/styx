@@ -122,6 +122,44 @@ hermes
 - Postgres: `STYX_DATABASE_URL`
 - Ollama: `STYX_OLLAMA_URL`
 
+### 4.4. Общий media-root (documents-канал OpenClaw)
+
+Обязательно при использовании OpenClaw plugin'а с документами-вложениями
+(fix cdc5221 часть A — documents-канал).
+
+Когда OpenClaw runtime получает вложение, он сохраняет файл в свой
+media-store (`<config-dir>/media/inbound/<id>`) и в turn-текст
+вставляет маркер `[media attached: media://inbound/<id>]`. Styx
+OpenClaw plugin (`media-attachments.ts`) перехватывает маркер,
+резолвит его в **абсолютный путь файла** и шлёт этот путь в
+`POST /ingest_document` (path-mode) к styx-daemon. Демон **читает
+файл с диска сам** — он не получает байты по HTTP.
+
+Отсюда два жёстких требования к deploy:
+
+1. **Общий media-root по идентичному абсолютному пути.** styx-daemon
+   и OpenClaw-хост обязаны видеть директорию media-store по одному и
+   тому же абсолютному пути. Если они на одной машине / в одном
+   контейнере — условие выполнено само. Если в разных контейнерах —
+   смонтируйте один volume в оба по идентичному `target` (см.
+   `docker/docker-compose.test.yml`: named volume `styx-openclaw-media`
+   → `/home/node/.openclaw/media` в openclaw-сервисах и в styx-daemon).
+   Если пути расходятся — `/ingest_document` вернёт `422 file not
+   found`.
+
+2. **Media-root в `STYX_INGEST_DOC_ROOTS`.** Если whitelist непуст,
+   директория media-store обязана быть в нём (resolved path
+   проверяется через `relative_to`). Иначе — `422 path outside
+   allowed roots`. Подробности про сам whitelist —
+   `docs/CONFIGURATION.md` § «Ingest API (pipelines)».
+
+happy-path documents-канала зависит **от обоих** условий. При сбое
+ingest'а вложение деградирует безопасно: маркер остаётся в turn-тексте,
+реплика уходит дневник-каналом как обычное сообщение (нарезается при
+длине свыше лимита) — документ не теряется молча, но и не
+архивируется. Чтобы документы реально попадали в архив
+(`documents`+`chunks`), оба условия должны быть выполнены.
+
 ## 5. Validation
 
 ```bash

@@ -219,11 +219,19 @@
 
 > **OpenClaw media-store.** Когда OpenClaw plugin перехватывает
 > вложения turn'а, он шлёт `/ingest_document` path-mode'ом на файлы
-> из media-store OpenClaw (`media://inbound/...`). Если
-> `STYX_INGEST_DOC_ROOTS` непуст, директория media-store OpenClaw
-> **обязана быть в whitelist** — иначе resolved path не пройдёт
-> проверку и `/ingest_document` вернёт 422. В lab mode (пустой
-> whitelist) ограничения нет.
+> из media-store OpenClaw (`media://inbound/...`). Демон читает файл
+> **с диска сам** — байты по HTTP не передаются. Отсюда happy-path
+> documents-канала зависит от **двух** условий:
+> 1. styx-daemon и OpenClaw-хост видят media-root по **идентичному
+>    абсолютному пути** (общая ФС / общий volume) — иначе `422 file
+>    not found`;
+> 2. если `STYX_INGEST_DOC_ROOTS` непуст, директория media-store
+>    **обязана быть в whitelist** — иначе resolved path не пройдёт
+>    проверку и `/ingest_document` вернёт `422 path outside allowed
+>    roots`. В lab mode (пустой whitelist) этого ограничения нет.
+>
+> Полный deploy-runbook по обоим условиям — `docs/DEPLOYMENT.md`
+> § 4.4 «Общий media-root (documents-канал OpenClaw)».
 
 ## Dialogue routes
 

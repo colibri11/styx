@@ -45,6 +45,13 @@
 # Bind-mounts:
 #   ../extensions/styx → /home/node/.openclaw/plugins/styx (rw, оба openclaw-сервиса)
 #     — TS plugin source. Папка-placeholder; реальный код будет вол. 26+.
+#
+# Общий media-root (fix cdc5221 часть A — documents-канал happy-path):
+#   named volume styx-openclaw-media смонтирован в openclaw-gateway,
+#   openclaw-cli И styx-daemon по ИДЕНТИЧНОМУ пути
+#   /home/node/.openclaw/media. OpenClaw runtime пишет туда вложения
+#   (media://inbound/<id>), styx-daemon читает их path-mode'ом через
+#   /ingest_document. STYX_INGEST_DOC_ROOTS даёт этому пути whitelist.
 
 services:
   postgres:
@@ -93,6 +100,15 @@ services:
       STYX_EMBEDDING_TIMEOUT_S: "${STYX_EMBEDDING_TIMEOUT_S:-30}"
       STYX_LLM_URL: "${STYX_LLM_URL:-http://ollama:11434}"
       STYX_LLM_MODEL: "${STYX_LLM_MODEL:-qwen3:4b-local}"
+      # Documents-канал happy-path (вол. 28 / fix cdc5221 часть A).
+      # OpenClaw runtime пишет media-вложения в свой media-store
+      # (/home/node/.openclaw/media/inbound/<id>); plugin шлёт этот
+      # абсолютный путь в /ingest_document path-mode. Демон читает файл
+      # с диска — значит media-root обязан быть общим (см. volume
+      # styx-openclaw-media ниже) ПО ИДЕНТИЧНОМУ пути и попадать в
+      # whitelist STYX_INGEST_DOC_ROOTS. Без обоих условий ingest даёт
+      # 422 «file not found» / «path outside allowed roots».
+      STYX_INGEST_DOC_ROOTS: /home/node/.openclaw/media
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8788/healthz || exit 1"]
       interval: 5s
@@ -101,18 +117,30 @@ services:
       start_period: 10s
     networks:
       - styx-test
+    volumes:
+      # Общий media-root с openclaw-сервисами — демон должен прочитать
+      # файл, который записал OpenClaw runtime (см. STYX_INGEST_DOC_ROOTS).
+      - styx-openclaw-media:/home/node/.openclaw/media
     ports:
       # Expose'нем для дебага с хоста (curl healthz, manual API probes).
       # Токен — STYX_HTTP_TOKEN из .env.
       - "${STYX_DAEMON_PORT:-8788}:8788"
     extra_hosts:
       - "ollama:${OLLAMA_HOST_IP:-127.0.0.1}"
-    # Стартует daemon после применения миграций.
+    # Стартует daemon после применения миграций. Перед стартом
+    # подготавливает общий media-том: named volume создаётся Docker'ом
+    # как root:root, а openclaw-сервисы пишут туда под node (uid 1000).
+    # styx-daemon бежит под root и стартует раньше openclaw — поэтому
+    # именно он chown'ит том в node:node (test-infra; в prod media-root
+    # принадлежит OpenClaw-хосту изначально).
     command:
       - sh
       - -c
       - |
-        styx migrate && exec styx daemon run --bind 0.0.0.0 --port 8788
+        mkdir -p /home/node/.openclaw/media/inbound \
+          && chown -R 1000:1000 /home/node/.openclaw/media \
+          && styx migrate \
+          && exec styx daemon run --bind 0.0.0.0 --port 8788
 
   # hermes-styx — Hermes Agent + styx-hermes plugin. Не держит state'а
   # Styx'а, всё проксирует в styx-daemon по HTTP.
@@ -203,6 +231,11 @@ services:
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
       - styx-openclaw-home:/home/node/.openclaw
+      # Media-store как отдельный том поверх .openclaw — тот же том
+      # смонтирован в styx-daemon по идентичному пути, чтобы документы-
+      # вложения, записанные OpenClaw runtime'ом, читались демоном
+      # path-mode'ом через /ingest_document (fix cdc5221 часть A).
+      - styx-openclaw-media:/home/node/.openclaw/media
       - ./openclaw-init.sh:/opt/styx/openclaw-init.sh:ro
       # Plugin source live-mount поверх named volume — gateway видит
       # любые правки .ts/.js без rebuild'а.
@@ -275,6 +308,9 @@ services:
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
       - styx-openclaw-home:/home/node/.openclaw
+      # Тот же media-том, что в gateway и styx-daemon — embedded
+      # `agent --local` пишет вложения сюда, демон читает их оттуда же.
+      - styx-openclaw-media:/home/node/.openclaw/media
       - ../extensions/styx:/home/node/.openclaw/plugins/styx:rw
     # network_mode: service:openclaw-gateway → extra_hosts наследуется
     # автоматически (shared netns), отдельный extra_hosts указывать
@@ -291,3 +327,8 @@ networks:
 volumes:
   styx-hermes-home:
   styx-openclaw-home:
+  # Общий media-root: OpenClaw runtime пишет вложения, styx-daemon
+  # читает их path-mode'ом через /ingest_document. Смонтирован в
+  # openclaw-gateway, openclaw-cli и styx-daemon по идентичному пути
+  # /home/node/.openclaw/media (fix cdc5221 часть A — documents-канал).
+  styx-openclaw-media:
