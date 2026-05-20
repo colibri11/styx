@@ -358,4 +358,4 @@ Anthropic / OpenAI / z.ai / Codex).
 
 ## Статус
 
-Styx 1.0.0.
+Styx 1.0.1.

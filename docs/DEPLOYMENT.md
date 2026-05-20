@@ -1,6 +1,6 @@
-# Styx — Deployment Runbook (v1.0.0)
+# Styx — Deployment Runbook (v1.0.1)
 
-Инструкция по установке Styx 1.0.0 в production. Архитектура изменилась
+Инструкция по установке Styx 1.0.1 в production. Архитектура изменилась
 относительно 0.1.0 — теперь это два пакета и три процесса:
 
 - **`styx-core`** — host-agnostic ядро + HTTP API daemon
@@ -165,7 +165,7 @@ ingest'а вложение деградирует безопасно: марке
 ```bash
 # Daemon живой
 curl -s http://127.0.0.1:8788/healthz | jq .
-# {"status":"ok","postgres":"ok","version":"1.0.0",...}
+# {"status":"ok","postgres":"ok","version":"1.0.1",...}
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'

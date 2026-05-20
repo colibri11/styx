@@ -4,11 +4,15 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [1.0.1] — 2026-05-20
+
+Патч-релиз. Устранён боевой инцидент `memories_content_length_check`:
+документ, большое сообщение и память разведены по правильным каналам
+вместо общего turn-write-path.
 
 ### Fixed
 
-- **Boевой инцидент `memories_content_length_check`.** User-реплика
+- **Боевой инцидент `memories_content_length_check`.** User-реплика
   15090 символов (документ-Markdown с вложением), приехавшая
   turn-каналом, роняла запись по CHECK constraint'у и оставляла
   daemon-соединение в aborted-state до рестарта. Исправлено в трёх
@@ -50,7 +54,9 @@
 - **OpenClaw plugin** перехватывает media-вложения turn'а
   (`media://inbound/...`) и шлёт документ documents-каналом
   (`/ingest_document`), в turn-текст подставляя только ссылку —
-  документ не едет turn-каналом как 15K-символьный текст.
+  документ не едет turn-каналом как 15K-символьный текст. Требует
+  общего media-root между styx-daemon и OpenClaw-хостом
+  (см. `docs/DEPLOYMENT.md` § 4.4).
 
 ## [1.0.0] — 2026-05-13
 
