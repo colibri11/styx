@@ -1,7 +1,8 @@
-# Styx — Deployment Runbook (v1.0.1)
+# Styx — Deployment Runbook (styx-core 1.0.1 / styx-hermes 1.0.3)
 
-Инструкция по установке Styx 1.0.1 в production. Архитектура изменилась
-относительно 0.1.0 — теперь это два пакета и три процесса:
+Инструкция по установке Styx в production (`styx-core` 1.0.1, `styx-hermes`
+1.0.3). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
+три процесса:
 
 - **`styx-core`** — host-agnostic ядро + HTTP API daemon
 - **`styx-hermes`** — тонкий plugin для Hermes Agent (HTTP клиент)
@@ -179,8 +180,8 @@ curl -s http://127.0.0.1:8788/healthz | jq .
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
 
-# Из Hermes-process
-hermes ask "Привет"  # должен работать; в логах появится "StyxMemoryProvider initialized"
+# Из Hermes-process (one-shot turn; в v2026.5.29.2 subcommand — chat, не ask)
+hermes chat -q "Привет"  # в логах: "Using context engine: styx" + "StyxMemoryProvider initialized"
 ```
 
 ## 6. Troubleshooting
@@ -213,8 +214,9 @@ Daemon не может подключиться к `STYX_DATABASE_URL`. Пров
 
 ## 7. Docker
 
-См. `docker/docker-compose.test.yml` — три сервиса (postgres, styx-daemon,
-hermes-styx), готовый стек для integration-тестов и быстрого деплоя.
+См. `docker/docker-compose.test.yml` — готовый стек для integration-тестов
+и быстрого деплоя. Сервисы: `postgres`, `styx-daemon`, `hermes-styx`
+(Hermes-фронт) + `openclaw-gateway`, `openclaw-cli` (OpenClaw-track).
 Собирается:
 
 ```bash
@@ -223,3 +225,29 @@ docker compose -f docker/docker-compose.test.yml --env-file .env up -d --build
 
 `.env` содержит `OLLAMA_HOST_IP`, `STYX_HTTP_TOKEN`, провайдерские ключи
 для Hermes.
+
+### 7.1. hermes-styx обёртка на s6-overlay образе
+
+Базовый образ `nousresearch/hermes-agent` — **s6-overlay**. `gateway` в нём
+не самостоятельный бинарь на PATH: его поднимает s6-супервизор, а docker
+CMD маршрутизируется `main-wrapper.sh` в `s6-setuidgid hermes hermes
+gateway run`. Поэтому:
+
+- **Bootstrap Styx — это s6 cont-init.d hook** (`docker/styx-bootstrap.sh`
+  → `/etc/cont-init.d/30-styx-bootstrap` в `Dockerfile.styx-hermes`): он
+  делает setup (`styx-hermes-setup`) + патч `config.yaml`
+  (`memory.provider`/`plugins.enabled`/`context.engine`) при старте
+  контейнера, ДО запуска gateway. НЕ перехватывает запуск через
+  `exec gateway` (на s6 это даёт `exec: gateway: not found` → exit 127).
+- **`command` обёртки в проде — дефолтный образа `["gateway","run"]`**
+  (styx-bootstrap из command убран). В test-стеке — `["sleep","infinity"]`
+  (контейнер живёт для `docker compose exec ... pytest`; cont-init hook
+  всё равно отрабатывает setup).
+- **`HERMES_IMAGE` обязан быть s6-overlay образом.** На не-s6 базе
+  cont-init.d не выполнится → bootstrap молча не отработает.
+- **`STYX_DATABASE_URL` нужен у hermes-styx-обёртки** (или styx.json с
+  `database_url`): Hermes выбирает memory-провайдер по
+  `StyxMemoryProvider.is_available()`, который гейтит по
+  `STYX_DATABASE_URL`/`DATABASE_URL`, а НЕ по `STYX_DAEMON_URL`. Без него
+  провайдер не выберется и `sync_turn` не вызовется (хотя обёртка ходит в
+  daemon только по HTTP).

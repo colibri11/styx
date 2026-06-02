@@ -39,8 +39,10 @@
 # Тёрдаун (с volume'ами):
 #   docker compose -f docker/docker-compose.test.yml down -v
 #
-# Требует предварительной сборки hermes-agent:latest (один раз):
-#   cd ../hermes-agent && docker compose build gateway
+# Базовый образ hermes-styx по умолчанию — официальный s6-overlay
+# nousresearch/hermes-agent:v2026.5.29.2 (тянется pull'ом автоматически).
+# Override через env HERMES_IMAGE ОБЯЗАН быть s6-overlay образом: bootstrap
+# идёт s6 cont-init.d hook'ом, на не-s6 базе он молча не выполнится.
 #
 # Bind-mounts:
 #   ../extensions/styx → /home/node/.openclaw/plugins/styx (rw, оба openclaw-сервиса)
@@ -149,7 +151,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.styx-hermes
       args:
-        HERMES_IMAGE: hermes-agent:latest
+        # Официальный s6-overlay образ (как на проде). Override через env
+        # HERMES_IMAGE обязан быть тоже s6-overlay образом — bootstrap идёт
+        # cont-init.d hook'ом, на не-s6 базе (старый tini hermes-agent:latest)
+        # он не выполнится и Styx молча не активируется.
+        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.5.29.2}
     image: hermes-agent-styx-test
     container_name: styx-test-hermes
     depends_on:
@@ -179,16 +185,20 @@ services:
       - styx-test
     extra_hosts:
       - "ollama:${OLLAMA_HOST_IP:-127.0.0.1}"
-    # Bootstrap → sleep infinity — контейнер остаётся жив для
-    # `docker compose exec ... pytest`. Для запуска полноценного
-    # gateway: command: ["styx-bootstrap", "gateway", "run"].
-    command: ["styx-bootstrap", "sleep", "infinity"]
-    # Healthy после styx-bootstrap.sh: создан config.yaml + styx_hermes
-    # импортируется (значит styx-memory shim прописан и pip-пакет на месте).
+    # cont-init.d/30-styx-bootstrap делает setup+patch при старте контейнера
+    # (s6 init, до user-сервисов). CMD держит контейнер живым для
+    # `docker compose exec ... pytest`. Для полноценного gateway под s6:
+    # command: ["gateway", "run"].
+    command: ["sleep", "infinity"]
+    # Healthy только при ПОЛНОСТЬЮ отработавшем cont-init hook: config.yaml
+    # создан И пропатчен (memory.provider: styx-memory), styx-memory shim
+    # доустановлен (__init__.py на месте), pip-пакет импортируется. Так
+    # половинчатый bootstrap (s6 не халтит cont-init по дефолту — см.
+    # styx-bootstrap.sh) виден как unhealthy, а не «healthy».
     healthcheck:
       test:
         - CMD-SHELL
-        - "test -f /opt/data/config.yaml && /opt/hermes/.venv/bin/python -c 'import styx_hermes' || exit 1"
+        - "test -f /opt/data/config.yaml && test -f /opt/data/plugins/styx-memory/__init__.py && grep -q 'styx-memory' /opt/data/config.yaml && /opt/hermes/.venv/bin/python -c 'import styx_hermes' || exit 1"
       interval: 5s
       timeout: 10s
       retries: 30

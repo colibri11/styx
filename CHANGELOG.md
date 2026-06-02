@@ -4,6 +4,71 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.0.3] — 2026-06-02
+
+Патч-релиз деплоя. Обёртка `styx-hermes` запускалась как entrypoint-wrapper
+с `exec gateway run`, но официальный образ **`nousresearch/hermes-agent`**
+(s6-overlay) НЕ держит `gateway` бинарём на PATH — его поднимает
+s6-супервизор, а docker CMD маршрутизирует `main-wrapper.sh` в
+`s6-setuidgid hermes hermes gateway run`. На s6-образе `exec gateway`
+давал `exec: gateway: not found` → exit 127 → crash-loop. `styx-core`
+daemon без изменений (остаётся 1.0.1) — `Dockerfile.styx-daemon` это не
+затрагивает (slim-образ без s6).
+
+### Fixed
+
+- **HARD-BREAK деплоя на официальном s6-overlay образе Hermes.**
+  Bootstrap переведён с entrypoint-wrapper на нативный **s6 cont-init.d
+  hook** (`docker/styx-bootstrap.sh` → `/etc/cont-init.d/30-styx-bootstrap`).
+  Скрипт делает только setup (styx-hermes-setup) + патч `config.yaml`
+  (`memory.provider`/`plugins.enabled`/`context.engine`), **без `exec
+  gateway`** — gateway поднимает сам s6. Хук выполняется как root в s6
+  init ПОСЛЕ штатных `01-hermes-setup`/`015-supervise-perms`/
+  `02-reconcile-profiles` (префикс `30-`), а setup+patch работают под
+  `s6-setuidgid hermes` (файлы shim'а и config — владелец `hermes`).
+  Shebang `#!/command/with-contenv sh` (восстановление контейнерного env).
+- **Robustness: тихо-сломанный bootstrap на персистентном volume.**
+  s6-overlay по дефолту (`S6_BEHAVIOUR_IF_STAGE2_FAILS=0`) НЕ халтит
+  контейнер при падении cont-init — а `styx-hermes-setup --force` (rmtree
+  shim'а) падал с EACCES, если HERMES_HOME-volume накопил root-owned
+  `__pycache__` от прежних прогонов: контейнер поднимался «healthy», но
+  shim не доустановлен → memory-провайдер молча неактивен → `sync_turn`
+  не вызывался. Хук (бежит как root) теперь chown'ит `plugins/styx-memory`
+  на hermes ПЕРЕД setup → rmtree всегда проходит. Healthcheck test-стека
+  усилен: проверяет наличие `plugins/styx-memory/__init__.py` + патч
+  `styx-memory` в config — половинчатый bootstrap виден как unhealthy.
+
+### Changed
+
+- **Деплой:** `docker/Dockerfile.styx-hermes` — base-образ по умолчанию
+  `nousresearch/hermes-agent:v2026.5.29.2` (s6-overlay), bootstrap кладётся
+  в `/etc/cont-init.d/30-styx-bootstrap` (вместо `/usr/local/bin/styx-bootstrap`).
+- **Деплой:** `command` обёртки в проде — **дефолтный образа**
+  `["gateway","run"]` (styx-bootstrap из `command` убран); в
+  `docker/docker-compose.test.yml` test-сервис держится живым через
+  `["sleep","infinity"]` (cont-init hook отрабатывает setup до CMD).
+- **Docs:** `docs/DEPLOYMENT.md` синхронизирован — шапка `styx-core 1.0.1 /
+  styx-hermes 1.0.3`, §5 `hermes ask`→`hermes chat -q` (в v2026.5.29.2 нет
+  subcommand `ask`), новый §7.1 про s6 cont-init bootstrap, требование
+  s6-образа для `HERMES_IMAGE` и `STYX_DATABASE_URL` у обёртки.
+
+### Tests
+
+- Smoke против официального s6-образа `nousresearch/hermes-agent:v2026.5.29.2`:
+  контейнер стартует без crash-loop (нет `exec: gateway: not found`),
+  `→ gateway is now running under s6 supervision`, `Using context engine:
+  styx`, `StyxMemoryProvider initialized` (без `update_model TypeError`);
+  config пропатчен идемпотентно (рестарт не задваивает `styx` в
+  `plugins.enabled`), shim установлен с владельцем `hermes`.
+- **Живой end-to-end** (стек postgres + styx-daemon + hermes-styx против
+  официального s6-образа, провайдер z.ai `glm-4.6`): полный `hermes chat`
+  turn → context engine styx → memory-провайдер styx-memory → `POST
+  /agent/initialize 200` + `POST /sync_turn 200` (+ `auto_link`) → запись
+  в `memories` (счётчик инкрементится). Robustness-харднинг проверен
+  репродукцией: умышленно загрязнённый volume (root-owned `__pycache__`)
+  ронял cont-init (exit 1) до фикса — после chown-харднинга cont-init
+  `exited 0`, shim переустановлен (владелец hermes), контейнер healthy.
+
 ## [1.0.2] — 2026-06-02
 
 Патч-релиз. Совместимость плагина `styx-hermes` с Hermes Agent **v0.15.2**

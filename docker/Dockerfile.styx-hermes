@@ -1,24 +1,34 @@
 # Styx Hermes-shim image — наследует Hermes Agent + styx-core + styx-hermes.
 #
-# Hermes pin: adef1f33abfbb91030f00a92fdde758981c1f710 (v0.11.0)
-# См. .design/context/decisions.md § 15.
+# Базовый образ — официальный s6-overlay nousresearch/hermes-agent.
+# В нём gateway НЕ бинарь на PATH: его поднимает s6-супервизор, а docker
+# CMD `["gateway","run"]` маршрутизируется main-wrapper.sh в
+# `s6-setuidgid hermes hermes gateway run`. Поэтому Styx-bootstrap
+# интегрируется НАТИВНО как s6 cont-init.d hook (см. ниже), а НЕ как
+# entrypoint-wrapper с `exec gateway` (это давало exit 127 на s6-образе).
+# См. .design/context/decisions.md § 15 + § 48.
 #
 # Build:
-#   1. cd /home/user/OpenCode/hermes-agent && docker compose build gateway
-#      → собирает hermes-agent:latest
-#   2. cd /home/user/OpenCode/styx && docker compose -f docker/docker-compose.test.yml build hermes-styx
-#      → собирает hermes-agent-styx-test поверх
+#   docker compose -f docker/docker-compose.test.yml build hermes-styx
+#   (HERMES_IMAGE передаётся из compose; для прода —
+#    --build-arg HERMES_IMAGE=nousresearch/hermes-agent:v2026.5.29.2)
+#
+# ВАЖНО: HERMES_IMAGE обязан быть s6-overlay образом. Bootstrap кладётся в
+# /etc/cont-init.d/ — этот механизм есть только в s6. На не-s6 базе (старый
+# tini hermes-agent:latest) cont-init.d не выполнится → setup+patch не
+# отработают → Styx молча неактивен (контейнер стартует без ошибки).
 
-ARG HERMES_IMAGE=hermes-agent:latest
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.5.29.2
 FROM ${HERMES_IMAGE}
 
 USER root
 
-# Bootstrap-скрипт. Hermes entrypoint в конце делает
-# `if command -v "$1" >/dev/null 2>&1; then exec "$@"; fi` —
-# поэтому передача `["styx-bootstrap", ...]` в CMD попадает в exec
-# напрямую, минуя `hermes` wrap.
-COPY --chmod=0755 docker/styx-bootstrap.sh /usr/local/bin/styx-bootstrap
+# Bootstrap как s6 cont-init.d hook: s6 выполняет /etc/cont-init.d/* как
+# root ДО старта user-сервисов, в лексикографическом порядке. Префикс
+# `30-` ставит нас ПОСЛЕ штатных 01-hermes-setup / 015-supervise-perms /
+# 02-reconcile-profiles (config.yaml к этому моменту уже создан). Скрипт
+# делает только setup+patch, БЕЗ запуска gateway — его поднимает s6 сам.
+COPY --chmod=0755 docker/styx-bootstrap.sh /etc/cont-init.d/30-styx-bootstrap
 
 # styx-core + styx-hermes pip-packages. .dockerignore исключает
 # .venv/.git/__pycache__/etc.
@@ -51,6 +61,9 @@ RUN /usr/local/bin/uv pip install --no-deps -e /opt/styx-core && \
         "python-docx>=1.1" \
         "openpyxl>=3.1"
 
-# ENTRYPOINT наследуется от base (tini → /opt/hermes/docker/entrypoint.sh).
-# CMD передаётся через docker-compose.
+# ENTRYPOINT наследуется от base: s6 `/init` → main-wrapper.sh, который
+# маршрутизирует docker CMD под `s6-setuidgid hermes`. CMD по умолчанию
+# в проде — `["gateway","run"]`; в test-стеке — `["sleep","infinity"]`
+# (см. docker-compose.test.yml). styx-bootstrap из CMD убран —
+# он отрабатывает как cont-init.d hook ещё до маршрутизации CMD.
 USER root
