@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Сергей Сомаров", email = "somarov@gmail.com" }]
 keywords = ["hermes", "agent", "plugin", "styx"]
 dependencies = [
-    "styx-core==1.0.0",
+    "styx-core==1.0.1",
     "requests>=2.32",
 ]
 

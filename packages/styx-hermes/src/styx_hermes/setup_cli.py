@@ -98,9 +98,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print("Дальше:")
     print("  1. config.yaml: memory.provider: styx-memory")
     print("  2. config.yaml: plugins.enabled += ['styx']")
-    print("  3. STYX_DAEMON_URL=http://127.0.0.1:8788 (или styx.json в HERMES_HOME)")
-    print("  4. Запустить styx-core daemon: styx daemon run")
-    print("  5. Запустить Hermes — general plugin (styx) подхватится")
+    print("  3. config.yaml: context.engine: styx")
+    print("     (иначе Hermes использует built-in compressor — Styx-движок")
+    print("      зарегистрирован, но не выбран)")
+    print("  4. STYX_DAEMON_URL=http://127.0.0.1:8788 (или styx.json в HERMES_HOME)")
+    print("  5. Запустить styx-core daemon: styx daemon run")
+    print("  6. Запустить Hermes — general plugin (styx) подхватится")
     print("     через entry-point, memory provider — через directory shim")
     return 0
 

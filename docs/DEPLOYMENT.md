@@ -70,6 +70,9 @@ General plugin (`styx`) подхватывается через entry-point `her
 ### 2.4. Hermes config.yaml
 
 ```yaml
+context:
+  engine: styx
+
 memory:
   provider: styx-memory
 
@@ -77,6 +80,12 @@ plugins:
   enabled:
     - styx
 ```
+
+**`context.engine: styx` обязателен.** Без него Hermes (≥ v0.15.2) берёт
+встроенный compressor: Styx-движок регистрируется через entry-point, но
+**не выбирается**, и `ContextEngine` Styx'а не работает (recall/инъекция
+геометрии не происходит). `plugins.enabled += styx` включает плагин, но
+не выбирает движок — это разные ключи.
 
 ## 3. Database setup
 

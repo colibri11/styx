@@ -14,6 +14,7 @@
 # 2. (миграции БД делает styx-daemon контейнер на старте; этот скрипт
 #    их НЕ применяет — иначе race с daemon'ом).
 # 3. патч config.yaml: memory.provider: styx-memory + plugins.enabled+=styx
+#    + context.engine: styx
 # 4. exec оставшихся аргументов (hermes gateway run / sleep infinity / etc.)
 
 set -e
@@ -32,6 +33,8 @@ STYX_ALLOW_HERMES_HOME=1 "$SETUP" --hermes-home "$HERMES_HOME" --force
 #    - memory.provider: styx-memory (активирует memory-shim через memory discovery)
 #    - plugins.enabled включает styx (общий PluginManager opt-in:
 #      без включения plugin не загрузится, ContextEngine не зарегистрируется)
+#    - context.engine: styx (в v0.15.2 без этого Hermes берёт built-in
+#      compressor; styx-движок зарегистрирован, но НЕ выбран)
 CONFIG="$HERMES_HOME/config.yaml"
 if [ -f "$CONFIG" ]; then
     echo "[styx-bootstrap] patching $CONFIG..."
@@ -51,8 +54,10 @@ if "styx" not in enabled:
     enabled.append("styx")
 plugins["enabled"] = enabled
 
+data.setdefault("context", {})["engine"] = "styx"
+
 p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
-print(f"[styx-bootstrap] memory.provider=styx-memory; plugins.enabled+=styx in {p}")
+print(f"[styx-bootstrap] memory.provider=styx-memory; plugins.enabled+=styx; context.engine=styx in {p}")
 PYEOF
 fi
 

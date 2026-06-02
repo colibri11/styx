@@ -17,11 +17,14 @@ Hermes-обёртки ``StyxContextEngine`` / ``StyxOpenAITransport`` /
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from styx_hermes.client import StyxCoreClient
+
+log = logging.getLogger(__name__)
 
 _AGENT_ID: str | None = None
 _CLIENT: "StyxCoreClient | None" = None
@@ -29,9 +32,21 @@ _LOCK = threading.Lock()
 
 
 def set_session(agent_id: str, client: "StyxCoreClient") -> None:
-    """Зафиксировать active session. Двойной вызов заменяет state."""
+    """Зафиксировать active session. Двойной вызов заменяет state.
+
+    Замена на ОТЛИЧНЫЙ agent_id неожиданна при one-process-one-agent
+    (Q20) — шумим warning'ом, но state всё равно заменяем (replace
+    намеренный по дизайну). Повтор тем же id — тихо, idempotent.
+    """
     global _AGENT_ID, _CLIENT
     with _LOCK:
+        if _AGENT_ID is not None and _AGENT_ID != agent_id:
+            log.warning(
+                "replacing active session agent_id %r with %r — "
+                "unexpected under one-process-one-agent (Q20)",
+                _AGENT_ID,
+                agent_id,
+            )
         _AGENT_ID = agent_id
         _CLIENT = client
 

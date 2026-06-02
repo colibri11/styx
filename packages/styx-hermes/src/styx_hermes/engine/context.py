@@ -47,7 +47,11 @@ class StyxContextEngine(ContextEngine):
     def name(self) -> str:
         return "styx"
 
-    def update_from_response(self, usage: dict[str, Any]) -> None:
+    def update_from_response(self, usage: dict[str, Any], **kwargs: Any) -> None:
+        # **kwargs защитно — host вызывает engine-direct (update_from_response
+        # в conversation_loop.py:1798) без try/except; новый kwarg в minor-bump
+        # не должен ломать turn. v0.15.2 пока зовёт только usage_dict.
+        del kwargs
         if not usage:
             return
         self.last_prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -57,9 +61,13 @@ class StyxContextEngine(ContextEngine):
             or self.last_prompt_tokens + self.last_completion_tokens
         )
 
-    def should_compress(self, prompt_tokens: int | None = None) -> bool:
+    def should_compress(
+        self, prompt_tokens: int | None = None, **kwargs: Any
+    ) -> bool:
         # Styx хочет владеть каждым turn'ом — compress() пропускает no-op
-        # внутри себя.
+        # внутри себя. **kwargs защитно: should_compress зовётся напрямую
+        # (conversation_loop.py:617, :3887) без try/except.
+        del prompt_tokens, kwargs
         return True
 
     def compress(
@@ -67,7 +75,14 @@ class StyxContextEngine(ContextEngine):
         messages: list[dict[str, Any]],
         current_tokens: int | None = None,
         focus_topic: str | None = None,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
+        # v0.15.2 conversation_compression.py:316 зовёт
+        # compress(..., focus_topic=focus_topic, force=force); если
+        # сигнатура force не примет — host ловит TypeError и ретраит БЕЗ
+        # focus_topic (deflate path, focus_topic теряется). **kwargs
+        # поглощает force и держит реальное тело на основном пути.
+        del kwargs
         session = _agent_session.get_session()
         if session is None:
             log.debug("compress: no active session — pass-through")
@@ -101,12 +116,22 @@ class StyxContextEngine(ContextEngine):
         base_url: str = "",
         api_key: str = "",
         provider: str = "",
+        api_mode: str = "",
+        **kwargs: Any,
     ) -> None:
-        del model, base_url, api_key, provider
+        # v0.15.2 зовёт update_model(..., api_mode=agent.api_mode) БЕЗ
+        # try/except (agent_init.py:1441, run_agent.py:673) — HARD-BREAK
+        # если параметр не принять. **kwargs поглощает будущие kwargs
+        # host'а без нового разлома сигнатуры.
+        del model, base_url, api_key, provider, api_mode, kwargs
         self.context_length = context_length
         self.threshold_tokens = int(context_length * self.threshold_percent)
 
-    def on_session_reset(self) -> None:
+    def on_session_reset(self, **kwargs: Any) -> None:
+        # **kwargs защитно — v0.15.2 зовёт on_session_reset() без аргументов
+        # (run_agent.py:561), но engine-direct сигнатуры держим устойчивыми
+        # к minor-bump host'а.
+        del kwargs
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0

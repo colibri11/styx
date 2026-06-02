@@ -1,4 +1,9 @@
-"""Юнит-тесты StyxCodexTransport — Responses API путь (Codex OAuth)."""
+"""Юнит-тесты StyxCodexTransport — Responses API путь (Codex OAuth).
+
+Split-архитектура: transport-класс в ``styx_hermes.engine.transport``,
+agent_id через ``styx_hermes._agent_session.set_session``. Эталон стиля
+— ``tests/plugin/test_anthropic_transport.py``.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +11,29 @@ import logging
 
 import pytest
 
-from styx.engine import transport as t
+from styx.engine import transport as core_t
+from styx_hermes import _agent_session
+from styx_hermes.engine import transport as t
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
-    t._reset_for_test()
+def _reset_session():
+    """Сброс per-process session + core per-agent state после теста."""
     yield
-    t._reset_for_test()
+    _agent_session.clear_session()
+    core_t.reset_all()
+
+
+class _FakeClient:
+    """Минимальный stub StyxCoreClient — в build_kwargs дёргается только
+    agent_id из session, сам клиент не используется."""
+
+    def __init__(self) -> None:
+        self.base_url = "http://fake"
+
+
+def _set_agent(agent_id: str) -> None:
+    _agent_session.set_session(agent_id, _FakeClient())
 
 
 def _msgs(*pairs: tuple[str, str]) -> list[dict]:
@@ -47,7 +67,7 @@ def test_no_arg_constructor() -> None:
 
 
 def test_hermes_default_session_id_preserved_when_unconfigured() -> None:
-    """Если Styx не сконфигурирован — поведение Hermes сохраняется.
+    """Если Styx session не set — поведение Hermes сохраняется.
 
     Hermes-default: ``prompt_cache_key = session_id``. Styx это уважает.
     """
@@ -59,8 +79,8 @@ def test_hermes_default_session_id_preserved_when_unconfigured() -> None:
 
 
 def test_agent_id_overrides_hermes_default() -> None:
-    """С configure(agent_id=...) Styx переопределяет per-session на per-agent."""
-    t.configure(agent_id="alpha")
+    """С active session Styx переопределяет per-session на per-agent."""
+    _set_agent("alpha")
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "hi")), session_id="hermes-sess-1"
@@ -69,7 +89,8 @@ def test_agent_id_overrides_hermes_default() -> None:
 
 
 def test_explicit_module_override_beats_agent_id() -> None:
-    t.configure(agent_id="alpha", prompt_cache_key="custom")
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="custom")
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "hi")), session_id="hermes-sess-1"
@@ -77,8 +98,8 @@ def test_explicit_module_override_beats_agent_id() -> None:
     assert kwargs["prompt_cache_key"] == "custom"
 
 
-def test_per_call_param_overrides_module() -> None:
-    t.configure(agent_id="alpha")
+def test_per_call_param_overrides_session() -> None:
+    _set_agent("alpha")
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5",
@@ -89,6 +110,59 @@ def test_per_call_param_overrides_module() -> None:
     assert kwargs["prompt_cache_key"] == "per-call"
 
 
+# -- github/xai cache_key opt-out (abi-5) ---------------------------------
+
+
+def test_github_responses_omits_cache_key_with_active_session() -> None:
+    """is_github_responses=True — Styx опускает prompt_cache_key, как Hermes.
+
+    Hermes-default (agent/transports/codex.py:158) гейтит установку
+    cache_key по ``not is_github_responses and not is_xai_responses``;
+    GitHub Models opt-out из cache-key routing. Styx наследует это.
+    """
+    _set_agent("alpha")
+    tr = t.StyxCodexTransport()
+    kwargs = tr.build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "hi")),
+        session_id="hermes-sess-1",
+        is_github_responses=True,
+    )
+    assert "prompt_cache_key" not in kwargs
+
+
+def test_xai_responses_omits_cache_key_with_active_session() -> None:
+    """is_xai_responses=True — Styx опускает prompt_cache_key, как Hermes.
+
+    xAI Responses получает cache-key отдельно через extra_body, поэтому
+    Hermes-default не ставит prompt_cache_key напрямую. Styx наследует.
+    """
+    _set_agent("alpha")
+    tr = t.StyxCodexTransport()
+    kwargs = tr.build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "hi")),
+        session_id="hermes-sess-1",
+        is_xai_responses=True,
+    )
+    assert "prompt_cache_key" not in kwargs
+
+
+def test_plain_codex_keeps_agent_id_cache_key_with_active_session() -> None:
+    """Регрессия: без github/xai флагов prompt_cache_key == agent_id.
+
+    Обычный codex/openai путь — поведение не меняется, gate пропускает.
+    """
+    _set_agent("alpha")
+    tr = t.StyxCodexTransport()
+    kwargs = tr.build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "hi")),
+        session_id="hermes-sess-1",
+    )
+    assert kwargs["prompt_cache_key"] == "alpha"
+
+
 # -- codex_backend extra_headers -----------------------------------------
 
 
@@ -96,7 +170,7 @@ def test_codex_backend_headers_synced_to_override() -> None:
     """На is_codex_backend Hermes пишет session_id/x-client-request-id в
     extra_headers — Styx должен синхронизировать их с нашим cache_key.
     """
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5",
@@ -110,7 +184,8 @@ def test_codex_backend_headers_synced_to_override() -> None:
 
 
 def test_codex_backend_headers_untouched_without_override() -> None:
-    """Без agent_id мы не трогаем extra_headers — Hermes сам ставит session_id."""
+    """Без active session мы не трогаем extra_headers — Hermes сам
+    ставит session_id."""
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5",
@@ -129,7 +204,7 @@ def test_non_codex_backend_no_extra_headers_added() -> None:
     Уточнение: Hermes super не ставит extra_headers без is_codex_backend и
     is_xai_responses; Styx-override тоже не должен.
     """
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "hi")), session_id="hermes-sess-1"
@@ -174,12 +249,15 @@ def test_wire_log_emits_digest_for_input(caplog: pytest.LogCaptureFixture) -> No
     tr = t.StyxCodexTransport()
     with caplog.at_level(logging.INFO, logger="styx.transport.wire"):
         tr.build_kwargs("gpt-5.5", _msgs(("user", "hello")), session_id="s")
-    assert any("prefix_slice digest=" in r.message for r in caplog.records)
+    assert any(
+        "prefix_slice" in r.message and "digest=" in r.message
+        for r in caplog.records
+    )
 
 
 def test_wire_log_digest_stable_across_turns(caplog: pytest.LogCaptureFixture) -> None:
     """Если input items байт-в-байт одинаковые — digest идентичен."""
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     tr = t.StyxCodexTransport()
     base = _msgs(("user", "stable preamble " + "filler " * 30))
     with caplog.at_level(logging.INFO, logger="styx.transport.wire"):
@@ -227,7 +305,7 @@ def test_register_with_hermes_replaces_codex_default() -> None:
 
 
 def test_cache_key_stable_across_turns_for_same_agent() -> None:
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     tr = t.StyxCodexTransport()
     k1 = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "t1")), session_id="s-1"
@@ -239,15 +317,16 @@ def test_cache_key_stable_across_turns_for_same_agent() -> None:
 
 
 def test_cache_key_unique_per_agent() -> None:
-    """Два разных агента дают разные cache_key (сброс между ними)."""
+    """Два разных агента дают разные cache_key (сброс session между ними)."""
     tr = t.StyxCodexTransport()
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     k_a = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "x")), session_id="s"
     )["prompt_cache_key"]
-    # Сбрасываем module-global перед вторым агентом (в реальности — отдельный процесс)
-    t._reset_for_test()
-    t.configure(agent_id="beta")
+    # Сбрасываем session перед вторым агентом (в реальности — отдельный процесс).
+    _agent_session.clear_session()
+    core_t.reset_all()
+    _set_agent("beta")
     k_b = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "x")), session_id="s"
     )["prompt_cache_key"]

@@ -1,4 +1,12 @@
-"""Юнит-тесты StyxOpenAITransport."""
+"""Юнит-тесты StyxOpenAITransport (split-архитектура, host=Hermes).
+
+Transport-класс живёт в ``styx_hermes.engine.transport``; agent_id
+резолвится через ``styx_hermes._agent_session.set_session``. Чистые
+helper'ы (``configure``, ``compute_prefix_digest``) — из core-модуля
+``styx.engine.transport``.
+
+Эталон стиля — ``tests/plugin/test_anthropic_transport.py``.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +14,29 @@ import logging
 
 import pytest
 
-from styx.engine import transport as t
+from styx.engine import transport as core_t
+from styx_hermes import _agent_session
+from styx_hermes.engine import transport as t
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
-    t._reset_for_test()
+def _reset_session():
+    """Сброс per-process session + core per-agent state после теста."""
     yield
-    t._reset_for_test()
+    _agent_session.clear_session()
+    core_t.reset_all()
+
+
+class _FakeClient:
+    """Минимальный stub StyxCoreClient — в build_kwargs используется
+    только agent_id из session, клиент сам не дёргается."""
+
+    def __init__(self) -> None:
+        self.base_url = "http://fake"
+
+
+def _set_agent(agent_id: str) -> None:
+    _agent_session.set_session(agent_id, _FakeClient())
 
 
 def _msgs(*pairs: tuple[str, str]) -> list[dict]:
@@ -46,27 +69,29 @@ def test_no_arg_constructor() -> None:
 
 
 def test_no_cache_key_when_unconfigured() -> None:
+    """Без session и без session_id — Hermes default (нет ключа)."""
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs("gpt-x", _msgs(("user", "hi")))
     assert "prompt_cache_key" not in kwargs
 
 
-def test_cache_key_from_configure_agent_id() -> None:
-    t.configure(agent_id="alpha")
+def test_cache_key_from_session_agent_id() -> None:
+    _set_agent("alpha")
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs("gpt-x", _msgs(("user", "hi")))
     assert kwargs["prompt_cache_key"] == "alpha"
 
 
 def test_explicit_prompt_cache_key_overrides_agent_id() -> None:
-    t.configure(agent_id="alpha", prompt_cache_key="custom-key")
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="custom-key")
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs("gpt-x", _msgs(("user", "hi")))
     assert kwargs["prompt_cache_key"] == "custom-key"
 
 
-def test_per_call_param_overrides_module_global() -> None:
-    t.configure(agent_id="alpha")
+def test_per_call_param_overrides_session() -> None:
+    _set_agent("alpha")
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs(
         "gpt-x", _msgs(("user", "hi")), prompt_cache_key="per-call"
@@ -74,7 +99,32 @@ def test_per_call_param_overrides_module_global() -> None:
     assert kwargs["prompt_cache_key"] == "per-call"
 
 
-def test_session_id_fallback_when_no_agent() -> None:
+def test_per_call_overrides_explicit_per_agent_override() -> None:
+    """Верхнее звено цепочки: per-call бьёт ЯВНЫЙ per-agent override.
+
+    session(alpha) + configure(alpha, prompt_cache_key=custom) задаёт
+    per-agent override; per-call prompt_cache_key должен пересилить его.
+    """
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="custom-key")
+    tr = t.StyxOpenAITransport()
+    kwargs = tr.build_kwargs(
+        "gpt-x", _msgs(("user", "hi")), prompt_cache_key="per-call"
+    )
+    assert kwargs["prompt_cache_key"] == "per-call"
+
+
+def test_per_agent_override_used_when_no_per_call() -> None:
+    """Компаньон: без per-call действует явный per-agent override."""
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="custom-key")
+    tr = t.StyxOpenAITransport()
+    kwargs = tr.build_kwargs("gpt-x", _msgs(("user", "hi")))
+    assert kwargs["prompt_cache_key"] == "custom-key"
+
+
+def test_session_id_fallback_when_no_session() -> None:
+    """Без active session — fallback на params.session_id."""
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs(
         "gpt-x", _msgs(("user", "hi")), session_id="sess-123"
@@ -121,24 +171,31 @@ def test_wire_log_emits_digest(caplog: pytest.LogCaptureFixture) -> None:
     tr = t.StyxOpenAITransport()
     with caplog.at_level(logging.INFO, logger="styx.transport.wire"):
         tr.build_kwargs("gpt-x", _msgs(("user", "hello")))
-    assert any("prefix_slice digest=" in r.message for r in caplog.records)
+    assert any(
+        "prefix_slice" in r.message and "digest=" in r.message
+        for r in caplog.records
+    )
 
 
 def test_wire_log_digest_byte_stable_for_same_messages() -> None:
     same = _msgs(("user", "stable")) + _msgs(("assistant", "answer"))
-    d1 = t.compute_prefix_digest(same)
-    d2 = t.compute_prefix_digest(same)
+    d1 = core_t.compute_prefix_digest(same)
+    d2 = core_t.compute_prefix_digest(same)
     assert d1 == d2
 
 
 def test_wire_log_digest_differs_for_different_prefix() -> None:
     a = _msgs(("user", "alpha"))
     b = _msgs(("user", "beta"))
-    assert t.compute_prefix_digest(a) != t.compute_prefix_digest(b)
+    assert core_t.compute_prefix_digest(a) != core_t.compute_prefix_digest(b)
 
 
-def test_wire_log_disabled_with_zero_head_messages(caplog: pytest.LogCaptureFixture) -> None:
-    t.configure(wire_log_head_messages=0)
+def test_wire_log_disabled_with_zero_head_messages(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """head=0 (через core configure) выключает wire-log digest."""
+    _set_agent("alpha")
+    core_t.configure("alpha", wire_log_head_messages=0)
     tr = t.StyxOpenAITransport()
     with caplog.at_level(logging.INFO, logger="styx.transport.wire"):
         tr.build_kwargs("gpt-x", _msgs(("user", "hi")))
@@ -167,34 +224,21 @@ def test_register_with_hermes_replaces_default() -> None:
         register_transport("chat_completions", ChatCompletionsTransport)
 
 
-# -- #9: configure guard против конфликта agent_id ----------------------
+# -- session state replacement (post-split, Q20) --------------------------
 
 
-def test_configure_rejects_conflicting_agent_id(caplog: pytest.LogCaptureFixture) -> None:
-    """Если _AGENT_ID уже задан и пришло другое значение — log.error, не перетирать."""
-    t.configure(agent_id="alpha")
-    with caplog.at_level(logging.ERROR, logger="styx.engine.transport"):
-        t.configure(agent_id="beta")
-    # Значение не поменялось
-    assert t._AGENT_ID == "alpha"
-    # Ошибка залогирована
-    assert any("conflicting agent_id" in r.message for r in caplog.records)
-
-
-def test_configure_same_agent_id_is_noop(caplog: pytest.LogCaptureFixture) -> None:
-    """Повторный вызов с тем же agent_id — тихой ошибки нет."""
-    t.configure(agent_id="alpha")
-    with caplog.at_level(logging.ERROR, logger="styx.engine.transport"):
-        t.configure(agent_id="alpha")
-    assert t._AGENT_ID == "alpha"
-    assert not any("conflicting agent_id" in r.message for r in caplog.records)
-
-
-def test_configure_none_agent_id_is_noop() -> None:
-    """configure(agent_id=None) не меняет уже установленное значение."""
-    t.configure(agent_id="alpha")
-    t.configure(agent_id=None)
-    assert t._AGENT_ID == "alpha"
+def test_set_session_replaces_state() -> None:
+    """После split нет single-global conflict-guard: одна процесс-сессия,
+    повторный set_session намеренно заменяет state (one-process-one-agent).
+    """
+    _set_agent("alpha")
+    tr = t.StyxOpenAITransport()
+    k1 = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
+    assert k1 == "alpha"
+    # Повторный set_session заменяет — это намеренное поведение.
+    _set_agent("beta")
+    k2 = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
+    assert k2 == "beta"
 
 
 # -- #10: wire-log не пишет slice_hex на INFO по умолчанию ---------------
@@ -234,7 +278,7 @@ def test_wire_log_emits_slice_hex_with_env_flag(
 
 
 def test_cache_key_stable_across_turns_for_same_agent() -> None:
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     tr = t.StyxOpenAITransport()
     k1 = tr.build_kwargs("gpt-x", _msgs(("user", "turn1")))["prompt_cache_key"]
     k2 = tr.build_kwargs("gpt-x", _msgs(("user", "turn2")))["prompt_cache_key"]
@@ -242,12 +286,13 @@ def test_cache_key_stable_across_turns_for_same_agent() -> None:
 
 
 def test_cache_key_unique_per_agent() -> None:
-    """Два разных агента дают разные cache_key (сброс между ними)."""
+    """Два разных агента дают разные cache_key (сброс session между ними)."""
     tr = t.StyxOpenAITransport()
-    t.configure(agent_id="alpha")
+    _set_agent("alpha")
     k_a = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
-    # Сбрасываем module-global перед вторым агентом (в реальности — отдельный процесс)
-    t._reset_for_test()
-    t.configure(agent_id="beta")
+    # Сбрасываем session перед вторым агентом (в реальности — отдельный процесс).
+    _agent_session.clear_session()
+    core_t.reset_all()
+    _set_agent("beta")
     k_b = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
     assert k_a != k_b
