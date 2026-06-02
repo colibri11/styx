@@ -4,6 +4,51 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.0.2] — 2026-06-02
+
+Патч-релиз. Совместимость плагина `styx-hermes` с Hermes Agent **v0.15.2**
+(образ v2026.5.29.2). Адаптер валидировался против v0.11/0.13; v0.15.2
+добавил `api_mode` в ABC `ContextEngine.update_model` и зовёт его на старте
+агента **без** try/except — HARD-BREAK. `styx-core` daemon без изменений
+(остаётся 1.0.1).
+
+### Fixed
+
+- **HARD-BREAK инициализации под Hermes v0.15.2.**
+  `StyxContextEngine.update_model` теперь принимает `api_mode` + `**kwargs`
+  (v0.15.2 зовёт `update_model(api_mode=…)` без try/except на старте агента,
+  `agent_init.py:1441/:1458`). `**kwargs` также на `compress` (поглощает
+  host-овый `compress(force=…)` — иначе `focus_topic` терялся бы через
+  degraded TypeError-retry путь Hermes) и защитно на
+  `should_compress`/`update_from_response`/`on_session_reset`.
+- **`StyxCodexTransport`** больше не ставит `prompt_cache_key` на путях
+  GitHub Models / xAI Responses — гейтит по `is_github_responses` /
+  `is_xai_responses`, как Hermes-default (`codex.py:158`).
+
+### Changed
+
+- Пин `styx-core` в `styx-hermes` поднят до `==1.0.1`.
+- `_agent_session.set_session` логирует warning при замене session на
+  другой `agent_id` (one-process-one-agent, Q20; замена остаётся намеренной).
+- **Деплой:** `docker/styx-bootstrap.sh`, `styx-hermes-setup` и
+  `docs/DEPLOYMENT.md` выставляют/документируют `context.engine: styx` —
+  без него Hermes v0.15.2 берёт встроенный compressor: Styx-движок
+  зарегистрирован, но **не выбран**.
+
+### Tests
+
+- Engine-тесты транспортов (`test_transport`, `test_codex_transport`)
+  переписаны под host-agnostic split (классы из `styx_hermes.engine.transport`,
+  `agent_id` через `_agent_session`); добавлен regression-тест
+  `StyxContextEngine` (`api_mode` HARD-BREAK + `compress(force=)`); удалён
+  pre-split `test_e2e_smoke.py` (рушил коллекцию всего suite; intent покрыт
+  `integration/test_real_plugin_discovery.py`).
+
+Валидация: host 159 passed / 6 infra-skip / 0 failed; hermes-drift 0/46
+против v0.15.2; полный Docker-integration smoke против Hermes v0.15.2 —
+**PASS** (live `hermes chat` активировал styx-движок без `update_model`
+TypeError; transports + hook + daemon-pipeline отработали).
+
 ## [1.0.1] — 2026-05-20
 
 Патч-релиз. Устранён боевой инцидент `memories_content_length_check`:
