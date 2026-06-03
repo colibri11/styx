@@ -3,6 +3,31 @@
 Все значимые изменения в Styx документируются здесь. Формат —
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
+`styx-core` и `styx-hermes` версионируются независимо — heading'и помечают
+пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
+`styx-core` тогда оставался на 1.0.1).
+
+## [styx-core 1.0.2] — 2026-06-02
+
+Минорный релиз `styx-core`. Новый HTTP-эндпоинт `POST /maintenance/reembed`
+(волна 31) — backfill `memories.embedding` через HTTP. `styx-hermes` без
+изменений (остаётся 1.0.3).
+
+### Added
+
+- **HTTP reembed-эндпоинт** `POST /maintenance/reembed` — host-агент в
+  контейнере (ходит к Styx только по HTTP, docker.sock не примонтирован)
+  сам добивает `embedding IS NULL`, а не только наблюдает счётчик
+  `pending_indexing.memories` в `/analytics`. Дёргает тот же `run_reembed`
+  (`commands/reembed.py`, волна 7e), что и CLI `styx reembed` — без
+  дублирования логики. Sync-хендлер (FastAPI threadpool) не блокирует event
+  loop на rate-limited embed-loop. Конкурентность — session-level advisory
+  lock (key `9876543211`, отдельный от sweep `9876543210`): параллельный
+  вызов получает `skipped: true`. Auth: `Depends(require_auth)` (Bearer как
+  у `/ingest_experience`). Параметры — паритет CLI: `mode`
+  (`null_only`/`all`), `agent_id`, `limit`, `dry_run`, `batch_size`,
+  `rate_per_second`. Scope — только memories (chunks — follow-up).
+  Контракт — `docs/HTTP_API.md` § `POST /maintenance/reembed`.
 
 ## [1.0.3] — 2026-06-02
 

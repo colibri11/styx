@@ -19,6 +19,7 @@ from styx.http.routes import (
     healthz as healthz_route,
     ingest as ingest_route,
     ingest_document as ingest_document_route,
+    maintenance as maintenance_route,
     memory_store as memory_store_route,
     pre_llm as pre_llm_route,
     recall as recall_route,
@@ -66,4 +67,5 @@ def create_app(config: StyxConfig) -> FastAPI:
     app.include_router(explain_route.router)
     app.include_router(analytics_route.router)
     app.include_router(confirm_usage_route.router)
+    app.include_router(maintenance_route.router)
     return app

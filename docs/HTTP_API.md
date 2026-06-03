@@ -1399,6 +1399,77 @@ Python-стороне.
 - 422 — empty memory_ids / > 100 / bad uuid.
 - 503 — disabled.
 
+### `POST /maintenance/reembed`
+
+Backfill / re-embed `memories.embedding` через HTTP (волна 31) — тот же
+`run_reembed`, что и CLI `styx reembed` (волна 7e). Нужен host-агенту в
+контейнере, который ходит к Styx только по HTTP (docker.sock не
+примонтирован → CLI/`docker exec` недоступны): агент сам добивает
+NULL-хвосты, а не только наблюдает счётчик `pending_indexing.memories`
+в `/analytics`.
+
+Sync-хендлер (FastAPI оффлоудит в threadpool) — rate-limited backfill-loop
+не блокирует event loop. Конкурентность ограничена session-level advisory
+lock'ом (key `9876543211`, отдельный от sweep `9876543210`): параллельные
+вызовы не дублируют embed и не давят на Ollama — второй получит
+`skipped: true`.
+
+**Scope — только memories.** chunks (`chunks.embedding IS NULL`) — отдельный
+follow-up.
+
+**Request** (все поля опциональны, паритет CLI):
+```json
+{
+  "mode": "null_only",
+  "agent_id": "agent_demo",
+  "limit": null,
+  "dry_run": false,
+  "batch_size": 50,
+  "rate_per_second": 5.0
+}
+```
+
+- `mode` — `"null_only"` (default; только `embedding IS NULL`) | `"all"`
+  (полный re-embed, например после смены модели).
+- `agent_id` — `str | null`; `null` означает все агенты.
+- `limit` — `int ≥ 0 | null`; ограничивает число обработанных рядов.
+- `dry_run` — `bool` (default `false`); `true` возвращает `would_process`
+  без UPDATE.
+- `batch_size` — `int ≥ 1` (default 50) — cursor-pagination batch.
+- `rate_per_second` — `float > 0` (default 5.0) — token-bucket лимит на
+  embed-вызовы к Ollama.
+
+**Response 200:**
+```json
+{
+  "processed": 79,
+  "failed": 0,
+  "would_process": 0,
+  "dry_run": false,
+  "elapsed_ms": 15234,
+  "skipped": false
+}
+```
+
+- `processed` — сколько рядов перезаписано embedding'ом (0 при `dry_run`
+  или `skipped`).
+- `failed` — embed/UPDATE упали на этих рядах (continue, не abort).
+- `would_process` — прогноз при `dry_run` (иначе 0).
+- `skipped` — `true` если advisory lock занят другим instance'ом; backfill
+  не запускался.
+- `elapsed_ms` — wall-clock хендлера (connect + embed-loop).
+
+**Auth:** `Depends(require_auth)` — Bearer как у `/ingest_experience`
+(mutating route, защита не слабее).
+
+**Hermes wrapper:** нет (operational surface, не LLM-facing).
+
+**Errors:**
+- 401 — нет / неверный Bearer (при заданном `http_token`).
+- 422 — Pydantic validation (например `rate_per_second: 0`, `mode` вне
+  enum, `limit < 0`) либо `ValueError` из `run_reembed`.
+- 503 — Postgres недоступен (`psycopg.OperationalError` при connect).
+
 ## Коды ошибок
 
 - **400** — Pydantic schema validation fail / business validation

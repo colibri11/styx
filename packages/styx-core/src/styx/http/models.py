@@ -759,6 +759,42 @@ class ConfirmUsageResponse(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+# ── maintenance / reembed (волна 31) ──────────────────────────────────────
+
+
+class MaintenanceReembedRequest(BaseModel):
+    """HTTP-параметры backfill'а `memories.embedding` (паритет CLI 7e).
+
+    Все поля опциональны. ``mode='null_only'`` (default) добивает только
+    ``embedding IS NULL``; ``'all'`` — полный re-embed (например после смены
+    модели). ``agent_id=None`` — все агенты. ``limit`` ограничивает число
+    обработанных. ``dry_run=True`` возвращает ``would_process`` без UPDATE.
+    """
+
+    mode: Literal["null_only", "all"] = "null_only"
+    agent_id: str | None = None
+    limit: int | None = Field(default=None, ge=0)
+    dry_run: bool = False
+    batch_size: int = Field(default=50, ge=1)
+    rate_per_second: float = Field(default=5.0, gt=0)
+
+
+class MaintenanceReembedResponse(BaseModel):
+    """Результат прогона.
+
+    ``skipped=True`` — advisory lock (key 9876543211) занят другим
+    instance'ом; backfill не запускался (``processed=failed=would_process=0``).
+    ``elapsed_ms`` — wall-clock хендлера (включая connect + embed-loop).
+    """
+
+    processed: int
+    failed: int
+    would_process: int
+    dry_run: bool
+    elapsed_ms: int
+    skipped: bool = False
+
+
 # ── context lifecycle (волна 26 Phase B) ──────────────────────────────────
 
 
