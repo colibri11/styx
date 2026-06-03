@@ -39,13 +39,14 @@ extensions/styx/
 
 ## Skills (LLM runbook'и)
 
-Манифест содержит `"skills": ["./skills"]` — OpenClaw runtime подгружает три SKILL.md в системный промпт когда description matches запрос пользователя. Это **дисциплина использования tool'ов для LLM**, не код:
+Манифест содержит `"skills": ["./skills"]` — OpenClaw runtime подгружает четыре SKILL.md в системный промпт когда description matches запрос пользователя. Это **дисциплина использования tool'ов для LLM**, не код:
 
 - **styx-capture** — когда вызывать `styx_store`, что **не** делать (дублирование dialogue, pre-check duplicates, фрагменты помещающиеся в текущий turn).
 - **styx-recall** — главный принцип: «прочитай automatic ContextEngine block в системном промпте первым, не дублируй через explicit recall». Дальше — два канала (line of `я` через `styx_recall` vs archive через `styx_search_archive`), 5 dialogue tools, knowledge graph, debugging через `styx_explain`.
 - **styx-reinterpret** — Styx-уникальная операция «переосмысление через blend embeddings» ([IAmBook §V](https://github.com/colibri11/IAm/blob/main/IAmBook_EN.md)). Когда reinterpret vs supersede vs correction, choosing weight, что апплай deferred 30-90s.
+- **styx-ingest** — `styx_ingest_document`: file → archive (PDF/DOCX/XLSX/Markdown через core-парсеры, волна 28). Pull-only архив, tail-memory не создаётся.
 
-Скиллы консервативны (~420 строк суммарно): описывают только actually-implemented поведение волн 17-26 + отсылки к ADR. Не выдумывают параметры — каждый field соответствует tool factory'у в `src/tools/*.ts`.
+Скиллы консервативны: описывают только actually-implemented поведение волн 17-28 + отсылки к ADR. Не выдумывают параметры — каждый field соответствует tool factory'у в `src/tools/*.ts`.
 
 ## Sanity-check (после `docker compose up -d --wait`)
 

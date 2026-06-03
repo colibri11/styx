@@ -1,6 +1,6 @@
-# Styx — Deployment Runbook (styx-core 1.0.1 / styx-hermes 1.0.3)
+# Styx — Deployment Runbook (styx-core 1.0.2 / styx-hermes 1.0.3)
 
-Инструкция по установке Styx в production (`styx-core` 1.0.1, `styx-hermes`
+Инструкция по установке Styx в production (`styx-core` 1.0.2, `styx-hermes`
 1.0.3). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
 три процесса:
 
@@ -170,12 +170,41 @@ ingest'а вложение деградирует безопасно: марке
 архивируется. Чтобы документы реально попадали в архив
 (`documents`+`chunks`), оба условия должны быть выполнены.
 
+### 4.5. Периодический reembed (обязательный шаг эксплуатации)
+
+Styx **не добивает `embedding IS NULL` автоматически** — воркера-комплитера
+в daemon нет (reembed по дизайну — on-demand утилита). Хвосты длинных ходов
+(inline embed-after-commit ограничен `message_split_inline_embed_cap`,
+default 4) копятся с `embedding = NULL` и **не находятся семантическим
+поиском**, пока их не реембедить. Авто-драйвер внутри daemon — open
+follow-up; **пока backfill драйвится снаружи, и это надо настроить при
+деплое.**
+
+Поставь периодический прогон внешним планировщиком (cron / systemd timer),
+например раз в 10 минут:
+
+```bash
+# host-агент / любой клиент с доступом к daemon по HTTP (styx-core ≥ 1.0.2):
+*/10 * * * * curl -fsS -X POST http://127.0.0.1:8788/maintenance/reembed \
+  -H "Authorization: Bearer $STYX_HTTP_TOKEN" \
+  -H "Content-Type: application/json" -d '{"mode":"null_only"}' >/dev/null
+
+# либо на хосте с доступом к процессу/контейнеру daemon'а — тем же cron'ом:
+# */10 * * * * /path/to/.venv/bin/styx reembed
+```
+
+Перехлёст расписания безопасен: параллельные вызовы взаимоисключаются
+session-level advisory lock'ом → лишний вернёт `{"skipped":true}`, двойного
+embed'а нет. `--all` / `{"mode":"all"}` — полный re-embed после смены
+embedding-модели (тяжелее, гонять вручную). Контракт эндпоинта —
+`docs/HTTP_API.md` § `POST /maintenance/reembed`.
+
 ## 5. Validation
 
 ```bash
 # Daemon живой
 curl -s http://127.0.0.1:8788/healthz | jq .
-# {"status":"ok","postgres":"ok","version":"1.0.1",...}
+# {"status":"ok","postgres":"ok","version":"1.0.2",...}
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
@@ -211,6 +240,13 @@ Daemon не может подключиться к `STYX_DATABASE_URL`. Пров
 
 `STYX_OLLAMA_URL` недоступен или Ollama не отвечает. Liveness (`/healthz`)
 независим от Ollama.
+
+### `/analytics` показывает растущий `pending_indexing.memories > 0`
+
+Это NULL-хвосты длинных ходов (embedding не добит). Само не рассосётся:
+авто-комплитера нет. Если счётчик растёт и не падает — **периодический
+reembed не настроен**, см. § 4.5. Разовый прогон — `styx reembed` или
+`POST /maintenance/reembed`.
 
 ## 7. Docker
 

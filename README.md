@@ -282,7 +282,9 @@ extensions/
   sync_turn), composer (`/context/{build,assemble}`, compact,
   after_turn), recall + search_archive, dialogue (5 routes), relations
   + graph traverse, reinterpret, ingest (experience + document),
-  explain (3 modes) + analytics + confirm_usage, healthz / readyz.
+  explain (3 modes) + analytics + confirm_usage,
+  maintenance (`/maintenance/reembed` — backfill embedding'ов),
+  healthz / readyz.
   Полный контракт — [`docs/HTTP_API.md`](docs/HTTP_API.md).
 
 ---
@@ -358,4 +360,5 @@ Anthropic / OpenAI / z.ai / Codex).
 
 ## Статус
 
-Styx 1.0.1.
+`styx-core` 1.0.2 · `styx-hermes` 1.0.3. Пакеты версионируются
+независимо — см. [`CHANGELOG.md`](CHANGELOG.md).
