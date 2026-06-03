@@ -3,6 +3,8 @@
 - ``styx migrate [DSN]`` — применить миграции схемы Postgres.
 - ``styx reembed`` — backfill ``memories.embedding`` (NULL-fill или
   full re-embed после смены модели).
+- ``styx rename-agent <old> <new>`` — переименовать ``agent_id`` по
+  всем agent-scoped таблицам (волна 32; админская миграция).
 - ``styx daemon run`` — поднять HTTP API + worker pool в одном процессе.
 - ``styx daemon healthcheck [--url ...]`` — стук в /healthz remote daemon.
 
@@ -72,6 +74,61 @@ def cmd_reembed(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rename_agent(args: argparse.Namespace) -> int:
+    """``styx rename-agent <old> <new>`` — переименование agent_id.
+
+    Открывает ``psycopg.connect``; ``with conn:`` коммитит на чистом
+    выходе / rollback на исключении — это и даёт **одну транзакцию** на
+    все UPDATE'ы (атомарность «всё-или-ничего»). Частичный rename =
+    расщеплённое `я`, хуже отказа.
+    """
+    import psycopg
+
+    from styx.commands.rename_agent import run_rename_agent
+    from styx.config import load as load_config
+
+    config = load_config()
+
+    # Интерактивный confirm — только если не --yes, не --dry-run и tty
+    # доступен. В неинтерактивной среде (docker exec без -t) confirm
+    # пропускается (как будто --yes), чтобы не зависнуть на input().
+    if not args.dry_run and not args.yes and sys.stdin.isatty():
+        prompt = (
+            f"Переименовать agent_id '{args.old}' → '{args.new}' "
+            "по всем agent-scoped таблицам? Это прямая запись в БД "
+            "(daemon должен быть остановлен / агент неактивен). [y/N]: "
+        )
+        answer = input(prompt).strip().lower()
+        if answer not in ("y", "yes"):
+            print("отменено")
+            return 1
+
+    try:
+        with psycopg.connect(config.database_url) as conn:
+            result = run_rename_agent(
+                conn=conn,
+                old=args.old,
+                new=args.new,
+                dry_run=args.dry_run,
+            )
+    except ValueError as exc:
+        # Штатные операторские отказы (collision / нет агента / валидация)
+        # — чистый stderr + return 1, без traceback (migration-команда,
+        # collision/«нет агента» — ожидаемые юзер-кейсы, не баг).
+        print(f"ошибка: {exc}", file=sys.stderr)
+        return 1
+
+    verb = "would rename" if result.dry_run else "renamed"
+    for table, count in result.tables:
+        if count:
+            print(f"  {table}: {count}")
+    print(
+        f"{verb} {result.total_rows} rows across {len(result.tables)} tables "
+        f"({result.old!r} → {result.new!r})"
+    )
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     """``styx daemon <subcommand>`` — run / healthcheck."""
     from styx.http.server import healthcheck, run_daemon
@@ -135,6 +192,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Лимит embed-вызовов в секунду (default 5.0)"
     )
     reembed.set_defaults(func=cmd_reembed)
+
+    rename = subparsers.add_parser(
+        "rename-agent",
+        help="Переименовать agent_id по всем agent-scoped таблицам",
+        description=(
+            "Переименовать agent_id <old> → <new> во всех таблицах со "
+            "столбцом agent_id (schema-driven). Одна транзакция, UUID не "
+            "трогаются. ОПЕРАЦИОННАЯ ОГОВОРКА: это прямая запись в БД; если "
+            "daemon в этот момент держит in-memory state агента <old> "
+            "(focus_tracker / hot_tier / working_set), он осиротеет. "
+            "Выполняй на НЕАКТИВНОМ агенте либо рестартни daemon после."
+        ),
+    )
+    rename.add_argument("old", help="Текущий agent_id")
+    rename.add_argument("new", help="Новый agent_id (не должен существовать)")
+    rename.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Только counts по таблицам для <old>; UPDATE'ы не идут",
+    )
+    rename.add_argument(
+        "--yes",
+        action="store_true",
+        help="Без интерактивного подтверждения (для скриптов / docker exec)",
+    )
+    rename.set_defaults(func=cmd_rename_agent)
 
     daemon = subparsers.add_parser(
         "daemon",

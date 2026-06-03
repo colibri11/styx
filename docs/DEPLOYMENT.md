@@ -199,6 +199,35 @@ embed'а нет. `--all` / `{"mode":"all"}` — полный re-embed после
 embedding-модели (тяжелее, гонять вручную). Контракт эндпоинта —
 `docs/HTTP_API.md` § `POST /maintenance/reembed`.
 
+### 4.6. Переименование агента (`styx rename-agent`)
+
+Админская миграционная операция (styx-core ≥ 1.0.3): переименовать
+`agent_id` по всем agent-scoped таблицам. Нужна, в частности, при
+переселении агента в Styx, чтобы его накопленная линия `я` смотрела под
+именем Hermes-профиля (`agent_identity` = имя профиля), — выравнивание
+`agent_id` под Hermes-профили перед миграцией.
+
+```bash
+# сухой прогон — counts по таблицам, БД не трогается:
+.venv/bin/styx rename-agent old-id new-profile-name --dry-run
+
+# реальное переименование (одна транзакция; --yes для docker exec / скриптов):
+docker exec -e STYX_DATABASE_URL="$STYX_DATABASE_URL" styx-daemon \
+  styx rename-agent old-id new-profile-name --yes
+```
+
+Список таблиц вычисляется из `information_schema` в рантайме (новые
+agent_id-таблицы покрываются автоматически). UUID'ы не меняются —
+эмбеддинги, граф и переосмысления остаются нетронутыми; cross-agent
+рёбра сохраняются. `new` не должен уже существовать (collision-refuse —
+слияние агентов не поддержано).
+
+**Операционная оговорка:** это прямая запись в БД. Если daemon в этот
+момент держит in-memory state агента `old`
+(focus_tracker / hot_tier / working_set), он осиротеет — выполняй на
+**неактивном** агенте либо рестартни daemon после. Для агентов, ещё не
+обслуживаемых styx-daemon (например на старом фронтенде), это безопасно.
+
 ## 5. Validation
 
 ```bash
