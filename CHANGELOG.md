@@ -7,6 +7,41 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [1.0.4] — 2026-06-03
+
+Релиз `styx-hermes` (волна 33, multi-agent Hermes provisioning, этап 1).
+Чистая установка Styx больше НЕ подключает ни одного профиля — образ
+оставляет Styx установленным, но не подключённым ни к одному профилю
+(все профили на штатной памяти Hermes); подключение к Styx стало отдельным
+явным идемпотентным шагом. `styx-core`
+без изменений (остаётся 1.0.3).
+
+### Добавлено
+
+- **Bundled styx-memory shim в образ.** Shim кладётся в образ как
+  bundled-каталог `/opt/hermes/plugins/memory/styx-memory/` → memory
+  discovery находит его из любого профиля без per-profile/per-base
+  установки. Host-деплои продолжают пользоваться `styx-hermes-setup`
+  shim-install (`--force`) — этот путь без изменений.
+- **Идемпотентная attach-команда** `styx-hermes-setup --attach
+  [--profile <name>]` — подключает Hermes-профиль к Styx патчем его
+  `config.yaml`: `memory.provider: styx-memory`, `plugins.enabled += styx`
+  (без дублей, существующие сохранены), `context.engine: styx`. Target:
+  база (без `--profile`) — `<hermes_home>/config.yaml`; именованный —
+  `<hermes_home>/profiles/<name>/config.yaml`. Перед патчем — файловый
+  бэкап `config.yaml.bak.<ts>` (дословная копия исходных байт), только
+  когда патч реально меняет файл; идемпотентный повтор — no-op, exit 0,
+  без бэкапа. Нет `config.yaml` → чистая английская ошибка + nonzero
+  exit, config НЕ создаётся.
+- Объявлена прямая зависимость **`pyyaml>=6.0`** (attach читает/пишет
+  `config.yaml`); раньше тянулась транзитивно.
+
+### Деплой
+
+- **Не подключён по умолчанию.** Cont-init авто-патч базы при старте убран из
+  образа (`docker/styx-bootstrap.sh` ретайрен); подключение базы — теперь
+  тоже явный `styx-hermes-setup --attach` (без `--profile`).
+
 ## [styx-core 1.0.3] — 2026-06-03
 
 Минорный релиз `styx-core`. Новая админская CLI-команда
