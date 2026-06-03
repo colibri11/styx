@@ -91,7 +91,7 @@ SYSTEM_PROMPT = """Ты оцениваешь важность записи в д
 Вход: "напомни, какой сегодня день"
 Ответ: {"skip": true, "skip_reason": "процессная реплика без содержания, запоминать нечего", "importance_score": null, "rationale": null, "signals": null}
 
-Вход: "пользователь предпочитает qwen3:4b-local из-за большого контекстного окна в ущерб количеству параметров"
+Вход: "qwen3:4b-local выбран из-за большого контекстного окна в ущерб количеству параметров"
 Ответ: {"skip": false, "skip_reason": null, "importance_score": 0.82, "rationale": "Декларация устойчивого технического предпочтения с обоснованием; пригодится при будущих решениях о выборе модели.", "signals": {"has_specific_facts": true, "self_reference": true, "emotional_weight": 0.1, "declarative": true, "abstraction_level": "concrete"}}
 
 Отвечай только JSON. Без комментариев, без префиксов, без блоков кода."""

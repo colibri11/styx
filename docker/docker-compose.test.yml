@@ -11,7 +11,8 @@
 #                       shared network namespace с openclaw-gateway.
 #
 # Ollama — внешняя (LAN), хост через extra_hosts: `ollama:${OLLAMA_HOST_IP}`
-# из .env. Сейчас OLLAMA_HOST_IP. styx-daemon и hermes-styx используют для
+# из .env. IP Ollama-сервера берётся из `.env` (`OLLAMA_HOST_IP`).
+# styx-daemon и hermes-styx используют для
 # embedding (embeddinggemma:300m) + LLM (qwen3:4b-local). openclaw-gateway
 # Ollama не нужна — он использует zai/glm-5.1 через z.ai API.
 #
@@ -262,7 +263,7 @@ services:
     ports:
       - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
     extra_hosts:
-      # Ollama с LAN (OLLAMA_HOST_IP) → имя `ollama:11434` для
+      # Ollama с LAN (IP из `.env`, `OLLAMA_HOST_IP`) → имя `ollama:11434` для
       # models.providers.ollama.baseUrl=http://ollama:11434.
       - "ollama:${OLLAMA_HOST_IP:-127.0.0.1}"
     init: true

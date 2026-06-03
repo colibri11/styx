@@ -57,10 +57,10 @@ def test_attach_base(tmp_path: Path) -> None:
 
 def test_attach_named(tmp_path: Path) -> None:
     home = tmp_path / "hermes"
-    config = home / "profiles" / "agent-b" / "config.yaml"
+    config = home / "profiles" / "agent-a" / "config.yaml"
     _write_config(config, {"model": {"name": "y"}})
 
-    rc = setup_cli.main(["--attach", "--profile", "agent-b", "--hermes-home", str(home)])
+    rc = setup_cli.main(["--attach", "--profile", "agent-a", "--hermes-home", str(home)])
     assert rc == 0
 
     data = yaml.safe_load(config.read_text())
@@ -179,7 +179,7 @@ def test_attach_bad_profile_name(tmp_path: Path, bad: str) -> None:
 def test_profile_requires_attach(tmp_path: Path) -> None:
     home = tmp_path / "hermes"
     with pytest.raises(SystemExit) as exc:
-        setup_cli.main(["--profile", "agent-b", "--hermes-home", str(home)])
+        setup_cli.main(["--profile", "agent-a", "--hermes-home", str(home)])
     # argparse error → exit code 2.
     assert exc.value.code != 0
 

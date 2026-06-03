@@ -3,7 +3,7 @@
 -- Search archive (волна 20) делает hybrid query поверх chunks:
 -- ts_rank(content_tsv, plainto_tsquery('simple', $q)) + (1 - cosine).
 -- Без generated tsvector + GIN — sequential scan на каждый search,
--- неприемлемо для production volume (agent-a/agent-b через миграцию данных
+-- неприемлемо для production volume (production-агенты через миграцию данных
 -- дадут tens of thousands of chunks).
 --
 -- TS config 'simple' — consistency с `memories.content_tsv` (миграция

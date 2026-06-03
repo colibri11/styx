@@ -97,7 +97,7 @@ def test_importance_worker_real_qwen3(migrated: str, agent_id: str) -> None:
     from styx.workers.main import run as worker_run
 
     content = (
-        "пользователь предпочитает qwen3:4b-local из-за большого контекстного окна, "
+        "qwen3:4b-local предпочитают из-за большого контекстного окна, "
         "несмотря на меньшее число параметров. Это устойчивое техническое "
         "предпочтение для structured JSON задач."
     )

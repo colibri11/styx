@@ -132,8 +132,8 @@ def xlsx_fixture(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert ws1 is not None
     ws1.title = "Sheet1"
     ws1.append(["Имя", "Возраст"])
-    ws1.append(["agent-a", 28])
-    ws1.append(["agent-b", 30])
+    ws1.append(["alpha", 28])
+    ws1.append(["beta", 30])
 
     ws2 = wb.create_sheet("Sheet2")
     ws2.append(["X", "Y", "Z"])
@@ -231,7 +231,7 @@ def test_parse_xlsx(xlsx_fixture: Path) -> None:
     result = parse(xlsx_fixture)
     assert "=== Sheet: Sheet1 ===" in result.text
     assert "=== Sheet: Sheet2 ===" in result.text
-    assert "agent-a" in result.text
+    assert "alpha" in result.text
     assert "28" in result.text
     assert result.metadata.get("sheet_names") == ["Sheet1", "Sheet2"]
 

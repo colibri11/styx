@@ -9,7 +9,7 @@ embedding'у и пишет рёбра ``relation='related_to'`` в ``relations``
 captured user/assistant ряда после embed-after-commit.
 
 Cross-agent (D2 в wave-doc'е): SELECT соседей идёт без `agent_id`-
-фильтра. agent-a и agent-b живут в одном PG; общий пул знаний строится
+фильтра. Несколько агентов живут в одном PG; общий пул знаний строится
 auto-link'ом — единственное cross-agent место в Styx.
 
 Идемпотентность через UNIQUE constraint
