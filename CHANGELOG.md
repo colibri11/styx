@@ -7,6 +7,32 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.3] — 2026-06-03
+
+Минорный релиз `styx-core`. Новая админская CLI-команда
+`styx rename-agent <old> <new>` (волна 32) — переименование `agent_id`
+по всем agent-scoped таблицам. `styx-hermes` без изменений (остаётся 1.0.3).
+
+### Added
+
+- **CLI `styx rename-agent <old> <new>`** — переименование `agent_id`
+  во всех таблицах со столбцом `agent_id` (этап 1 миграции agent-a/agent-b
+  memorybox→styx: приведение `agent_id` к именам Hermes-профилей).
+  Список таблиц **schema-driven** из `information_schema.columns`
+  (не хардкод — инвариант волны 27: пропущенная таблица = расщеплённое
+  `я`). Одна транзакция на все `UPDATE` (атомарность «всё-или-ничего»);
+  UUID'ы (`memory_id`/`document_id`/`session_id`, граф
+  `source_id/target_id`) не трогаются — эмбеддинги, граф, переосмысления,
+  эмоц-снапшоты остаются байт-в-байт, cross-agent рёбра сохраняются.
+  Existence-гард (`old` обязан существовать) + collision-refuse (`new`
+  не должен иметь данных — слияние агентов не поддержано). `--dry-run`
+  считает per-table counts без записи; `--yes` пропускает интерактивный
+  confirm (для `docker exec`). Имена таблиц через `psycopg.sql.Identifier`
+  (не f-string), значения — параметры. Логика — `commands/rename_agent.py`
+  (`run_rename_agent`, caller-owned conn, не коммитит сам — как `reembed`).
+  Операционная оговорка: прямая запись в БД, выполнять на неактивном
+  агенте / рестартить daemon после (in-memory state осиротеет).
+
 ## [styx-core 1.0.2] — 2026-06-02
 
 Минорный релиз `styx-core`. Новый HTTP-эндпоинт `POST /maintenance/reembed`

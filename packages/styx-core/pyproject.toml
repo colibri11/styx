@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "styx-core"
-version = "1.0.2"
+version = "1.0.3"
 description = "Дирижёр динамической части контекстного окна LLM-агента — host-agnostic ядро."
 readme = "README.md"
 requires-python = ">=3.11"
