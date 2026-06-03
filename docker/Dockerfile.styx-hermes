@@ -3,32 +3,42 @@
 # Базовый образ — официальный s6-overlay nousresearch/hermes-agent.
 # В нём gateway НЕ бинарь на PATH: его поднимает s6-супервизор, а docker
 # CMD `["gateway","run"]` маршрутизируется main-wrapper.sh в
-# `s6-setuidgid hermes hermes gateway run`. Поэтому Styx-bootstrap
-# интегрируется НАТИВНО как s6 cont-init.d hook (см. ниже), а НЕ как
-# entrypoint-wrapper с `exec gateway` (это давало exit 127 на s6-образе).
-# См. .design/context/decisions.md § 15 + § 48.
+# `s6-setuidgid hermes hermes gateway run`.
+# См. .design/context/decisions.md § 15 + § 48 + § 51.
+#
+# ── ORPHAN-МОДЕЛЬ (волна 33) ──────────────────────────────────────────
+# Чистый образ оставляет Styx ДОСТУПНЫМ, но СИРОТОЙ: ни один профиль не
+# подключён к Styx, включая базовый. Все профили работают на штатной
+# памяти Hermes до явного attach.
+#
+#   • Доступность: bundled memory-shim лежит в образе под
+#     /opt/hermes/plugins/memory/styx-memory/ (COPY ниже). Bundled-каталоги
+#     обнаруживаются Hermes БЕЗУСЛОВНО (нужен лишь <name>/__init__.py),
+#     загрузка через spec_from_file_location — дефис в имени переживает.
+#     Это делает StyxMemoryProvider обнаружимым из ЛЮБОГО профиля, без
+#     per-profile/per-base shim-install.
+#   • Discovery ≠ attach. Провайдер лишь *обнаруживается*; он грузится
+#     и используется, только когда в config.yaml профиля стоит
+#     `memory.provider: styx-memory`. На orphan-профиле этого ключа нет →
+#     shim не грузится, нулевой overhead, нет сайд-эффектов. Поэтому
+#     bundled shim НЕ нарушает orphan-инвариант.
+#   • Подключение — отдельный явный идемпотентный шаг, НЕ при старте
+#     контейнера. Выполняется командой
+#       styx-hermes-setup --attach [--profile <name>]
+#     (через `docker exec`). Она патчит config.yaml целевого профиля
+#     (memory.provider/plugins.enabled/context.engine) + бэкап + печатает
+#     required-рестарт. Авто-патча на старте больше НЕТ (прежний
+#     cont-init.d/30-styx-bootstrap ретайрен).
 #
 # Build:
 #   docker compose -f docker/docker-compose.test.yml build hermes-styx
 #   (HERMES_IMAGE передаётся из compose; для прода —
 #    --build-arg HERMES_IMAGE=nousresearch/hermes-agent:v2026.5.29.2)
-#
-# ВАЖНО: HERMES_IMAGE обязан быть s6-overlay образом. Bootstrap кладётся в
-# /etc/cont-init.d/ — этот механизм есть только в s6. На не-s6 базе (старый
-# tini hermes-agent:latest) cont-init.d не выполнится → setup+patch не
-# отработают → Styx молча неактивен (контейнер стартует без ошибки).
 
 ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.5.29.2
 FROM ${HERMES_IMAGE}
 
 USER root
-
-# Bootstrap как s6 cont-init.d hook: s6 выполняет /etc/cont-init.d/* как
-# root ДО старта user-сервисов, в лексикографическом порядке. Префикс
-# `30-` ставит нас ПОСЛЕ штатных 01-hermes-setup / 015-supervise-perms /
-# 02-reconcile-profiles (config.yaml к этому моменту уже создан). Скрипт
-# делает только setup+patch, БЕЗ запуска gateway — его поднимает s6 сам.
-COPY --chmod=0755 docker/styx-bootstrap.sh /etc/cont-init.d/30-styx-bootstrap
 
 # styx-core + styx-hermes pip-packages. .dockerignore исключает
 # .venv/.git/__pycache__/etc.
@@ -61,9 +71,19 @@ RUN /usr/local/bin/uv pip install --no-deps -e /opt/styx-core && \
         "python-docx>=1.1" \
         "openpyxl>=3.1"
 
+# Bundled memory-shim (orphan-модель, волна 33). Лежит ПОСЛЕ установки
+# styx-пакетов: `__init__.py` шима делает `from styx_hermes.memory_plugin
+# import register`, что резолвится против pip-установленного styx_hermes
+# (см. RUN выше). Каталог bundled под /opt/hermes/plugins/memory/<name>/
+# обнаруживается Hermes безусловно (нужен лишь <name>/__init__.py),
+# грузится через spec_from_file_location — дефис в имени ОК. Делает
+# StyxMemoryProvider обнаружимым из любого профиля; attach отдельной
+# командой (см. шапку).
+COPY --chown=hermes:hermes packages/styx-hermes/src/styx_hermes/resources/plugins/styx-memory /opt/hermes/plugins/memory/styx-memory/
+
 # ENTRYPOINT наследуется от base: s6 `/init` → main-wrapper.sh, который
 # маршрутизирует docker CMD под `s6-setuidgid hermes`. CMD по умолчанию
 # в проде — `["gateway","run"]`; в test-стеке — `["sleep","infinity"]`
-# (см. docker-compose.test.yml). styx-bootstrap из CMD убран —
-# он отрабатывает как cont-init.d hook ещё до маршрутизации CMD.
+# (см. docker-compose.test.yml). Авто-attach при старте контейнера нет —
+# Styx остаётся сиротой до явной команды `styx-hermes-setup --attach`.
 USER root

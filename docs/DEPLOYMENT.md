@@ -1,7 +1,7 @@
-# Styx — Deployment Runbook (styx-core 1.0.2 / styx-hermes 1.0.3)
+# Styx — Deployment Runbook (styx-core 1.0.3 / styx-hermes 1.0.4)
 
-Инструкция по установке Styx в production (`styx-core` 1.0.2, `styx-hermes`
-1.0.3). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
+Инструкция по установке Styx в production (`styx-core` 1.0.3, `styx-hermes`
+1.0.4). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
 три процесса:
 
 - **`styx-core`** — host-agnostic ядро + HTTP API daemon
@@ -65,6 +65,10 @@ uv sync
 .venv/bin/styx-hermes-setup --hermes-home ~/.hermes
 ```
 
+Это путь для **host-деплоя** (без Docker). В Docker-образе shim **bundled**
+в `/opt/hermes/plugins/memory/styx-memory/` (см. § 7.1), отдельная установка
+не нужна.
+
 General plugin (`styx`) подхватывается через entry-point `hermes_agent.plugins`
 из pip-установки — отдельного shim'а не требует.
 
@@ -87,6 +91,13 @@ plugins:
 **не выбирается**, и `ContextEngine` Styx'а не работает (recall/инъекция
 геометрии не происходит). `plugins.enabled += styx` включает плагин, но
 не выбирает движок — это разные ключи.
+
+Эти три ключа на профиль выставляет идемпотентная команда
+`styx-hermes-setup --attach` (см. § 4.7) — это **предпочтительный** способ
+подключения профиля; ручная правка YAML — альтернатива. Под текущей моделью
+config **не патчится автоматически** при старте контейнера (авто-bootstrap
+ретайрен, см. § 7.1): чистая установка оставляет все профили на штатной
+памяти Hermes, пока их явно не подключат через `--attach`.
 
 ## 3. Database setup
 
@@ -228,12 +239,131 @@ agent_id-таблицы покрываются автоматически). UUID
 **неактивном** агенте либо рестартни daemon после. Для агентов, ещё не
 обслуживаемых styx-daemon (например на старом фронтенде), это безопасно.
 
+### 4.7. Multi-agent Hermes — привязка профилей к Styx
+
+**Модель.** Каждый Hermes-профиль = отдельный агент. `agent_id` в общем
+styx-daemon = имя профиля (базовый профиль → `default`, именованный → его
+имя). Один gateway-процесс на профиль; styx-daemon общий на все профили.
+Чистая установка Styx на Hermes оставляет Styx установленным, но **не
+подключённым ни к одному профилю** (включая базовый): bundled memory-shim
+(§ 7.1) делает `StyxMemoryProvider` обнаружимым из любого профиля, но ни один
+профиль его не использует — все работают на штатной памяти Hermes, пока их
+явно не привяжут командой ниже. Авто-патча config больше нет (§ 7.1).
+
+**Предусловие.** В env hermes-контейнера должны быть `STYX_DATABASE_URL`
+(гейт выбора провайдера, § 7.1), `STYX_DAEMON_URL` и `STYX_HTTP_TOKEN`
+(§ 4.2). Без `STYX_DATABASE_URL` провайдер не выберется даже после attach.
+Эти переменные **контейнер-уровневые** — общие для всех профилей; `--clone`
+копирует per-profile `.env` (идентичность профиля), но connection-vars Styx
+берутся из env контейнера, не из профильного `.env`.
+
+Все команды ниже — формат `docker exec -u hermes <hermes-container>
+/opt/hermes/.venv/bin/styx-hermes-setup …`. В test-стеке
+(`docker/docker-compose.test.yml`) hermes-контейнер — `styx-test-hermes`,
+postgres — `styx-test-postgres`, `HERMES_HOME=/opt/data`. В произвольном
+деплое имена контейнеров узнать через `docker compose -f <file> ps`.
+
+**Применение attach — test-стек vs прод.**
+- *Test-стек*: hermes-контейнер живёт как `sleep infinity`, постоянного
+  gateway нет — профиль прогоняется разовым `hermes chat` (читает config
+  заново при каждом запуске), поэтому attach действует **со следующего
+  `hermes chat`, без рестарта**.
+- *Прод* (`command=["gateway","run"]`): на каждый профиль свой long-running
+  gateway (s6). Живой gateway переписывает `config.yaml` из памяти
+  (`save_config_value`) → после attach **рестартнуть gateway этого профиля**.
+  В одно-контейнерном test-стеке рестарт контейнера задел бы все профили; в
+  проде рестартится только сервис нужного профиля.
+
+**1. Подключить БАЗОВЫЙ профиль:**
+```bash
+docker exec -u hermes <hermes> /opt/hermes/.venv/bin/styx-hermes-setup \
+  --attach --hermes-home /opt/data
+```
+Ожидаемый stdout (дословно):
+```
+attached '<name>' to Styx:
+  memory.provider = styx-memory
+  plugins.enabled += styx
+  context.engine = styx
+  config: <path>/config.yaml
+  backup: <path>/config.yaml.bak.<YYYYMMDD-HHMMSS>
+Restart the profile gateway / container to apply (a running gateway reverts config edits).
+```
+Применить: в test-стеке — следующий `hermes chat` (рестарт не нужен); в
+проде — **рестартнуть gateway этого профиля** (иначе живой gateway перезапишет
+config из памяти и откатит attach). См. «Применение attach» выше.
+
+**2. Подключить ИМЕНОВАННЫЙ профиль.** Профилю сперва нужен `config.yaml`.
+Голый `hermes profile create <name>` его **НЕ создаёт** → attach выдаст
+ошибку (см. п. 4). Создавай с наследованием config от активного профиля:
+```bash
+docker exec -u hermes -e HOME=/opt/data <hermes> \
+  /opt/hermes/.venv/bin/hermes profile create <name> --clone
+```
+(`--clone` копирует `config.yaml`/`.env`/`SOUL.md` из активного профиля.)
+Затем:
+```bash
+docker exec -u hermes <hermes> /opt/hermes/.venv/bin/styx-hermes-setup \
+  --attach --profile <name> --hermes-home /opt/data
+```
+Применить как в п. 1 (test-стек: следующий `hermes chat` под профилем; прод:
+рестарт gateway профиля). Если клонируешь от **уже подключённой** базы — клон
+уже несёт styx-config, attach будет no-op (см. п. 3); клонируешь от
+неподключённого профиля — attach патчит config.
+
+**3. Идемпотентность.** Повторный attach уже подключённого профиля:
+```
+'<name>' already attached to Styx; no changes
+```
+EXIT 0, новый бэкап **не создаётся**.
+
+**4. Ошибка «нет config»** (EXIT 1, дословно):
+```
+Config not found for profile '<name>' at <path>/config.yaml. The profile has no config.yaml yet — initialize it first (run the profile once), then re-run --attach.
+```
+Что делать: создать профиль через `--clone` (п. 2) **либо** один раз
+запустить профиль, чтобы Hermes лениво создал config, затем повторить attach.
+
+**5. Бэкап и откат.** Каждый реальный патч пишет `config.yaml.bak.<ts>` —
+дословную копию исходника. attach переписывает весь `config.yaml` через YAML
+round-trip, поэтому **комментарии / форматирование штатного config
+теряются**; дословный исходник остаётся в `.bak`. Detach вручную:
+восстановить из `.bak.<ts>` + рестарт.
+
+**6. Выравнивание agent_id под существующую линию `я`.** Если имя профиля
+отличается от уже накопленного styx-`agent_id` (миграция агента в Styx),
+привести id командой `styx rename-agent <old> <new>` (§ 4.6) — чтобы профиль
+смотрел на накопленную память, а не на пустого агента.
+
+**7. Верификация.** Прогнать профиль (создаёт его `agent_id` в БД) — `hermes
+chat` под `HERMES_HOME` этого профиля. `agent_identity` (=`agent_id`)
+выводится из `HERMES_HOME`: `/opt/data`→`default`,
+`/opt/data/profiles/<name>`→`<name>`:
+```bash
+# именованный профиль agent-a (agent_id=agent-a):
+docker exec -u hermes -e HOME=/opt/data/profiles/agent-a \
+  -e HERMES_HOME=/opt/data/profiles/agent-a styx-test-hermes \
+  /opt/hermes/.venv/bin/hermes chat -Q -q "ping" -m <model>
+```
+Затем проверить, что профиль появился отдельным `agent_id`:
+```bash
+docker exec styx-test-postgres psql -U postgres -d styx -c \
+  "select agent_id, count(*) from memories group by agent_id order by agent_id;"
+```
+Базовый профиль → `default`, именованный → его имя. Контент изолирован
+per-agent.
+
+**8. Чистая установка.** Чтобы воспроизвести чистый старт (Styx ни к одному
+профилю не подключён), нужен **чистый `HERMES_HOME` volume**: переиспользуемый
+volume может нести
+styx-привязку от прошлых сессий (config уже пропатчен).
+
 ## 5. Validation
 
 ```bash
 # Daemon живой
 curl -s http://127.0.0.1:8788/healthz | jq .
-# {"status":"ok","postgres":"ok","version":"1.0.2",...}
+# {"status":"ok","postgres":"ok","version":"1.0.3",...}
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
@@ -298,21 +428,25 @@ docker compose -f docker/docker-compose.test.yml --env-file .env up -d --build
 CMD маршрутизируется `main-wrapper.sh` в `s6-setuidgid hermes hermes
 gateway run`. Поэтому:
 
-- **Bootstrap Styx — это s6 cont-init.d hook** (`docker/styx-bootstrap.sh`
-  → `/etc/cont-init.d/30-styx-bootstrap` в `Dockerfile.styx-hermes`): он
-  делает setup (`styx-hermes-setup`) + патч `config.yaml`
-  (`memory.provider`/`plugins.enabled`/`context.engine`) при старте
-  контейнера, ДО запуска gateway. НЕ перехватывает запуск через
-  `exec gateway` (на s6 это даёт `exec: gateway: not found` → exit 127).
-- **`command` обёртки в проде — дефолтный образа `["gateway","run"]`**
-  (styx-bootstrap из command убран). В test-стеке — `["sleep","infinity"]`
-  (контейнер живёт для `docker compose exec ... pytest`; cont-init hook
-  всё равно отрабатывает setup).
-- **`HERMES_IMAGE` обязан быть s6-overlay образом.** На не-s6 базе
-  cont-init.d не выполнится → bootstrap молча не отработает.
-- **`STYX_DATABASE_URL` нужен у hermes-styx-обёртки** (или styx.json с
-  `database_url`): Hermes выбирает memory-провайдер по
+- **Styx ставится в образ** (pip: `styx-core` + `styx-hermes`), а
+  **bundled memory-shim** копируется в `/opt/hermes/plugins/memory/styx-memory/`
+  (Dockerfile `COPY`) → `StyxMemoryProvider` **обнаружим из любого профиля**.
+  Bundled-каталог приоритетнее user-`$HERMES_HOME/plugins/`. Bundled-shim
+  через `COPY` работает на любой базе, но runtime Hermes рассчитан на s6.
+- **Авто-attach'а НЕТ.** В чистом образе shim обнаружим, но
+  **ни один профиль не подключён**, включая базовый. Все профили работают на
+  штатной памяти Hermes, пока их явно не подключат. Авто-патч `config.yaml`
+  при старте контейнера ретайрен (cont-init `30-styx-bootstrap` удалён,
+  `docker/styx-bootstrap.sh` ретайрен). Привязка профиля — явный
+  идемпотентный шаг `styx-hermes-setup --attach` (см. § 4.7).
+- **`STYX_DATABASE_URL` обязателен в env hermes-контейнера** (или `styx.json`
+  с `database_url`): Hermes выбирает memory-провайдер по
   `StyxMemoryProvider.is_available()`, который гейтит по
-  `STYX_DATABASE_URL`/`DATABASE_URL`, а НЕ по `STYX_DAEMON_URL`. Без него
-  провайдер не выберется и `sync_turn` не вызовется (хотя обёртка ходит в
-  daemon только по HTTP).
+  `STYX_DATABASE_URL`/`DATABASE_URL`, а **НЕ** по `STYX_DAEMON_URL`. Без него
+  провайдер не выберется **даже после attach** (хотя обёртка ходит в daemon
+  только по HTTP).
+- **`HERMES_IMAGE` — s6-overlay образ** (нужно для маршрутизации gateway-CMD
+  через `main-wrapper.sh`).
+- **`command` обёртки в проде — дефолт образа `["gateway","run"]`**. В
+  test-стеке — `["sleep","infinity"]` (контейнер живёт для
+  `docker compose exec ... pytest` / `docker exec ... styx-hermes-setup`).

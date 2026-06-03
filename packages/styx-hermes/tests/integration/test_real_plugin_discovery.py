@@ -2,8 +2,20 @@
 
 Эти тесты запускаются ВНУТРИ контейнера hermes-agent-styx-test
 (см. docker/docker-compose.test.yml). Снаружи их запускать нельзя —
-им нужен установленный Hermes на python path и shim-плагины,
-скопированные styx-bootstrap.sh в HERMES_HOME/plugins/.
+им нужен установленный Hermes на python path.
+
+С bundled-модели (волна 33) styx-memory shim лежит в образе как
+bundled-каталог `/opt/hermes/plugins/memory/styx-memory/` — он не
+копируется скриптом в HERMES_HOME, его кладёт образ. Активация
+профиля под Styx — отдельный явный шаг `styx-hermes-setup --attach`
+(патчит config.yaml активного профиля). Чистая установка оставляет
+Styx «сиротой»: без attach ни `plugins.enabled: [styx]`, ни
+`memory.provider: styx-memory` в config нет, и general-плагин не
+загружается (Hermes opt-in: `_get_enabled_plugins()` → None).
+
+Discovery-тесты ниже сами дог-фудят attach на активном config
+(через `styx_hermes.setup_cli._attach`) и восстанавливают исходный
+config в teardown — config шарится между тестами в контейнере.
 
 Запуск:
     docker compose -f docker/docker-compose.test.yml up -d
@@ -15,6 +27,8 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -27,11 +41,49 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _active_config_path() -> Path:
+    """Путь к активному config.yaml — тем же способом, что Hermes.
+
+    `PluginManager`/`_get_enabled_plugins` читают `load_config()`, а тот —
+    `get_config_path()` = `get_hermes_home() / "config.yaml"` (в контейнере
+    HERMES_HOME=/opt/data → /opt/data/config.yaml). Резолвим через тот же
+    хелпер; fallback /opt/data/config.yaml если импорт недоступен.
+    """
+    try:
+        from hermes_cli.config import get_config_path
+
+        return Path(get_config_path())
+    except Exception:
+        return Path("/opt/data/config.yaml")
+
+
+@contextmanager
+def _attached_active_config():
+    """Дог-фуд реального attach на активном config + restore в teardown.
+
+    Сохраняем исходные байты до патча, в finally возвращаем их дословно и
+    подчищаем созданный `_attach`'ем `config.yaml.bak.<ts>`. Тест не должен
+    оставлять активный config привязанным к styx — он шарится между тестами
+    в контейнере.
+    """
+    from styx_hermes.setup_cli import _attach
+
+    config_path = _active_config_path()
+    original = config_path.read_bytes()
+    result = _attach(config_path)
+    try:
+        yield
+    finally:
+        config_path.write_bytes(original)
+        if result.backup_path is not None and result.backup_path.exists():
+            result.backup_path.unlink()
+
+
 # -- Plugin discovery -----------------------------------------------------
 
 
 def test_styx_memory_picked_up_by_memory_discovery() -> None:
-    """Hermes memory discovery находит styx-memory shim в HERMES_HOME/plugins/.
+    """Hermes memory discovery находит bundled styx-memory shim.
 
     Проверяет:
     - Эвристика `register_memory_provider` в shim __init__.py срабатывает
@@ -43,9 +95,9 @@ def test_styx_memory_picked_up_by_memory_discovery() -> None:
 
     provider = load_memory_provider("styx-memory")
     assert provider is not None, (
-        "styx-memory shim не подхвачен memory discovery — проверь "
-        "что styx-bootstrap.sh выполнил setup и shim есть в "
-        "$HERMES_HOME/plugins/styx-memory/"
+        "styx-memory shim не подхвачен memory discovery — проверь, что "
+        "bundled-каталог /opt/hermes/plugins/memory/styx-memory/ есть в "
+        "образе (volna 33: shim bundled, не копируется скриптом)"
     )
     assert isinstance(provider, StyxMemoryProvider)
     assert provider.name == "styx-memory"
@@ -67,43 +119,60 @@ def test_styx_general_picked_up_by_plugin_manager() -> None:
         StyxOpenAITransport,
     )
 
-    pm = PluginManager()
-    pm.discover_and_load(force=True)
+    # Hermes opt-in: без plugins.enabled:[styx] в активном config general
+    # плагин помечается enabled=False и не грузится. Дог-фудим реальный
+    # attach, restore в teardown.
+    with _attached_active_config():
+        pm = PluginManager()
+        pm.discover_and_load(force=True)
 
-    # ContextEngine зарегистрирован
-    engine = pm._context_engine
-    assert engine is not None, (
-        "PluginManager не зарегистрировал ContextEngine — возможно styx "
-        "shim не загрузился (проверь kind!=exclusive в plugin.yaml и "
-        "отсутствие memory-маркеров в shim __init__.py)"
-    )
-    assert isinstance(engine, StyxContextEngine)
-    assert engine.name == "styx"
+        # ContextEngine зарегистрирован
+        engine = pm._context_engine
+        assert engine is not None, (
+            "PluginManager не зарегистрировал ContextEngine — possibly styx "
+            "shim не загрузился (проверь attach в config: plugins.enabled "
+            "содержит 'styx', kind!=exclusive в plugin.yaml)"
+        )
+        assert isinstance(engine, StyxContextEngine)
+        assert engine.name == "styx"
 
-    # Transports перетёрли дефолты
-    cc = get_transport("chat_completions")
-    cr = get_transport("codex_responses")
-    assert isinstance(cc, StyxOpenAITransport), (
-        f"chat_completions всё ещё дефолтный: {type(cc).__name__}"
-    )
-    assert isinstance(cr, StyxCodexTransport), (
-        f"codex_responses всё ещё дефолтный: {type(cr).__name__}"
-    )
+        # Transports перетёрли дефолты
+        cc = get_transport("chat_completions")
+        cr = get_transport("codex_responses")
+        assert isinstance(cc, StyxOpenAITransport), (
+            f"chat_completions всё ещё дефолтный: {type(cc).__name__}"
+        )
+        assert isinstance(cr, StyxCodexTransport), (
+            f"codex_responses всё ещё дефолтный: {type(cr).__name__}"
+        )
 
 
 def test_styx_plugin_listed_as_loaded() -> None:
-    """Styx-plugin виден в PluginManager._plugins после discovery."""
+    """Styx-plugin реально загружен (enabled) в PluginManager после attach.
+
+    Не тавтология «присутствует в _plugins»: после attach плагин должен
+    быть enabled=True (Hermes opt-in грузит только из plugins.enabled),
+    иначе LoadedPlugin остаётся enabled=False и register(ctx) не вызван.
+    """
     from hermes_cli.plugins import PluginManager
 
-    pm = PluginManager()
-    pm.discover_and_load(force=True)
+    with _attached_active_config():
+        pm = PluginManager()
+        pm.discover_and_load(force=True)
 
-    # Плагин должен быть в загруженных
-    plugin_keys = set(pm._plugins.keys())
-    styx_loaded = any("styx" == p or p.endswith("/styx") for p in plugin_keys)
-    assert styx_loaded, (
-        f"styx plugin не виден в PluginManager._plugins: {sorted(plugin_keys)}"
-    )
+        # Плагин должен быть в загруженных под ключом 'styx' (или '*/styx')
+        plugin_keys = set(pm._plugins.keys())
+        styx_keys = [p for p in plugin_keys if p == "styx" or p.endswith("/styx")]
+        assert styx_keys, (
+            f"styx plugin не виден в PluginManager._plugins: {sorted(plugin_keys)}"
+        )
+
+        # …и реально enabled (а не просто зарегистрирован как disabled)
+        loaded = pm._plugins[styx_keys[0]]
+        assert loaded.enabled is True, (
+            f"styx plugin присутствует, но enabled={loaded.enabled} "
+            f"(error={loaded.error!r}) — attach не включил plugins.enabled?"
+        )
 
 
 # -- Provider lifecycle через настоящий Hermes ABC ------------------------

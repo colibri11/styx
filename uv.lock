@@ -772,7 +772,7 @@ wheels = [
 
 [[package]]
 name = "styx-core"
-version = "1.0.1"
+version = "1.0.3"
 source = { editable = "packages/styx-core" }
 dependencies = [
     { name = "fastapi" },
@@ -812,9 +812,10 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "styx-hermes"
-version = "1.0.1"
+version = "1.0.4"
 source = { editable = "packages/styx-hermes" }
 dependencies = [
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "styx-core" },
 ]
@@ -827,6 +828,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32" },
     { name = "styx-core", editable = "packages/styx-core" },
 ]
