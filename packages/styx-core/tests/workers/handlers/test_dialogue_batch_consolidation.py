@@ -423,7 +423,7 @@ def test_handler_vad_apply_first_in_transaction(db, rate_limit) -> None:
     )
     llm = _ScriptedChat({
         "skip": False, "skip_reason": None,
-        "summary": "пользователь был тревожен, обсудили.",
+        "summary": "Диалог был тревожным, обсудили.",
         "archive_hints": [],
         "vad": {"valence": -0.6, "arousal": 0.4, "dominance": -0.3},
     })

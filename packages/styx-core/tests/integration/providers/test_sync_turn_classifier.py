@@ -54,7 +54,7 @@ def test_sync_turn_enqueues_classification_after_recall(
         # Сначала «накормим» базу одной memory с тем же текстом что query
         # — FakeEmbedding hash'ит full text → cosine sim высокая.
         p.sync_turn(
-            "пользователь предпочитает qwen3:4b-local за окно контекста.",
+            "qwen3:4b-local предпочитают за окно контекста.",
             "Понял, запомнил.",
             session_id=sid,
         )
@@ -63,7 +63,7 @@ def test_sync_turn_enqueues_classification_after_recall(
         # recall_event, ids которых попадут в RecallTracker.
         result_json = p.handle_tool_call(
             "styx_recall",
-            {"query": "пользователь предпочитает qwen3:4b-local за окно контекста.", "limit": 6},
+            {"query": "qwen3:4b-local предпочитают за окно контекста.", "limit": 6},
             session_id=sid,
         )
         result = json.loads(result_json)
@@ -71,8 +71,8 @@ def test_sync_turn_enqueues_classification_after_recall(
 
         # Следующий sync_turn — content >= 50 char → enqueue classifier.
         p.sync_turn(
-            "Что пользователь думает про qwen3?",
-            "пользователь предпочитает qwen3:4b-local за окно контекста — это устойчивое его предпочтение.",
+            "Что известно про qwen3?",
+            "qwen3:4b-local предпочитают за окно контекста — это устойчивое техническое предпочтение.",
             session_id=sid,
         )
 

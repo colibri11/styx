@@ -60,7 +60,7 @@ def _seed_foreign_subjective(
 def test_sync_turn_auto_links_dialogue_to_cross_agent_memory(
     provider_env: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """agent-a пишет реплику, тематически близкую к памяти agent-b — auto-link
+    """Агент A пишет реплику, тематически близкую к памяти агента B — auto-link
     создаёт ребро dialogue (memories.id alpha) → memory (id beta).
     """
     content = "напоминание про релиз пятницы команды mobile"

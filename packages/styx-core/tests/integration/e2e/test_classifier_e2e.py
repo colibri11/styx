@@ -65,7 +65,7 @@ def test_classifier_real_qwen3_flips_used_in_output(
                 "VALUES (%s, 'user', %s, 'fact') RETURNING id",
                 (
                     agent_id,
-                    "пользователь предпочитает qwen3:4b-local из-за большого контекстного окна",
+                    "qwen3:4b-local предпочитают из-за большого контекстного окна",
                 ),
             )
             memory_id = cur.fetchone()[0]

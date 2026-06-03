@@ -138,7 +138,7 @@ def test_build_user_prompt_shape() -> None:
     from datetime import datetime, timezone
 
     class _Mem:
-        content = "пользователь выбрал qwen3:4b-local"
+        content = "Выбран qwen3:4b-local"
         kind = "fact"
         created_at = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
         importance_provisional = 0.7
@@ -146,7 +146,7 @@ def test_build_user_prompt_shape() -> None:
     out = _build_user_prompt(_Mem())  # type: ignore[arg-type]
     assert "kind: fact" in out
     assert "provisional_importance: 0.70" in out
-    assert "пользователь выбрал qwen3:4b-local" in out
+    assert "Выбран qwen3:4b-local" in out
     assert "2026-05-01" in out
 
 
@@ -236,7 +236,7 @@ def test_handler_memory_gone_skips(db, rate_limit) -> None:
 
 def test_handler_scored_writes_importance_final(db, rate_limit) -> None:
     handler = create_importance_handler()
-    mid = _insert_memory(db, content="пользователь выбрал qwen3:4b-local за окно контекста")
+    mid = _insert_memory(db, content="Выбран qwen3:4b-local за окно контекста")
     response = {
         "skip": False,
         "skip_reason": None,

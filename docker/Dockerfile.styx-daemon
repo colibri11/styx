@@ -4,7 +4,7 @@
 # HTTP API + worker pool в одном процессе через `styx daemon run`.
 #
 # Build:
-#   cd /home/user/OpenCode/styx
+#   cd /path/to/styx
 #   docker compose -f docker/docker-compose.test.yml build styx-daemon
 
 FROM python:3.11-slim

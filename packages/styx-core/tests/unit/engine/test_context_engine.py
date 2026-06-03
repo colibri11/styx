@@ -1333,7 +1333,7 @@ def test_assemble_for_runtime_multimodal_user_produces_salient(
     """Production-критичный кейс: pi-embedded передаёт user-message в
     multi-modal shape ({type:"text", text:"..."}). До round 6
     `_find_last_user_text` пропускал это → salient_text=None → hook
-    возвращал undefined → боевая agent-a не видела блок.
+    возвращал undefined → боевой агент не видел блок.
 
     После round 6 multi-modal text-parts извлекаются через
     `extract_text_from_content` и идут в `build_salient_block`.
