@@ -19,8 +19,9 @@ import logging
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 import psycopg
 
@@ -84,6 +85,33 @@ class StyxMemoryCore:
         from styx.config import is_available as _avail
         return _avail()
 
+    # -- write-path rollback guard (волна 34) ----------------------------
+
+    @contextmanager
+    def _guarded_write(self, label: str) -> Iterator[None]:
+        """Rollback-guard вокруг write-блока на постоянном ``self._conn``.
+
+        Любая ошибка внутри блока → rollback (defensive) + re-raise.
+        Caller-route увидит 500, но соединение останется рабочим для
+        следующих запросов агента (без InFailedSqlTransaction до
+        рестарта демона).
+
+        Использовать ВНУТРИ ``with self._write_lock:`` после None-guard'а
+        ``self._conn``. Оборачивает весь write-блок (insert + commit +
+        early-return'ы): ``return`` внутри CM корректен. Внутренний
+        ``try/except EmbeddingError`` (embed — non-fatal) остаётся как
+        отдельный concern и не затрагивается этим guard'ом.
+        """
+        try:
+            yield
+        except Exception as exc:  # noqa: BLE001 — rollback-guard
+            log.error("%s write упал: %s", label, exc)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+            raise
+
     # -- lifecycle -------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
@@ -130,8 +158,10 @@ class StyxMemoryCore:
             self._sentiment = None
 
         if self._session_id is not None:
-            self._queries.upsert_session(self._session_id)
-            self._conn.commit()
+            # Без write_lock намеренно: initialize до registry.register, save-thread не стартован — конкуренции за self._conn нет.
+            with self._guarded_write("initialize"):
+                self._queries.upsert_session(self._session_id)
+                self._conn.commit()
 
         # Transport state (per-agent через core API). Core-сторона
         # держит prompt_cache_key для transport-классов, которые в
@@ -412,15 +442,16 @@ class StyxMemoryCore:
             if self._queries is None:
                 log.warning("sync_turn: queries обнулены во время ожидания lock — пропуск")
                 return
-            # Defect-fix 2 (rollback-guard): первый блок insert+commit
-            # обёрнут в try/except. Если запись упадёт (например,
-            # ContentTooLongError из insert_message при дефекте слоя
-            # выше) — делаем rollback, чтобы постоянное self._conn не
+            # Defect-fix 2 / волна 34 (rollback-guard): первый блок
+            # insert+commit обёрнут в _guarded_write. Если запись упадёт
+            # (например, ContentTooLongError из insert_message при дефекте
+            # слоя выше) — делаем rollback, чтобы постоянное self._conn не
             # осталось в aborted-состоянии (InFailedSqlTransaction до
             # рестарта демона). Ошибку пробрасываем наружу: caller
             # (HTTP route) увидит 500, но соединение останется рабочим
-            # для следующих запросов.
-            try:
+            # для следующих запросов. Embed-after-commit (волна 7) —
+            # ОТДЕЛЬНОЙ фазой ниже, вне этого guard'а.
+            with self._guarded_write("sync_turn"):
                 if target_session is not None:
                     self._queries.upsert_session(target_session)
                 # Defect-fix B: длинная реплика дневника режется на N
@@ -444,13 +475,6 @@ class StyxMemoryCore:
                         )
                     )
                 self._conn.commit()  # type: ignore[union-attr]
-            except Exception as exc:  # noqa: BLE001 — rollback-guard
-                log.error("sync_turn insert упал: %s", exc)
-                try:
-                    self._conn.rollback()  # type: ignore[union-attr]
-                except Exception:  # noqa: BLE001 — defensive
-                    pass
-                raise
 
             # Embed-after-commit (sync, decisions § 17.A1).
             # Любая ошибка Ollama → лог error, embedding остаётся NULL,
@@ -620,10 +644,11 @@ class StyxMemoryCore:
             if self._queries is None:
                 log.warning("ingest_single_message: queries обнулены — пропуск")
                 return None
-            # Defect-fix 2 (rollback-guard): insert+commit обёрнут в
-            # try/except — при ошибке rollback, чтобы постоянное
-            # self._conn не осталось aborted. Ошибку пробрасываем.
-            try:
+            # Defect-fix 2 / волна 34 (rollback-guard): insert+commit
+            # обёрнут в _guarded_write — при ошибке rollback, чтобы
+            # постоянное self._conn не осталось aborted. Ошибку
+            # пробрасываем. Embed-after-commit — ОТДЕЛЬНОЙ фазой ниже.
+            with self._guarded_write("ingest_single_message"):
                 if target_session is not None:
                     self._queries.upsert_session(target_session)
                 inserted = self._insert_message_parts(
@@ -632,13 +657,6 @@ class StyxMemoryCore:
                     session_id=target_session,
                 )
                 self._conn.commit()  # type: ignore[union-attr]
-            except Exception as exc:  # noqa: BLE001 — rollback-guard
-                log.error("ingest_single_message insert упал: %s", exc)
-                try:
-                    self._conn.rollback()  # type: ignore[union-attr]
-                except Exception:  # noqa: BLE001 — defensive
-                    pass
-                raise
 
             # Embed-after-commit (sync). Любая ошибка Ollama → лог,
             # embedding остаётся NULL, recall не подтянет до re-embed.
@@ -726,7 +744,21 @@ class StyxMemoryCore:
                 routing=routing,
             )
 
-        with self._write_lock:
+        with self._write_lock, self._guarded_write("memory_store"):
+            # Defect-fix B (волна 34): FK→NULL pre-check. Если session_id
+            # передан, но строки в sessions нет — деградируем в NULL до
+            # insert'а (и до дорогого embed'а). Память НЕ теряется: ряд
+            # пишется с session_id=NULL (штатное состояние; FK
+            # memories_session_id_fkey nullable). Pre-check (а не
+            # catch-FK-retry) — детерминизм: нет повторной вставки в
+            # aborted-транзакции; стоимость — один indexed PK-lookup.
+            if sid is not None and not self._queries.session_exists(sid):
+                log.warning(
+                    "memory_store: session %s отсутствует в sessions — "
+                    "деградация session_id→NULL (память сохраняется)", sid,
+                )
+                sid = None
+
             mid = self._queries.insert_memory(
                 role=role,
                 content=content,
@@ -872,59 +904,60 @@ class StyxMemoryCore:
             if self._queries is None or self._conn is None:
                 raise RuntimeError("provider shut down mid-call")
 
-            if not self._queries.memory_exists(mid):
-                self._conn.commit()
-                return ReinterpretEnqueueOutcome(
-                    status="memory_not_found", memory_id=str(mid),
-                )
-
-            check = reinterpret_cooldown(
-                self._queries, mid,
-                cooldown_s=self._config.reinterpret_cooldown_s,
-            )
-            if not check.ok:
-                self._conn.commit()
-                if check.reason == "pending":
+            with self._guarded_write("reinterpret_enqueue"):
+                if not self._queries.memory_exists(mid):
+                    self._conn.commit()
                     return ReinterpretEnqueueOutcome(
-                        status="already_pending",
-                        memory_id=str(mid),
-                        pending_application_id=check.pending_application_id,
+                        status="memory_not_found", memory_id=str(mid),
                     )
-                # reason == 'recent'
-                return ReinterpretEnqueueOutcome(
-                    status="cooldown",
-                    memory_id=str(mid),
-                    last_reinterpreted_at=(
-                        check.last_at.isoformat() if check.last_at else None
-                    ),
-                    next_available_at=(
-                        check.next_at.isoformat() if check.next_at else None
-                    ),
+
+                check = reinterpret_cooldown(
+                    self._queries, mid,
+                    cooldown_s=self._config.reinterpret_cooldown_s,
                 )
+                if not check.ok:
+                    self._conn.commit()
+                    if check.reason == "pending":
+                        return ReinterpretEnqueueOutcome(
+                            status="already_pending",
+                            memory_id=str(mid),
+                            pending_application_id=check.pending_application_id,
+                        )
+                    # reason == 'recent'
+                    return ReinterpretEnqueueOutcome(
+                        status="cooldown",
+                        memory_id=str(mid),
+                        last_reinterpreted_at=(
+                            check.last_at.isoformat() if check.last_at else None
+                        ),
+                        next_available_at=(
+                            check.next_at.isoformat() if check.next_at else None
+                        ),
+                    )
 
-            payload: dict[str, Any] = {
-                "agent_id": self._agent_id,
-                "new_understanding_text": new_understanding_text,
-            }
-            if weight is not None:
-                payload["weight"] = float(weight)
+                payload: dict[str, Any] = {
+                    "agent_id": self._agent_id,
+                    "new_understanding_text": new_understanding_text,
+                }
+                if weight is not None:
+                    payload["weight"] = float(weight)
 
-            task_id = enqueue_llm_task(
-                self._conn,
-                task_type=REINTERPRET_MERGE_TASK_TYPE,
-                payload=payload,
-                memory_id=mid,
-            )
-            app_id = self._queries.insert_reinterpret_application(
-                task_id=task_id, memory_id=mid,
-            )
-            self._conn.commit()
-            return ReinterpretEnqueueOutcome(
-                status="queued",
-                memory_id=str(mid),
-                task_id=str(task_id),
-                application_id=app_id,
-            )
+                task_id = enqueue_llm_task(
+                    self._conn,
+                    task_type=REINTERPRET_MERGE_TASK_TYPE,
+                    payload=payload,
+                    memory_id=mid,
+                )
+                app_id = self._queries.insert_reinterpret_application(
+                    task_id=task_id, memory_id=mid,
+                )
+                self._conn.commit()
+                return ReinterpretEnqueueOutcome(
+                    status="queued",
+                    memory_id=str(mid),
+                    task_id=str(task_id),
+                    application_id=app_id,
+                )
 
     # -- ingest experience (волна 23) -----------------------------------
 
@@ -1011,10 +1044,12 @@ class StyxMemoryCore:
         if content_ref and not is_content_ref_empty(content_ref):
             enriched.setdefault("content_ref", content_ref)
 
-        with self._write_lock:
+        with self._write_lock, self._guarded_write("ingest_experience"):
             # Embed inline. Если fail — INSERT без embedding (recall не
             # найдёт до reembed'а; idempotency не ломается, hash от
-            # tuple-payload).
+            # tuple-payload). Внутренний try/except EmbeddingError —
+            # non-fatal (embed необязателен), остаётся как отдельный
+            # concern внутри guard'а.
             try:
                 vec: list[float] | None = self._embedding.embed(content)
             except EmbeddingError as exc:
@@ -1092,45 +1127,41 @@ class StyxMemoryCore:
         store_cfg = self._config.store_routing_config()
         async_threshold = self._config.document_ingest_async_chunk_threshold
 
-        with self._write_lock:
-            try:
-                result = ingest_document(
-                    self._queries,
-                    self._embedding,
-                    raw_path=path,
-                    config=doc_cfg,
-                    store_routing=store_cfg,
-                    source_ref=source_ref,
-                    visibility=visibility,
-                    metadata=metadata,
-                    content_hash=content_hash,
-                    async_chunk_threshold=async_threshold,
+        with self._write_lock, self._guarded_write("ingest_document"):
+            result = ingest_document(
+                self._queries,
+                self._embedding,
+                raw_path=path,
+                config=doc_cfg,
+                store_routing=store_cfg,
+                source_ref=source_ref,
+                visibility=visibility,
+                metadata=metadata,
+                content_hash=content_hash,
+                async_chunk_threshold=async_threshold,
+            )
+            # Defect-fix A: большой документ — chunks записаны с
+            # embedding=NULL, embedding откладывается в worker pool.
+            # Enqueue идёт в той же транзакции что и INSERT'ы:
+            # либо всё закоммитилось, либо всё откатилось.
+            if (
+                not result.deduplicated
+                and not result.chunks_embedded_inline
+            ):
+                enqueue_llm_task(
+                    self._conn,
+                    task_type=DOCUMENT_CHUNK_EMBED_TASK_TYPE,
+                    payload={
+                        "agent_id": self._agent_id,
+                        "document_id": str(result.document_id),
+                    },
                 )
-                # Defect-fix A: большой документ — chunks записаны с
-                # embedding=NULL, embedding откладывается в worker pool.
-                # Enqueue идёт в той же транзакции что и INSERT'ы:
-                # либо всё закоммитилось, либо всё откатилось.
-                if (
-                    not result.deduplicated
-                    and not result.chunks_embedded_inline
-                ):
-                    enqueue_llm_task(
-                        self._conn,
-                        task_type=DOCUMENT_CHUNK_EMBED_TASK_TYPE,
-                        payload={
-                            "agent_id": self._agent_id,
-                            "document_id": str(result.document_id),
-                        },
-                    )
-                    log.info(
-                        "ingest_document: документ %s (%d chunks) — "
-                        "embedding chunks отложен в worker pool",
-                        result.document_id, result.chunks_count,
-                    )
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+                log.info(
+                    "ingest_document: документ %s (%d chunks) — "
+                    "embedding chunks отложен в worker pool",
+                    result.document_id, result.chunks_count,
+                )
+            self._conn.commit()
 
             return IngestDocumentOutcome(
                 document_id=str(result.document_id),
@@ -1199,18 +1230,29 @@ class StyxMemoryCore:
                 raise RuntimeError(
                     "dialogue_save: queries обнулены во время ожидания lock"
                 )
-            if sid is not None:
-                self._queries.upsert_session(sid)
-            memory_id = self._queries.insert_message(
-                role=role,
-                content=content,
-                session_id=sid,
-                metadata=metadata,
-            )
-            self._conn.commit()
+            # Волна 34: 1-й блок insert+commit под rollback-guard'ом
+            # (раньше был без guard'а). FK безопасен — зовём
+            # upsert_session перед insert. Embed-after-commit — ОТДЕЛЬНОЙ
+            # фазой ниже (как sync_turn), вне этого guard'а.
+            with self._guarded_write("dialogue_save"):
+                if sid is not None:
+                    self._queries.upsert_session(sid)
+                memory_id = self._queries.insert_message(
+                    role=role,
+                    content=content,
+                    session_id=sid,
+                    metadata=metadata,
+                )
+                self._conn.commit()
 
-            # Embed-after-commit (как sync_turn). Без auto-link /
-            # classifier / sentiment — D5.
+            # Embed-after-commit (как sync_turn / ingest_single_message).
+            # Без auto-link / classifier / sentiment — D5. Эта фаза
+            # best-effort: сообщение уже durably закоммичено в 1-м блоке
+            # выше. На DB-сбое update_embedding — rollback + swallow
+            # (соединение остаётся рабочим), embedding остаётся NULL до
+            # re-embed'а; НЕ re-raise (иначе caller получит 500 при уже
+            # сохранённом сообщении). Внутренний try/except EmbeddingError
+            # (embed non-fatal) остаётся как отдельный concern.
             if self._embedding is not None:
                 try:
                     vec = self._embedding.embed(content)
@@ -1875,7 +1917,7 @@ class StyxMemoryCore:
                     f"confirm_usage: memory_id не UUID — {mid!r}"
                 ) from exc
 
-        with self._write_lock:
+        with self._write_lock, self._guarded_write("confirm_usage"):
             matched = self._queries.confirm_usage_update(
                 memory_ids=parsed,
             )
@@ -1965,24 +2007,37 @@ class StyxMemoryCore:
             "subjective_tail" if kind_src == "subjective" else kind_src
         )
 
-        with self._write_lock:
-            try:
-                result = route_long_content(
-                    self._queries,
-                    self._embedding,
-                    content=content,
-                    kind=kind,
-                    kind_src=tail_kind_src,
-                    role=role,
-                    session_id=session_id,
-                    metadata=metadata or {},
-                    importance_provisional=importance_provisional,
-                    config=routing,
-                    source="memory_store",
+        # Волна 34: guard расширен на _auto_link + финальный commit
+        # (раньше try обёртывал только route_long_content; auto-link и
+        # commit падали без rollback'а → self._conn оставался aborted).
+        with self._write_lock, self._guarded_write("memory_store_routed"):
+            # Defect-fix B (волна 34): FK→NULL pre-check для routed-пути.
+            # Параметр session_id деградируем в None до route_long_content,
+            # если строки в sessions нет — иначе tail-memory insert упал
+            # бы ForeignKeyViolation'ом. Память не теряется (NULL
+            # session_id штатен). Pre-check (indexed PK-lookup) на том же
+            # self._conn под write-lock'ом — детерминизм.
+            if session_id is not None and not self._queries.session_exists(session_id):
+                log.warning(
+                    "memory_store_routed: session %s отсутствует в sessions — "
+                    "деградация session_id→NULL (память сохраняется)",
+                    session_id,
                 )
-            except Exception:
-                self._conn.rollback()
-                raise
+                session_id = None
+
+            result = route_long_content(
+                self._queries,
+                self._embedding,
+                content=content,
+                kind=kind,
+                kind_src=tail_kind_src,
+                role=role,
+                session_id=session_id,
+                metadata=metadata or {},
+                importance_provisional=importance_provisional,
+                config=routing,
+                source="memory_store",
+            )
 
             self._auto_link_after_subjective_write(
                 result.tail_memory_id, result.summary_embedding,
@@ -2381,43 +2436,47 @@ class StyxMemoryCore:
         with self._write_lock:
             if self._queries is None or self._embedding is None:
                 return json.dumps({"error": "provider shut down mid-call"})
-            result = recall_full(
-                queries=self._queries,
-                embed_client=self._embedding,
-                query=query,
-                full_config=full_cfg,
-                session_id=session_str,
-                snapshot=snapshot,
-            )
+            # Волна 34: recall_event INSERT'ы + hebbian + commit под
+            # rollback-guard'ом. Внутренний hebbian try/except (fail-open,
+            # волна 21) остаётся как отдельный concern.
+            with self._guarded_write("handle_tool_call"):
+                result = recall_full(
+                    queries=self._queries,
+                    embed_client=self._embedding,
+                    query=query,
+                    full_config=full_cfg,
+                    session_id=session_str,
+                    snapshot=snapshot,
+                )
 
-            # Hebbian co-retrieval reinforcement (волна 21).
-            # На всех C(N, 2) парах top-K results bump'ит weight ребра
-            # 'co_retrieved'. Sync (D2 в waves/21): один UPSERT per pair,
-            # ~5-10ms на K=10. В той же транзакции что recall_event'ы
-            # из recall_full → коммитим всё вместе.
-            if (
-                self._config is not None
-                and self._config.hebbian_enabled
-                and len(result.memories) >= 2
-            ):
-                from styx.engine.hebbian import reinforce_co_retrieval
-                try:
-                    reinforce_co_retrieval(
-                        self._queries,
-                        memory_ids=[h.id for h in result.memories],
-                        config=self._config.hebbian_config(),
-                        agent_id=self._agent_id,
-                    )
-                except Exception as exc:  # noqa: BLE001 — fail-open
-                    log.warning(
-                        "hebbian reinforcement упал: %s", exc,
-                    )
+                # Hebbian co-retrieval reinforcement (волна 21).
+                # На всех C(N, 2) парах top-K results bump'ит weight ребра
+                # 'co_retrieved'. Sync (D2 в waves/21): один UPSERT per pair,
+                # ~5-10ms на K=10. В той же транзакции что recall_event'ы
+                # из recall_full → коммитим всё вместе.
+                if (
+                    self._config is not None
+                    and self._config.hebbian_enabled
+                    and len(result.memories) >= 2
+                ):
+                    from styx.engine.hebbian import reinforce_co_retrieval
                     try:
-                        self._conn.rollback()  # type: ignore[union-attr]
-                    except Exception:
-                        pass
+                        reinforce_co_retrieval(
+                            self._queries,
+                            memory_ids=[h.id for h in result.memories],
+                            config=self._config.hebbian_config(),
+                            agent_id=self._agent_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — fail-open
+                        log.warning(
+                            "hebbian reinforcement упал: %s", exc,
+                        )
+                        try:
+                            self._conn.rollback()  # type: ignore[union-attr]
+                        except Exception:
+                            pass
 
-            self._conn.commit()  # type: ignore[union-attr]
+                self._conn.commit()  # type: ignore[union-attr]
 
         # Запомнить recall_event_ids для последующего classifier'а
         # (волна 7c). Тащим все ids — sync_turn возьмёт last 20.

@@ -7,6 +7,56 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.4] — 2026-06-09
+
+Defect-fix `styx-core` (волна 34). Боевой инцидент в продакшене 2026-06-09
+(agent_id=main): `POST /memory_store` с `session_id`, которого нет
+в `sessions`, ронял запись по `ForeignKeyViolation` → **HTTP 500, память
+потеряна**, а постоянное per-agent соединение оставалось в aborted-state →
+следующие запросы агента падали `InFailedSqlTransaction` до ближайшего
+guarded-вызова. `styx-hermes` без изменений (остаётся 1.0.4).
+**Закрывает запаркованный follow-up** из ревью § 46 («Аудит rollback-guard'ов
+всех commit-сайтов»).
+
+### Исправлено
+
+- **FK→NULL деградация на пути `memory_store`.** Перед insert'ом
+  `memory_store` и `_memory_store_routed` зовут новый
+  `AgentScopedQueries.session_exists()` (`SELECT 1 FROM sessions WHERE id=%s`):
+  если строки сессии нет — `log.warning` + деградация `session_id → NULL`
+  (память сохраняется; NULL `session_id` штатен — FK `ON DELETE SET NULL`,
+  877 рядов main уже такие). Выбор pre-check, а не catch-FK-retry:
+  детерминизм (нет повторной вставки в aborted-транзакцию), стоимость —
+  один indexed lookup до дорогого `embed()`.
+- **Отравление постоянного соединения при ошибке записи.** Любой сбой
+  write-блока на постоянном `self._conn` больше не оставляет соединение
+  в aborted-state — единый rollback-guard откатывает транзакцию и
+  пробрасывает исключение (route отдаёт 500, соединение остаётся рабочим
+  для следующих запросов того же агента).
+
+### Изменено
+
+- **Хелпер `_guarded_write(label)`** (context-manager на `StyxMemoryCore`)
+  инкапсулирует прежний ad-hoc паттерн `try/except → rollback → re-raise`
+  (как в `sync_turn`/`ingest_single_message`).
+- **Sweep всех write-входов на постоянном соединении под единый guard.**
+  Обёрнуты ранее незащищённые (`memory_store`, `reinterpret_enqueue`,
+  `ingest_experience`, `dialogue_save` 1-й блок, `confirm_usage`,
+  `initialize` init-upsert), расширен частичный (`_memory_store_routed` —
+  guard теперь на `auto_link`+`commit`), мигрированы уже-guarded ради
+  единого паттерна (`sync_turn`, `ingest_single_message`, `ingest_document`,
+  `handle_tool_call`).
+- **Два HTTP-роута, коммитившие постоянный conn в обход `memory.py`**
+  (найдены ревью), обёрнуты в `core._guarded_write(...)`: `POST /recall`
+  (`recall.py`, recall_event commit) и `POST /link` (`relations.py`);
+  `/link` дополнительно получил `session.write_lock` (guard зовёт rollback
+  на shared conn → нужна сериализация).
+- **Best-effort embed-after-commit фаза оставлена swallow** (НЕ re-raise):
+  2-й embed-блок `dialogue_save` сохраняет локальный
+  `try/except → rollback → swallow` (как `sync_turn`/`ingest_single_message`) —
+  сообщение уже durably закоммичено в 1-м блоке, re-raise здесь был бы
+  регрессией.
+
 ## [1.0.4] — 2026-06-03
 
 Релиз `styx-hermes` (волна 33, multi-agent Hermes provisioning, этап 1).

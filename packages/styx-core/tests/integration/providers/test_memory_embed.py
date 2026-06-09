@@ -93,6 +93,54 @@ def test_sync_turn_continues_on_embed_error(
         p.shutdown()
 
 
+def test_dialogue_save_continues_on_embed_error(
+    provider_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ollama down → dialogue_save сохраняет реплику с embedding=NULL.
+
+    Регресс волны 34: embed-after-commit в dialogue_save — best-effort
+    (сообщение durably закоммичено в 1-м блоке). EmbeddingError не должен
+    приводить к 500; реплика остаётся в memories, embedding NULL до reembed.
+    """
+
+    class _BrokenEmbed:
+        @property
+        def dim(self) -> int:
+            return 768
+
+        def embed(self, text: str) -> list[float]:
+            raise EmbeddingError("ollama unreachable")
+
+    p = _provider_with_fake_embed(monkeypatch, _BrokenEmbed())
+    sid = str(uuid.uuid4())
+    p.initialize(session_id=sid, agent_identity="delta")
+    try:
+        with caplog.at_level(logging.WARNING):
+            memory_id = p.dialogue_save(
+                role="user", content="реплика без embedding", session_id=sid
+            )
+
+        assert memory_id is not None
+
+        # Реплика реально записана, embedding NULL.
+        with psycopg.connect(provider_env) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT content, embedding IS NULL "
+                    "FROM memories WHERE id = %s AND agent_id = 'delta'",
+                    (memory_id,),
+                )
+                row = cur.fetchone()
+
+        assert row is not None
+        assert row[0] == "реплика без embedding"
+        assert row[1] is True  # embedding IS NULL
+    finally:
+        p.shutdown()
+
+
 def test_sync_turn_partial_failure_still_writes_some(
     provider_env: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

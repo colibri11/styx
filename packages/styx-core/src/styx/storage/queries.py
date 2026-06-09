@@ -217,6 +217,22 @@ class AgentScopedQueries:
                 (sid, self._agent_id),
             )
 
+    def session_exists(self, session_id: uuid.UUID) -> bool:
+        """Есть ли строка сессии в ``sessions`` (волна 34, FK→NULL guard).
+
+        Индексированный PK-lookup до дорогого ``embed()`` в memory_store.
+        Без agent_id-фильтра — FK ``memories_session_id_fkey`` смотрит на
+        ``sessions.id`` независимо от agent_id; нам важен сам факт
+        существования строки, чтобы insert не упал ForeignKeyViolation'ом.
+        """
+        sid = _as_uuid(session_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM sessions WHERE id = %s LIMIT 1",
+                (sid,),
+            )
+            return cur.fetchone() is not None
+
     # -- memories (write) -------------------------------------------------
 
     def insert_message(

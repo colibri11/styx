@@ -50,15 +50,19 @@ def recall(
     with session.write_lock:
         if core._queries is None or core._embedding is None:
             raise HTTPException(status_code=503, detail="agent shut down mid-call")
-        result = recall_full(
-            queries=core._queries,
-            embed_client=core._embedding,
-            query=query,
-            full_config=full_cfg,
-            session_id=req.session_id,
-            snapshot=snapshot,
-        )
-        core._conn.commit()  # type: ignore[union-attr]
+        # Волна 34: recall_full пишет recall_event на постоянный core._conn —
+        # на сбое соединение осталось бы в aborted-state. Guard откатывает
+        # перед re-raise (caller всё ещё получает 500, но conn рабочий).
+        with core._guarded_write("recall_event"):
+            result = recall_full(
+                queries=core._queries,
+                embed_client=core._embedding,
+                query=query,
+                full_config=full_cfg,
+                session_id=req.session_id,
+                snapshot=snapshot,
+            )
+            core._conn.commit()  # type: ignore[union-attr]
 
     # Treker recall_event_ids для последующего classifier'а (волна 7c).
     if core._session_id is not None:
