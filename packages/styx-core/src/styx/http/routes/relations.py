@@ -151,21 +151,34 @@ def graph_traverse(
     dependencies=[Depends(require_auth)],
 )
 def link(req: LinkRequest) -> LinkResponse:
-    queries = _agent_queries(req.agent_id)
+    session = registry.get(req.agent_id)
+    core = session.core
+    queries = getattr(core, "_queries", None)
+    if queries is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"agent_id={req.agent_id!r} core not initialized",
+        )
     source_uuid = _parse_uuid(req.source_id)
     target_uuid = _parse_uuid(req.target_id)
     if source_uuid is None or target_uuid is None:
         raise HTTPException(
             status_code=422, detail="source_id and target_id required",
         )
-    created = queries.insert_link(
-        source_type=req.source_type,
-        source_id=source_uuid,
-        target_type=req.target_type,
-        target_id=target_uuid,
-        relation=req.relation,
-        weight=req.weight,
-        metadata=req.metadata,
-    )
-    queries.conn.commit()
+    # Волна 34: insert_link+commit на постоянном per-agent _conn под
+    # rollback-guard (на сбое conn не остаётся в aborted-state). write_lock
+    # обязателен: guard зовёт rollback на shared _conn — без сериализации
+    # параллельный write по тому же соединению был бы откачен.
+    with session.write_lock:
+        with core._guarded_write("link"):
+            created = queries.insert_link(
+                source_type=req.source_type,
+                source_id=source_uuid,
+                target_type=req.target_type,
+                target_id=target_uuid,
+                relation=req.relation,
+                weight=req.weight,
+                metadata=req.metadata,
+            )
+            queries.conn.commit()
     return LinkResponse(created=created)
