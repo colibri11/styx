@@ -1,3 +1,3 @@
 """styx-hermes — Hermes Agent plugin поверх styx-core HTTP API."""
 
-__version__ = "1.0.0"
+__version__ = "1.0.5"

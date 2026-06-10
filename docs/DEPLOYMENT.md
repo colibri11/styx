@@ -363,12 +363,13 @@ styx-привязку от прошлых сессий (config уже пропа
 ```bash
 # Daemon живой
 curl -s http://127.0.0.1:8788/healthz | jq .
-# {"status":"ok","postgres":"ok","version":"1.0.3",...}
+# {"status":"ok","postgres":"ok","version":"1.0.4",...}
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
 
-# Из Hermes-process (one-shot turn; в v2026.5.29.2 subcommand — chat, не ask)
+# Из Hermes-process (one-shot turn; с v2026.5.29.2 subcommand — chat, не ask;
+# выверено против v2026.6.5)
 hermes chat -q "Привет"  # в логах: "Using context engine: styx" + "StyxMemoryProvider initialized"
 ```
 
