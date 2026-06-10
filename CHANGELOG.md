@@ -7,6 +7,48 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [1.0.5] — 2026-06-10
+
+Релиз `styx-hermes` — совместимость с **Hermes Agent v0.16.0** (тег/образ
+`v2026.6.5`). Compat-валидация по образцу § 47: ABI-breaks для внешнего
+context engine / memory provider / transport **не найдены**, код адаптера
+не менялся. `styx-core` без изменений (остаётся 1.0.4).
+
+### Проверено против Hermes v0.16.0
+
+- Изменения Hermes 0.15.2 → 0.16.0 на наших поверхностях: новый
+  **опциональный** метод движка `should_defer_preflight_to_real_usage()`
+  (base-default False, вызов через `getattr`-fallback — `StyxContextEngine`
+  наследует базу, безопасно); статический fallback компакции
+  `_build_static_fallback_summary` (внутренний, plugin `compress()` не
+  затрагивает); `_EngineCollector.register_command` (slash-команды движков,
+  опционально); synthetic package namespace для user-installed memory
+  providers. Сигнатуры `update_model(api_mode=)` / `compress()` /
+  discovery-пути — без изменений.
+- **Батарея:** drift-sentinel **55/55** (4 якоря переехали — выверены
+  вручную, +9 новых якорей 0.16.0); host-suite **174 passed / 6 infra-skip**;
+  Docker in-container полная **180 passed / 0 skipped** + core-suite
+  **1461 passed / 12 design-skip** (Postgres + Ollama); live e2e против
+  официального образа `nousresearch/hermes-agent:v2026.6.5` — boot s6 чистый,
+  `registered context engine: styx`, полный `hermes chat` turn (z.ai glm-5.1)
+  → `POST /sync_turn 200`, обе реплики легли в `memories`.
+
+### Исправлено
+
+- **Протухший пин `styx-core==1.0.3`** в `pyproject.toml` styx-hermes —
+  конфликтовал с актуальным styx-core 1.0.4 (бамп волны 34). Теперь `==1.0.4`.
+- **`__version__ = "1.0.0"`** в `styx_hermes/__init__.py` отставал от
+  pyproject с самого split'а (тот же класс дефекта, что healthz-фикс
+  styx-core 1.0.4). Теперь синхронизирован: `1.0.5`.
+
+### Изменено
+
+- Дефолтный базовый образ test-стека и `Dockerfile.styx-hermes`:
+  `nousresearch/hermes-agent:v2026.5.29.2` → **`v2026.6.5`**
+  (`docker-compose.test.yml`, `ARG HERMES_IMAGE`).
+- `docs/DEPLOYMENT.md`: примеры выверены против v2026.6.5; пример `healthz`
+  отражает styx-core 1.0.4.
+
 ## [styx-core 1.0.4] — 2026-06-09
 
 Defect-fix `styx-core` (волна 34). Боевой инцидент в продакшене 2026-06-09
