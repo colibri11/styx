@@ -12,6 +12,7 @@ from styx.engine.context import (
     STYX_TAG_RECALL,
     STYX_TAG_SALIENT,
     StyxComposer,
+    _safe_salient_insert_index,
     _sanitize_tool_pairs,
     get_styx_sanitized_blocks_by_tag,
     get_styx_sanitized_blocks_total,
@@ -1186,6 +1187,173 @@ def test_compress_does_not_break_tool_pair_when_inserting_salient(
         m.get("role") == "tool" and m.get("content") == STUB_TOOL_RESULT
         for m in out
     ), f"stub'ы не должны появляться когда оба конца pair'а в input: {out}"
+
+
+# -- Defect-fix: tool-pair-aware salient placement -----------------------
+
+
+def test_inject_salient_does_not_split_trailing_tool_pair() -> None:
+    """Defect-fix: salient не вклинивается между assistant(tool_calls) и tool.
+
+    Корень: ``compress()`` зовётся в середине tool-loop'а → хвост body
+    может быть tool-результатом. ``_inject_salient_block`` получал
+    ``insert_at = len(body)-1`` (= ПЕРЕД tool message) и без коррекции
+    разрывал пару, оставляя осиротевший tool_call → на проде
+    превращался в STUB_TOOL_RESULT.
+
+    Тест зовёт ``_inject_salient_block`` напрямую (метод чистый —
+    используем ``__new__`` без полного ``__init__``).
+    """
+    fake_salient = {"role": "user", "content": "SALIENT TEST"}
+    body = [
+        _msg("user", "первый запрос"),
+        _msg("assistant", "ответ"),
+        _msg("assistant", "", tool_calls=[{"id": "call_1", "type": "function"}]),
+        _msg("tool", "result for call_1", tool_call_id="call_1"),
+    ]
+    composer = StyxComposer.__new__(StyxComposer)
+    out = composer._inject_salient_block(fake_salient, body, len(body) - 1)
+
+    # (а) salient присутствует в выходе (content обёрнут в
+    # <styx-salient> через _wrap_salient — проверяем по подстроке).
+    salient_idx = next(
+        (
+            i for i, m in enumerate(out)
+            if "SALIENT TEST" in (m.get("content") or "")
+        ),
+        None,
+    )
+    assert salient_idx is not None, f"salient потерян: {out}"
+
+    # (б) assistant(tool_calls) и его tool идут ПОДРЯД (между ними нет
+    # вставленного сообщения).
+    assistant_idx = next(
+        i for i, m in enumerate(out)
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    tool_idx = next(
+        i for i, m in enumerate(out)
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call_1"
+    )
+    assert tool_idx == assistant_idx + 1, (
+        f"salient разорвал tool-пару: assistant@{assistant_idx}, "
+        f"tool@{tool_idx}, out={out}"
+    )
+
+    # (в) STUB_TOOL_RESULT не появился — пара цела, реальный результат
+    # сохранён.
+    assert not any(m.get("content") == STUB_TOOL_RESULT for m in out), (
+        f"stub появился — значит пара была разорвана: {out}"
+    )
+
+
+def test_inject_salient_does_not_split_multi_result_tool_group() -> None:
+    """Defect-fix: хвост = assistant(tool_calls) + НЕСКОЛЬКО tool-результатов.
+
+    Тот же корень что и trailing-pair кейс, но группа шире одного
+    результата: один assistant с двумя tool_calls и два tool-сообщения.
+    ``_inject_salient_block`` обязан сдвинуть salient ПЕРЕД assistant,
+    не разрывая группу ни между assistant и первым результатом, ни
+    между результатами.
+    """
+    fake_salient = {"role": "user", "content": "SALIENT TEST"}
+    body = [
+        _msg("user", "q"),
+        _msg(
+            "assistant",
+            "",
+            tool_calls=[
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "a", "arguments": "{}"}},
+                {"id": "call_2", "type": "function",
+                 "function": {"name": "b", "arguments": "{}"}},
+            ],
+        ),
+        _msg("tool", "R1", tool_call_id="call_1"),
+        _msg("tool", "R2", tool_call_id="call_2"),
+    ]
+    composer = StyxComposer.__new__(StyxComposer)
+    out = composer._inject_salient_block(fake_salient, body, len(body) - 1)
+
+    # salient присутствует в выходе (по подстроке — content обёрнут в
+    # <styx-salient> через _wrap_salient).
+    assert any(
+        "SALIENT TEST" in (m.get("content") or "") for m in out
+    ), f"salient потерян: {out}"
+
+    # assistant(tool_calls) и оба его результата идут ПОДРЯД, в исходном
+    # порядке — между ними нет вставленного сообщения (salient оказался
+    # ПЕРЕД assistant, группа цела).
+    assistant_idx = next(
+        i for i, m in enumerate(out)
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    r1_idx = next(
+        i for i, m in enumerate(out)
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call_1"
+    )
+    r2_idx = next(
+        i for i, m in enumerate(out)
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call_2"
+    )
+    assert r1_idx == assistant_idx + 1, (
+        f"salient разорвал группу между assistant@{assistant_idx} и "
+        f"call_1@{r1_idx}, out={out}"
+    )
+    assert r2_idx == r1_idx + 1, (
+        f"salient разорвал группу между call_1@{r1_idx} и call_2@{r2_idx}, "
+        f"out={out}"
+    )
+
+    # STUB_TOOL_RESULT не появился — группа цела, реальные результаты
+    # сохранены.
+    assert not any(m.get("content") == STUB_TOOL_RESULT for m in out), (
+        f"stub появился — значит группа была разорвана: {out}"
+    )
+
+
+def test_inject_salient_keeps_position_for_text_tail() -> None:
+    """Регресс: обычный хвост (user/assistant-текст) → позиция не меняется.
+
+    Фиксирует, что cache-намерение вол. 26.5 (salient на ``len-1`` ради
+    стабильности префикса) не сломано фиксом. Сдвиг должен срабатывать
+    ТОЛЬКО для tool-группы в хвосте.
+    """
+    fake_salient = {"role": "user", "content": "SALIENT TEST"}
+    body = [
+        _msg("user", "первый запрос"),
+        _msg("assistant", "ответ"),
+        _msg("user", "последний запрос"),
+    ]
+    composer = StyxComposer.__new__(StyxComposer)
+    out = composer._inject_salient_block(fake_salient, body, len(body) - 1)
+
+    # salient вставлен ровно на len-1 исходного body (= перед последним
+    # сообщением), позиция не изменилась.
+    salient_idx = next(
+        i for i, m in enumerate(out)
+        if "SALIENT TEST" in (m.get("content") or "")
+    )
+    assert salient_idx == len(body) - 1, (
+        f"позиция salient'а сместилась для текстового хвоста: "
+        f"salient@{salient_idx}, ожидался {len(body) - 1}, out={out}"
+    )
+    assert out[-1]["content"] == "последний запрос"
+
+
+def test_safe_salient_insert_index_edge_cases() -> None:
+    """Граничные случаи pure-helper'а позиции вставки."""
+    # пустой body → 0
+    assert _safe_salient_insert_index([], 0) == 0
+    # body целиком из одной tool-группы → доедет до 0
+    tool_group = [
+        _msg("assistant", "", tool_calls=[{"id": "x"}]),
+        _msg("tool", "r", tool_call_id="x"),
+    ]
+    assert _safe_salient_insert_index(tool_group, len(tool_group) - 1) == 0
+    # обычный текстовый хвост → desired не меняется
+    text_body = [_msg("user", "a"), _msg("assistant", "b"), _msg("user", "c")]
+    assert _safe_salient_insert_index(text_body, len(text_body) - 1) == len(text_body) - 1
 
 
 def test_session_reset_clears_counters() -> None:

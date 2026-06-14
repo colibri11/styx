@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "styx-hermes"
-version = "1.0.6"
+version = "1.0.7"
 description = "Styx как плагин Hermes Agent — тонкий HTTP-клиент к styx-core daemon."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Сергей Сомаров", email = "somarov@gmail.com" }]
 keywords = ["hermes", "agent", "plugin", "styx"]
 dependencies = [
-    "styx-core==1.0.4",
+    "styx-core==1.0.5",
     "requests>=2.32",
     "pyyaml>=6.0",
 ]

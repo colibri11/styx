@@ -7,6 +7,30 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.5] — 2026-06-15
+
+Defect-fix `styx-core`. `styx-hermes` бампается следом (пин зависимости):
+1.0.6 → 1.0.7.
+
+### Исправлено
+
+- **Salient-блок разрывал tool-пару при компрессии в середине
+  tool-loop'а.** `StyxComposer.compress()` вставлял salient (role=user)
+  через `_inject_salient_block(..., len(body)-1)` — на позицию ПЕРЕД
+  последним сообщением окна, без учёта tool-пар. Когда `compress()`
+  звался в середине tool-loop'а (до финального текста модели), хвост
+  окна был tool-результатом, и salient вклинивался между
+  `assistant(tool_calls)` и его `tool(result)`. Дальше (вне core)
+  результат отрывался/дропался, осиротевший tool_call на следующем
+  `/context/build` затыкался `STUB_TOOL_RESULT` (`"[Result from earlier
+  conversation — see context summary above]"`) — симптом «заглушка
+  вместо результата тула» в проде. Фикс: pair-aware позиция вставки
+  (`_safe_salient_insert_index`) — для обычного хвоста (user/assistant-
+  текст) позиция не меняется (cache-намерение вол. 26.5 сохранено),
+  сдвиг влево только когда хвост — tool-группа. Найдено на проде (стек
+  hermes-prod), воспроизведено на стенде. styx-core 1.0.4 → 1.0.5;
+  styx-hermes 1.0.6 → 1.0.7 (бамп пина `styx-core==1.0.5`).
+
 ## [1.0.6] — 2026-06-14
 
 Релиз `styx-hermes` — defect-fix routing tool-call'ов. `styx-core` без
