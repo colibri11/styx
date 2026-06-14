@@ -83,11 +83,16 @@ def _provider_with_fake(
 # ── schema ────────────────────────────────────────────────────────────
 
 
-def test_get_tool_schemas_returns_empty_before_initialize() -> None:
-    """До /agent/initialize tool schemas пустой — Hermes-обёртка кэширует
-    их с первого initialize-ответа core daemon."""
+def test_get_tool_schemas_static_catalog_before_initialize() -> None:
+    """До /agent/initialize tool schemas — статический каталог ядра (не пуст).
+
+    Hermes строит routing-индекс _tool_to_provider в add_provider() ДО
+    initialize(); пустой ответ тут = каждый styx_* tool-call упадёт в
+    "Unknown tool". До init отдаём чистый каталог StyxMemoryCore, после —
+    авторитетные daemon-схемы (см. test_get_tool_schemas_populated_*)."""
     p = StyxMemoryProvider()
-    assert p.get_tool_schemas() == []
+    names = {s["name"] for s in p.get_tool_schemas()}
+    assert "styx_recall" in names
 
 
 def test_get_tool_schemas_populated_after_initialize(

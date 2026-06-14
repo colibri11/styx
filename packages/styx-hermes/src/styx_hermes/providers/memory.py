@@ -257,7 +257,21 @@ class StyxMemoryProvider(MemoryProvider):
     # ── tools (recall) ──────────────────────────────────────────────────
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return list(self._tool_schemas)
+        if self._tool_schemas:
+            return list(self._tool_schemas)
+        # Hermes строит routing-индекс _tool_to_provider в
+        # MemoryManager.add_provider(), который вызывается ДО initialize()
+        # (agent_init.py:1101 vs :1144). Наши daemon-схемы наполняются только
+        # в initialize(); вернуть [] здесь = индекс построится пустым и любой
+        # styx_* вызов упадёт в "Unknown tool" (хотя схема к этому моменту уже
+        # доходит до модели через тот же get_tool_schemas, вызываемый ПОСЛЕ
+        # init на agent_init.py:1176). Отдаём статический каталог ядра
+        # (чистый: без БД/HTTP — __init__ StyxMemoryCore не коннектится) —
+        # initialize() затем заменит self._tool_schemas авторитетными
+        # config-схемами daemon'а для поверхности модели.
+        from styx.providers.memory import StyxMemoryCore
+
+        return StyxMemoryCore(self._agent_id or "").get_tool_schemas()
 
     def handle_tool_call(
         self, tool_name: str, args: dict[str, Any], **kwargs: Any
