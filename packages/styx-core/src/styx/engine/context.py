@@ -339,10 +339,21 @@ class StyxComposer:
         salient в focus_tracker оставался без тегов и
         `_inject_salient_block` оставался единственной точкой wrap'а —
         симметрично с `_sanitize_styx_blocks` на входе.
+
+        Defect-fix: позиция ``insert_at`` корректируется через
+        ``_safe_salient_insert_index`` так, чтобы salient (role=user)
+        не вклинивался ВНУТРЬ tool-группы. ``compress()`` зовётся в
+        середине tool-loop'а (до финального текста модели) → хвост
+        окна может быть tool-результатом; вставка salient'а на
+        ``len(body)-1`` тогда разорвала бы пару ``assistant(tool_calls)``
+        / ``tool(result)``. Для обычного хвоста (user/assistant-текст)
+        позиция не меняется — намерение вол. 26.5 (вставлять как можно
+        позже ради cache-стабильности префикса) сохранено.
         """
         if salient is not None:
             wrapped = _wrap_salient(salient)
-            body = body[:insert_at] + [wrapped] + body[insert_at:]
+            safe_at = _safe_salient_insert_index(body, insert_at)
+            body = body[:safe_at] + [wrapped] + body[safe_at:]
         return _sanitize_tool_pairs(body)
 
     # -- assemble entry-point (волна 26.7 — channel split) ---------------
@@ -711,6 +722,49 @@ def _get_tool_call_id(tc: Any) -> str:
     if isinstance(tc, dict):
         return tc.get("id", "") or ""
     return getattr(tc, "id", "") or ""
+
+
+def _safe_salient_insert_index(
+    body: list[dict[str, Any]], desired: int
+) -> int:
+    """Сдвинуть позицию вставки salient'а влево, чтобы не разорвать tool-группу.
+
+    Pure-helper. Вставка трактуется как ``body[:p] + [salient] + body[p:]``,
+    т.е. salient окажется ПЕРЕД ``body[p]``. Salient — это role=user
+    сообщение, и его нельзя ставить:
+
+    - перед tool-результатом (``body[p].role == "tool"``) — оторвёт
+      result от своего assistant'а;
+    - сразу после assistant'а с ``tool_calls`` (``body[p-1]`` —
+      assistant с tool_calls) — вклинится между tool_call и его
+      результатом.
+
+    Поэтому, пока вставка на ``p`` разрывала бы группу, едем влево.
+
+    Зачем вообще: ``compress()`` зовётся в середине tool-loop'а (до
+    финального текста модели), значит хвост окна может быть
+    tool-результатом. Намерение вол. 26.5 — вставлять salient как можно
+    позже (``len(body)-1``) ради cache-стабильности префикса — остаётся
+    в силе для обычного хвоста (user/assistant-текст): там цикл не
+    срабатывает и позиция не меняется. Сдвиг только когда хвост — это
+    tool-группа.
+
+    Граничные случаи: пустой body → desired зажат в [0, 0]; body
+    целиком из одной tool-группы → p доедет до 0 (salient встанет в
+    самое начало, пара цела).
+    """
+    p = max(0, min(desired, len(body)))
+    while p > 0 and (
+        # не вставлять ПЕРЕД tool-результатом
+        (p < len(body) and body[p].get("role") == "tool")
+        # и не сразу ПОСЛЕ assistant'а с tool_calls
+        or (
+            body[p - 1].get("role") == "assistant"
+            and body[p - 1].get("tool_calls")
+        )
+    ):
+        p -= 1
+    return p
 
 
 def _sanitize_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
