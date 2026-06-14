@@ -7,6 +7,23 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [1.0.6] — 2026-06-14
+
+Релиз `styx-hermes` — defect-fix routing tool-call'ов. `styx-core` без
+изменений (остаётся 1.0.4).
+
+### Исправлено
+
+- `StyxMemoryProvider.get_tool_schemas()` теперь отдаёт статический каталог
+  ядра до `initialize()` (fallback на `StyxMemoryCore.get_tool_schemas()`
+  — чистый, без БД/HTTP). Раньше до init метод возвращал пустой список:
+  Hermes строит routing-индекс `_tool_to_provider` в
+  `MemoryManager.add_provider()` ДО `initialize()` (`agent_init.py:1101`
+  vs `:1144`), поэтому индекс получался пустым и каждый `styx_*` tool-call
+  падал в `Unknown tool` — при том что схема к моменту инжекта в модель
+  (`agent_init.py:1176`, уже после init) была видна. Найдено live-e2e на
+  Hermes v0.16.0.
+
 ## [1.0.5] — 2026-06-10
 
 Релиз `styx-hermes` — совместимость с **Hermes Agent v0.16.0** (тег/образ
