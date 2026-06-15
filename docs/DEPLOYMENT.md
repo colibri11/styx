@@ -75,9 +75,6 @@ General plugin (`styx`) подхватывается через entry-point `her
 ### 2.4. Hermes config.yaml
 
 ```yaml
-context:
-  engine: styx
-
 memory:
   provider: styx-memory
 
@@ -86,18 +83,21 @@ plugins:
     - styx
 ```
 
-**`context.engine: styx` обязателен.** Без него Hermes (≥ v0.15.2) берёт
-встроенный compressor: Styx-движок регистрируется через entry-point, но
-**не выбирается**, и `ContextEngine` Styx'а не работает (recall/инъекция
-геометрии не происходит). `plugins.enabled += styx` включает плагин, но
-не выбирает движок — это разные ключи.
+**`context.engine` ставить НЕ нужно.** Styx в Hermes — **memory-provider**:
+он подмешивает память (`prefetch`/`system_prompt_block` per-turn + tools +
+`on_pre_compress`), а компрессию всего окна ведёт сам Hermes своим штатным
+компрессором. Styx context engine'ом компрессор Hermes НЕ подменяет (прежний
+дизайн делал это и приводил к заглушке `[Result from earlier conversation …]`
+вместо результатов — устранено в styx-hermes 1.0.8). Подключение Styx — это
+ровно два ключа: `memory.provider: styx-memory` + `plugins.enabled += styx`.
 
-Эти три ключа на профиль выставляет идемпотентная команда
+Эти ключи на профиль выставляет идемпотентная команда
 `styx-hermes-setup --attach` (см. § 4.7) — это **предпочтительный** способ
-подключения профиля; ручная правка YAML — альтернатива. Под текущей моделью
-config **не патчится автоматически** при старте контейнера (авто-bootstrap
-ретайрен, см. § 7.1): чистая установка оставляет все профили на штатной
-памяти Hermes, пока их явно не подключат через `--attach`.
+подключения профиля; ручная правка YAML — альтернатива. (`--attach` также
+снимает legacy `context.engine: styx`, оставшийся от прежних версий.) Под
+текущей моделью config **не патчится автоматически** при старте контейнера
+(авто-bootstrap ретайрен, см. § 7.1): чистая установка оставляет все профили
+на штатной памяти Hermes, пока их явно не подключат через `--attach`.
 
 ## 3. Database setup
 
@@ -284,7 +284,7 @@ docker exec -u hermes <hermes> /opt/hermes/.venv/bin/styx-hermes-setup \
 attached '<name>' to Styx:
   memory.provider = styx-memory
   plugins.enabled += styx
-  context.engine = styx
+  (context.engine не выставляется — компрессию ведёт сам Hermes)
   config: <path>/config.yaml
   backup: <path>/config.yaml.bak.<YYYYMMDD-HHMMSS>
 Restart the profile gateway / container to apply (a running gateway reverts config edits).
@@ -370,7 +370,7 @@ curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
 
 # Из Hermes-process (one-shot turn; с v2026.5.29.2 subcommand — chat, не ask;
 # выверено против v2026.6.5)
-hermes chat -q "Привет"  # в логах: "Using context engine: styx" + "StyxMemoryProvider initialized"
+hermes chat -q "Привет"  # в логах: "StyxMemoryProvider initialized" + "Styx pre_llm_call hook зарегистрирован"
 ```
 
 ## 6. Troubleshooting

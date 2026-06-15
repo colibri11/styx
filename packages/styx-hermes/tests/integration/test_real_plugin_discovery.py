@@ -107,13 +107,13 @@ def test_styx_general_picked_up_by_plugin_manager() -> None:
     """General PluginManager Hermes находит styx shim и загружает его.
 
     Не помечает kind="exclusive" (нет memory-маркеров в shim) →
-    plugin реально загружается → register(ctx) вызван →
-    StyxContextEngine зарегистрирован → StyxOpenAITransport+
-    StyxCodexTransport перетёрли _REGISTRY.
+    plugin реально загружается → register(ctx) вызван → StyxOpenAITransport+
+    StyxCodexTransport перетёрли _REGISTRY. Context engine при этом НЕ
+    регистрируется: Styx в Hermes — memory-provider, компрессию всего окна
+    ведёт сам Hermes (плагин не подменяет собой компрессор).
     """
     from agent.transports import get_transport
     from hermes_cli.plugins import PluginManager
-    from styx_hermes.engine.context import StyxContextEngine
     from styx_hermes.engine.transport import (
         StyxCodexTransport,
         StyxOpenAITransport,
@@ -126,15 +126,11 @@ def test_styx_general_picked_up_by_plugin_manager() -> None:
         pm = PluginManager()
         pm.discover_and_load(force=True)
 
-        # ContextEngine зарегистрирован
-        engine = pm._context_engine
-        assert engine is not None, (
-            "PluginManager не зарегистрировал ContextEngine — possibly styx "
-            "shim не загрузился (проверь attach в config: plugins.enabled "
-            "содержит 'styx', kind!=exclusive в plugin.yaml)"
+        # ContextEngine НЕ выставлен — Styx не подменяет компрессор Hermes.
+        assert pm._context_engine is None, (
+            "PluginManager выставил ContextEngine, хотя Styx больше НЕ "
+            f"регистрируется как context engine: {type(pm._context_engine).__name__}"
         )
-        assert isinstance(engine, StyxContextEngine)
-        assert engine.name == "styx"
 
         # Transports перетёрли дефолты
         cc = get_transport("chat_completions")

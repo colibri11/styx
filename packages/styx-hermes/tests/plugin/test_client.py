@@ -106,16 +106,6 @@ def test_recall_long_timeout(client_no_token: StyxCoreClient) -> None:
         assert kwargs["timeout"] == client_no_token._long_timeout
 
 
-def test_build_context_uses_long_timeout(client_no_token: StyxCoreClient) -> None:
-    with patch.object(client_no_token._session, "post") as mock_post:
-        mock_post.return_value = _mock_response(
-            200, {"messages": [], "compression_count": 0, "salient_injected": False}
-        )
-        client_no_token.build_context("agent-a", [{"role": "user", "content": "x"}])
-        kwargs = mock_post.call_args.kwargs
-        assert kwargs["timeout"] == client_no_token._long_timeout
-
-
 def test_pre_llm_inject_returns_context_or_none(client_no_token: StyxCoreClient) -> None:
     with patch.object(client_no_token._session, "post") as mock_post:
         mock_post.return_value = _mock_response(200, {"context": "Peer прозвучал: ..."})

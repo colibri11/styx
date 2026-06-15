@@ -1,8 +1,10 @@
 """Unit-тесты attach-команды styx-hermes-setup (волна 33).
 
 attach подключает любой Hermes-профиль (base или именованный) к Styx
-идемпотентным патчем его config.yaml: memory.provider/plugins.enabled/
-context.engine. Чистая установка оставляет Styx сиротой — attach это
+идемпотентным патчем его config.yaml: memory.provider/plugins.enabled.
+context.engine attach НЕ выставляет (компрессию всего окна ведёт сам
+Hermes; Styx — memory-provider) и снимает legacy context.engine: styx
+при ре-attach. Чистая установка оставляет Styx сиротой — attach это
 явный opt-in.
 """
 
@@ -42,7 +44,8 @@ def test_attach_base(tmp_path: Path) -> None:
     data = yaml.safe_load(config.read_text())
     assert data["memory"]["provider"] == "styx-memory"
     assert data["plugins"]["enabled"] == ["styx"]
-    assert data["context"]["engine"] == "styx"
+    # context.engine attach НЕ выставляет — компрессию ведёт сам Hermes.
+    assert "context" not in data
     # Существующие ключи сохранены.
     assert data["model"]["name"] == "x"
 
@@ -66,7 +69,7 @@ def test_attach_named(tmp_path: Path) -> None:
     data = yaml.safe_load(config.read_text())
     assert data["memory"]["provider"] == "styx-memory"
     assert data["plugins"]["enabled"] == ["styx"]
-    assert data["context"]["engine"] == "styx"
+    assert "context" not in data
     assert data["model"]["name"] == "y"
 
     assert len(_backups(config)) == 1
@@ -127,11 +130,55 @@ def test_attach_no_duplicate_styx_in_plugins(tmp_path: Path) -> None:
     config = home / "config.yaml"
     _write_config(config, {"plugins": {"enabled": ["foo", "styx"]}})
 
-    # styx уже есть, memory/context отсутствуют → патч ещё меняет (memory/context).
+    # styx уже есть, memory отсутствует → патч ещё меняет (memory).
     rc = setup_cli.main(["--attach", "--hermes-home", str(home)])
     assert rc == 0
     data = yaml.safe_load(config.read_text())
     assert data["plugins"]["enabled"] == ["foo", "styx"]  # без дубля
+
+
+# --- ре-attach снимает legacy context.engine: styx ------------------------
+
+
+def test_attach_removes_legacy_context_engine(tmp_path: Path) -> None:
+    """Конфиг, привязанный прежней версией (context.engine: styx), при
+    ре-attach должен потерять engine — Hermes возвращается к своему
+    штатному компрессору. context без других ключей убирается целиком."""
+    home = tmp_path / "hermes"
+    config = home / "config.yaml"
+    _write_config(
+        config,
+        {
+            "memory": {"provider": "styx-memory"},
+            "plugins": {"enabled": ["styx"]},
+            "context": {"engine": "styx"},
+        },
+    )
+
+    rc = setup_cli.main(["--attach", "--hermes-home", str(home)])
+    assert rc == 0
+
+    data = yaml.safe_load(config.read_text())
+    assert "context" not in data
+    assert data["memory"]["provider"] == "styx-memory"
+    assert data["plugins"]["enabled"] == ["styx"]
+
+
+def test_attach_removes_engine_keeps_other_context_keys(tmp_path: Path) -> None:
+    """Снимается только engine: styx; прочие ключи context — сохраняются."""
+    home = tmp_path / "hermes"
+    config = home / "config.yaml"
+    _write_config(
+        config,
+        {"context": {"engine": "styx", "max_tokens": 4096}},
+    )
+
+    rc = setup_cli.main(["--attach", "--hermes-home", str(home)])
+    assert rc == 0
+
+    data = yaml.safe_load(config.read_text())
+    assert "engine" not in data["context"]
+    assert data["context"]["max_tokens"] == 4096
 
 
 # --- идемпотентный повтор: no change, no new backup, exit 0 ---------------

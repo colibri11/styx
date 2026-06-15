@@ -91,7 +91,7 @@ class StyxMemoryProvider(MemoryProvider):
 
         self._agent_id = resp.get("agent_id") or agent_identity
         self._tool_schemas = resp.get("tools") or []
-        # ContextEngine / pre_llm_call hook читают session через
+        # transport / pre_llm_call hook читают session через
         # _agent_session module-global (Q14 в design-doc).
         _agent_session.set_session(self._agent_id, self._client)
         log.info(
