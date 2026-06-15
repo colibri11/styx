@@ -8,8 +8,8 @@ memory provider'ом и попадает в memory discovery (см.
 
 memory discovery вызывает ``register(ctx)`` плагина, передавая
 ``_ProviderCollector`` — упрощённый ctx с единственным методом
-``register_memory_provider``. Остальные регистрации (context_engine,
-transport) в этой ветке discovery не работают — для них существует
+``register_memory_provider``. Остальные регистрации (transport,
+pre_llm hook) в этой ветке discovery не работают — для них существует
 ``styx_hermes.plugin``.
 """
 

@@ -1,9 +1,13 @@
 """Hermes general-plugin entry для Styx.
 
-Регистрирует ContextEngine и Transport через PluginContext. Долгая
-память регистрируется отдельным shim'ом (см. ``styx_hermes.memory_plugin``).
-Установка memory shim'а в ``$HERMES_HOME/plugins/styx-memory/`` —
-``styx-hermes-setup`` CLI.
+Styx в Hermes — memory-provider + transport + pre_llm hook. Память
+подмешивается каналами provider'а (``prefetch`` / ``system_prompt_block``
+per-turn + tools + ``on_pre_compress``), а компрессию всего окна ведёт
+сам Hermes своим штатным компрессором — Styx context engine'ом НЕ
+подменяется. Этот entry-point регистрирует только Transport (через
+``register_with_hermes``) и pre_llm hook. Долгая память регистрируется
+отдельным shim'ом (см. ``styx_hermes.memory_plugin``); установка memory
+shim'а в ``$HERMES_HOME/plugins/styx-memory/`` — ``styx-hermes-setup`` CLI.
 
 ВАЖНО: исходник этого модуля НЕ должен упоминать имя метода для
 регистрации memory provider'а — общий PluginManager Hermes эвристически
@@ -20,7 +24,6 @@ from styx_hermes import _hermes_path
 
 _hermes_path.ensure_on_path()
 
-from styx_hermes.engine.context import StyxContextEngine  # noqa: E402
 from styx_hermes.engine.pre_llm_hook import on_pre_llm_call  # noqa: E402
 from styx_hermes.engine.transport import register_with_hermes  # noqa: E402
 
@@ -28,15 +31,16 @@ log = logging.getLogger(__name__)
 
 
 def register(ctx) -> None:
-    """Hermes plugin entry-point — engine, transport и pre_llm hook."""
+    """Hermes plugin entry-point — transport и pre_llm hook.
+
+    Context engine НЕ регистрируется: компрессию всего окна ведёт сам
+    Hermes, Styx подмешивает только память (provider-каналами).
+    """
     register_with_hermes()  # подменяет ChatCompletionsTransport / Responses в _REGISTRY
     log.info(
         "StyxOpenAITransport+StyxCodexTransport зарегистрированы "
         "(api_mode='chat_completions'+'codex_responses')"
     )
-
-    ctx.register_context_engine(StyxContextEngine())
-    log.info("StyxContextEngine зарегистрирован как context engine")
 
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     log.info("Styx pre_llm_call hook зарегистрирован")

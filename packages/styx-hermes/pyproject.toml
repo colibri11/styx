@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "styx-hermes"
-version = "1.0.7"
+version = "1.0.8"
 description = "Styx как плагин Hermes Agent — тонкий HTTP-клиент к styx-core daemon."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,8 +23,9 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 styx-hermes-setup = "styx_hermes.setup_cli:main"
 
-# Entry-point для general plugin (StyxContextEngine + два Transport +
-# pre_llm_call hook). Hermes сканирует группу `hermes_agent.plugins`
+# Entry-point для general plugin (два Transport + pre_llm_call hook).
+# Context engine НЕ регистрируется — компрессию ведёт сам Hermes.
+# Hermes сканирует группу `hermes_agent.plugins`
 # через `importlib.metadata.entry_points()`. Value — module path
 # (без `:attr`), потому что `_load_entrypoint_module` делает `ep.load()`
 # и ожидает модуль с top-level функцией `register(ctx)`.

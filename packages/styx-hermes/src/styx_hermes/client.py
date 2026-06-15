@@ -139,25 +139,6 @@ class StyxCoreClient:
             wrap_for_llm=True,
         )
 
-    def build_context(
-        self,
-        agent_id: str,
-        messages: list[dict[str, Any]],
-        *,
-        current_tokens: int | None = None,
-        focus_topic: str | None = None,
-    ) -> dict[str, Any]:
-        return self._post(
-            "/context/build",
-            {
-                "agent_id": agent_id,
-                "messages": messages,
-                "current_tokens": current_tokens,
-                "focus_topic": focus_topic,
-            },
-            timeout=self._long_timeout,
-        )
-
     def assemble_context(
         self,
         agent_id: str,

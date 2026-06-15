@@ -94,10 +94,13 @@ def _resolve_config_path(hermes_home: Path, profile: str | None) -> Path:
 def _compute_patched(data: dict) -> tuple[dict, bool]:
     """Чистая функция attach-патча. Возвращает (новый dict, changed?).
 
-    Семантика идентична прежнему cont-init-патчу config.yaml:
+    Подключение Styx в Hermes = memory-provider + plugins.enabled, БЕЗ
+    context.engine: компрессию всего окна ведёт сам Hermes своим штатным
+    компрессором, Styx context engine'ом НЕ подменяется.
       - memory.provider = "styx-memory"
       - plugins.enabled — гарантировать list, добавить "styx" без дублей
-      - context.engine = "styx"
+      - context.engine == "styx" — СНЯТЬ (legacy-привязка прежних версий);
+        если context после этого пуст — убрать и его.
     Исходный dict не мутируется (работаем по deep-copy), чтобы caller мог
     сравнить before/after.
     """
@@ -113,7 +116,13 @@ def _compute_patched(data: dict) -> tuple[dict, bool]:
         enabled.append("styx")
     plugins["enabled"] = enabled
 
-    patched.setdefault("context", {})["engine"] = "styx"
+    # Снять legacy context.engine: styx (Hermes должен использовать свой
+    # штатный компрессор). Прочие ключи context — не трогаем.
+    context = patched.get("context")
+    if isinstance(context, dict) and context.get("engine") == "styx":
+        del context["engine"]
+        if not context:
+            del patched["context"]
 
     changed = patched != data
     return patched, changed
@@ -178,7 +187,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     print(f"attached '{label}' to Styx:")
     print("  memory.provider = styx-memory")
     print("  plugins.enabled += styx")
-    print("  context.engine = styx")
+    print("  (context.engine не выставляется — компрессию ведёт сам Hermes)")
     print(f"  config: {config_path}")
     print(f"  backup: {result.backup_path}")
     print(
@@ -229,16 +238,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print("Дальше:")
     print("  1. config.yaml: memory.provider: styx-memory")
     print("  2. config.yaml: plugins.enabled += ['styx']")
-    print("  3. config.yaml: context.engine: styx")
-    print("     (иначе Hermes использует built-in compressor — Styx-движок")
-    print("      зарегистрирован, но не выбран)")
-    print("  4. STYX_DAEMON_URL=http://127.0.0.1:8788 (или styx.json в HERMES_HOME)")
-    print("  5. Запустить styx-core daemon: styx daemon run")
-    print("  6. Запустить Hermes — general plugin (styx) подхватится")
+    print("     (context.engine ставить НЕ нужно — компрессию всего окна")
+    print("      ведёт сам Hermes; Styx подмешивает только память)")
+    print("  3. STYX_DAEMON_URL=http://127.0.0.1:8788 (или styx.json в HERMES_HOME)")
+    print("  4. Запустить styx-core daemon: styx daemon run")
+    print("  5. Запустить Hermes — general plugin (styx) подхватится")
     print("     через entry-point, memory provider — через directory shim")
     print()
     print("  Либо подключить профиль к Styx идемпотентным attach (правит")
-    print("  config.yaml: memory.provider/plugins.enabled/context.engine):")
+    print("  config.yaml: memory.provider/plugins.enabled):")
     print("    styx-hermes-setup --attach                  # база")
     print("    styx-hermes-setup --attach --profile <name> # именованный профиль")
     return 0
@@ -266,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Вместо установки shim'а — идемпотентно подключить профиль к Styx "
-            "(патч config.yaml: memory.provider/plugins.enabled/context.engine)"
+            "(патч config.yaml: memory.provider/plugins.enabled)"
         ),
     )
     parser.add_argument(

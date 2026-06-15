@@ -1,10 +1,10 @@
 """Module-global per-process state для styx-hermes plugin.
 
-Hermes-обёртки ``StyxContextEngine`` / ``StyxOpenAITransport`` /
-``on_pre_llm_call`` регистрируются ДО того как ``MemoryProvider.initialize``
-известно agent_id. Этот модуль — точка передачи: после
+Hermes-обёртки ``StyxOpenAITransport`` / ``on_pre_llm_call``
+регистрируются ДО того как ``MemoryProvider.initialize`` известно
+agent_id. Этот модуль — точка передачи: после
 ``MemoryProvider.initialize`` сохраняется ``agent_id`` + ``client``,
-и компоненты engine/transport/hook читают их через ``get_session``.
+и компоненты transport/hook читают их через ``get_session``.
 
 Контракт (Q14 в design-doc):
 - ``set_session(agent_id, client)`` — вызывается из

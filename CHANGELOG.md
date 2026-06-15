@@ -7,6 +7,35 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-hermes 1.0.8] — 2026-06-15
+
+Архитектурный фикс роли Styx в Hermes. `styx-core` без изменений (1.0.5).
+
+### Изменено
+
+- **Hermes-плагин больше НЕ регистрируется как context engine.** Прежний
+  дизайн подменял собой штатный компрессор Hermes (`agent.context_compressor`)
+  и гнал `should_compress()→True` каждый ход — Styx, будучи лишь малой
+  частью контекстного окна, не имеет права управлять компрессией всего
+  окна. Правильная роль Styx в Hermes — **memory-provider**: память
+  подмешивается каналами provider'а — `prefetch` / `system_prompt_block`
+  (per-turn, в system-prompt/инпут, messages-пары не трогает) + tools +
+  `on_pre_compress` (Styx отдаёт, что сохранить в summary). Компрессию
+  всего окна ведёт встроенный компрессор Hermes сам.
+- **Устранена заглушка `[Result from earlier conversation …]` вместо
+  результатов Styx.** Её ставил встроенный компрессор Hermes, когда
+  Styx-движок не был выбран (стабил tool-результаты). Теперь память едет
+  каналом инъекции и под компрессию `messages` не попадает.
+- **`styx-hermes-setup --attach` больше не ставит `context.engine: styx`**
+  и снимает его при ре-attach (config возвращается к штатному компрессору
+  Hermes). Подключение Styx = `memory.provider: styx-memory` +
+  `plugins.enabled += styx`.
+
+### Удалено
+
+- `styx_hermes.engine.context.StyxContextEngine` (и его тесты) — класс
+  больше не используется.
+
 ## [styx-core 1.0.5] — 2026-06-15
 
 Defect-fix `styx-core`. `styx-hermes` бампается следом (пин зависимости):
@@ -27,8 +56,8 @@ Defect-fix `styx-core`. `styx-hermes` бампается следом (пин з
   вместо результата тула» в проде. Фикс: pair-aware позиция вставки
   (`_safe_salient_insert_index`) — для обычного хвоста (user/assistant-
   текст) позиция не меняется (cache-намерение вол. 26.5 сохранено),
-  сдвиг влево только когда хвост — tool-группа. Найдено на проде (стек
-  hermes-prod), воспроизведено на стенде. styx-core 1.0.4 → 1.0.5;
+  сдвиг влево только когда хвост — tool-группа. Найдено в боевой
+  эксплуатации, воспроизведено на стенде. styx-core 1.0.4 → 1.0.5;
   styx-hermes 1.0.6 → 1.0.7 (бамп пина `styx-core==1.0.5`).
 
 ## [1.0.6] — 2026-06-14

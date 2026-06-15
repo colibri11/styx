@@ -67,16 +67,15 @@ def _restore_transport_registry():
     _agent_session.clear_session()
 
 
-def test_plugin_register_engine_and_transport() -> None:
-    from agent.context_engine import ContextEngine
+def test_plugin_register_transport_and_hook_no_engine() -> None:
     from agent.transports import get_transport
 
     ctx = FakePluginContext()
     plugin.register(ctx)
 
-    assert ctx.context_engine is not None
-    assert isinstance(ctx.context_engine, ContextEngine)
-    assert ctx.context_engine.name == "styx"
+    # Styx в Hermes — memory-provider, НЕ context engine: компрессию всего
+    # окна ведёт сам Hermes. Плагин не должен подменять собой компрессор.
+    assert ctx.context_engine is None
 
     inst = get_transport("chat_completions")
     assert isinstance(inst, transport_mod.StyxOpenAITransport)
