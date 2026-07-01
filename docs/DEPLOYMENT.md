@@ -1,7 +1,7 @@
-# Styx — Deployment Runbook (styx-core 1.0.3 / styx-hermes 1.0.4)
+# Styx — Deployment Runbook (styx-core 1.0.8 / styx-hermes 1.0.8)
 
-Инструкция по установке Styx в production (`styx-core` 1.0.3, `styx-hermes`
-1.0.4). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
+Инструкция по установке Styx в production (`styx-core` 1.0.8, `styx-hermes`
+1.0.8). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
 три процесса:
 
 - **`styx-core`** — host-agnostic ядро + HTTP API daemon
@@ -10,6 +10,34 @@
 
 Полный архитектурный контекст — `.design/host-agnostic-split-v1.md`
 (если есть в чекауте) и `docs/HTTP_API.md`.
+
+## 0. Breaking changes при апгрейде
+
+**styx-core 1.0.7 (волна 35, ADR § 58, 2026-07-01) — переименование
+pre-LLM emotional-канала.** Если на этом деплое (например, действующий
+Hermes-профиль) когда-либо выставлялись любые из этих ENV —
+**они больше не читаются, вообще:**
+
+- `STYX_PRE_LLM_PEER_VAD_ENABLED`
+- `STYX_PEER_VAD_MIN_NORM`
+- `STYX_PEER_VAD_TTL_S`
+
+Канал `channel_peer_vad` (говорил о собеседнике: *«Peer прозвучал:
+X»*) полностью заменён на `channel_self_state` (говорит от лица агента:
+*«Тебе сейчас X»*, источник — накопленное состояние, не сырой VAD
+peer-реплики). Это не deprecated-алиас — старые имена не работают ни
+как fallback, ни как no-op-предупреждение, они просто ничего не
+конфигурируют. Эквиваленты для миграции конфига:
+
+| Было (не читается) | Стало |
+|---|---|
+| `STYX_PRE_LLM_PEER_VAD_ENABLED` | `STYX_SELF_STATE_ENABLED` |
+| `STYX_PEER_VAD_MIN_NORM` | `STYX_SELF_STATE_MIN_NORM` (тот же дефолт `0.2`) |
+| `STYX_PEER_VAD_TTL_S` (default `60.0`, «окно свежести реакции») | `STYX_SELF_STATE_MAX_AGE_S` (default `900.0`, **другая семантика** — safety net на мёртвый `styx-worker`, не freshness-окно; см. `docs/CONFIGURATION.md`) |
+
+Если ни одна из старых переменных не выставлялась явно (типичный
+случай — все три жили на дефолтах) — апгрейд безопасен, действие не
+требуется. Полный список текущих ENV — `docs/CONFIGURATION.md`.
 
 ## 1. Prerequisites
 
@@ -363,7 +391,7 @@ styx-привязку от прошлых сессий (config уже пропа
 ```bash
 # Daemon живой
 curl -s http://127.0.0.1:8788/healthz | jq .
-# {"status":"ok","postgres":"ok","version":"1.0.4",...}
+# {"status":"ok","postgres":"ok","version":"1.0.8",...}
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
