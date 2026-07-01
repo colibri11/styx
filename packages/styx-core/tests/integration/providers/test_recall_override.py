@@ -29,9 +29,11 @@ def test_no_override_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_env(monkeypatch)
     monkeypatch.delenv("STYX_RECALL_MIN_SCORE", raising=False)
     monkeypatch.delenv("STYX_RECALL_DIALOGUE_MIN_SCORE", raising=False)
+    monkeypatch.delenv("STYX_RECALL_MEMORY_LIMIT", raising=False)
     cfg = load_config()
     assert cfg.recall_min_score is None
     assert cfg.recall_dialogue_min_score is None
+    assert cfg.recall_memory_limit is None
 
 
 def test_env_recall_min_score_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,6 +50,58 @@ def test_env_recall_dialogue_min_score_parsed(
     monkeypatch.setenv("STYX_RECALL_DIALOGUE_MIN_SCORE", "0.55")
     cfg = load_config()
     assert cfg.recall_dialogue_min_score == pytest.approx(0.55)
+
+
+def test_env_recall_memory_limit_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "10")
+    cfg = load_config()
+    assert cfg.recall_memory_limit == 10
+
+
+def test_env_recall_memory_limit_zero_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-fast: 0 вне диапазона 1-20 (см. config.py load())."""
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "0")
+    with pytest.raises(ValueError, match="recall_memory_limit"):
+        load_config()
+
+
+def test_env_recall_memory_limit_negative_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "-1")
+    with pytest.raises(ValueError, match="recall_memory_limit"):
+        load_config()
+
+
+def test_env_recall_memory_limit_too_high_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "25")
+    with pytest.raises(ValueError, match="recall_memory_limit"):
+        load_config()
+
+
+def test_env_recall_memory_limit_boundary_low_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Границы диапазона 1 и 20 — валидны, не должны бросать."""
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "1")
+    cfg = load_config()
+    assert cfg.recall_memory_limit == 1
+
+
+def test_env_recall_memory_limit_boundary_high_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "20")
+    cfg = load_config()
+    assert cfg.recall_memory_limit == 20
 
 
 def test_json_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -71,6 +125,33 @@ def test_env_overrides_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     )
     cfg = load_config(tmp_path)
     assert cfg.recall_min_score == pytest.approx(0.99)
+
+
+def test_json_override_memory_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_env(monkeypatch)
+    monkeypatch.delenv("STYX_RECALL_MEMORY_LIMIT", raising=False)
+    (tmp_path / "styx.json").write_text(
+        json.dumps({"database_url": "postgresql://x/y", "recall_memory_limit": 8}),
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.recall_memory_limit == 8
+
+
+def test_env_overrides_json_memory_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ENV выигрывает у styx.json (общий приоритет load())."""
+    _stub_env(monkeypatch)
+    monkeypatch.setenv("STYX_RECALL_MEMORY_LIMIT", "12")
+    (tmp_path / "styx.json").write_text(
+        json.dumps({"database_url": "postgresql://x/y", "recall_memory_limit": 8}),
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.recall_memory_limit == 12
 
 
 # -------- _build_recall_config ---------------------------------------
@@ -111,6 +192,23 @@ def test_build_recall_both_overrides() -> None:
     )
     assert cfg.full.min_score == pytest.approx(0.4)
     assert cfg.companion.dialogue.min_score == pytest.approx(0.55)
+
+
+def test_build_recall_memory_limit_override() -> None:
+    cfg = _build_recall_config(_config(recall_memory_limit=10))
+    assert cfg.full.memory_limit == 10
+    # Остальное — дефолт.
+    assert cfg.full.min_score == pytest.approx(DEFAULT_RECALL_CONFIG.full.min_score)
+    assert cfg.companion == DEFAULT_RECALL_CONFIG.companion
+
+
+def test_build_recall_full_and_memory_limit_together() -> None:
+    """min_score и memory_limit пишут в один и тот же partial["full"] dict."""
+    cfg = _build_recall_config(
+        _config(recall_min_score=0.4, recall_memory_limit=10)
+    )
+    assert cfg.full.min_score == pytest.approx(0.4)
+    assert cfg.full.memory_limit == 10
 
 
 # -------- provider — без БД, проверяем только pre-initialize state ----

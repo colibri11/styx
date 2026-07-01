@@ -3136,6 +3136,8 @@ def _build_recall_config(config: StyxConfig) -> RecallConfig:
     partial: dict[str, dict[str, float]] = {}
     if config.recall_min_score is not None:
         partial.setdefault("full", {})["min_score"] = config.recall_min_score
+    if config.recall_memory_limit is not None:
+        partial.setdefault("full", {})["memory_limit"] = config.recall_memory_limit
     if config.recall_dialogue_min_score is not None:
         partial.setdefault("companion", {}).setdefault("dialogue", {})[
             "min_score"

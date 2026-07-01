@@ -57,6 +57,9 @@ class StyxConfig:
     # в StyxMemoryProvider.initialize.
     recall_min_score: float | None = None
     recall_dialogue_min_score: float | None = None
+    # None = использовать встроенный дефолт FullRecallConfig.memory_limit
+    # (6). Override через STYX_RECALL_MEMORY_LIMIT либо styx.json.
+    recall_memory_limit: int | None = None
     # Salient memories injection (волна 9). enabled=False полностью
     # отключает inject в compress() (для отладки и тестов которые не
     # должны ходить в Ollama). timeout_s — общий лимит на recall'е,
@@ -410,6 +413,7 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "classifier_max_recall_events_per_turn",
         "recall_min_score",
         "recall_dialogue_min_score",
+        "recall_memory_limit",
         "salient_enabled",
         "salient_timeout_s",
         "salient_min_query_len",
@@ -517,6 +521,18 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
             "Снизь STYX_MESSAGE_SPLIT_PART_CHARS / styx.json."
         )
 
+    # Валидация recall_memory_limit: тот же диапазон 1-20 что и
+    # per-call override styx_recall.limit в providers/memory.py
+    # (JSON-схема тула объявляет "minimum": 1, "maximum": 20). Fail-fast
+    # на старте, не молчаливый clamp.
+    recall_memory_limit = _optional_int(merged.get("recall_memory_limit"))
+    if recall_memory_limit is not None and not (1 <= recall_memory_limit <= 20):
+        raise ValueError(
+            f"recall_memory_limit ({recall_memory_limit}) вне допустимого "
+            "диапазона 1-20 (тот же диапазон что per-call override "
+            "styx_recall.limit). Поправь STYX_RECALL_MEMORY_LIMIT / styx.json."
+        )
+
     ollama_default = merged.get("ollama_url", "http://ollama:11434")
     return StyxConfig(
         database_url=dsn,
@@ -551,6 +567,7 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         recall_dialogue_min_score=_optional_float(
             merged.get("recall_dialogue_min_score")
         ),
+        recall_memory_limit=recall_memory_limit,
         salient_enabled=bool(merged.get("salient_enabled", True)),
         salient_timeout_s=float(merged.get("salient_timeout_s", 1.0)),
         salient_min_query_len=int(merged.get("salient_min_query_len", 20)),
@@ -738,6 +755,13 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+def _optional_int(value: Any) -> int | None:
+    """None / отсутствие → None; иначе int()."""
+    if value is None:
+        return None
+    return int(value)
+
+
 def is_available(hermes_home: str | os.PathLike[str] | None = None) -> bool:
     """Быстрая проверка без подключения к БД (для MemoryProvider.is_available)."""
     if os.environ.get("STYX_DATABASE_URL") or os.environ.get("DATABASE_URL"):
@@ -840,6 +864,11 @@ def _read_env() -> dict[str, Any]:
         "recall_dialogue_min_score": (
             float(os.environ["STYX_RECALL_DIALOGUE_MIN_SCORE"])
             if os.environ.get("STYX_RECALL_DIALOGUE_MIN_SCORE")
+            else None
+        ),
+        "recall_memory_limit": (
+            int(os.environ["STYX_RECALL_MEMORY_LIMIT"])
+            if os.environ.get("STYX_RECALL_MEMORY_LIMIT")
             else None
         ),
         "salient_enabled": (
