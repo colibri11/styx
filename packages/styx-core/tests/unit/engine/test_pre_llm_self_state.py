@@ -76,12 +76,35 @@ def test_skip_when_query_fails(caplog) -> None:
     assert any("self_state" in rec.getMessage() for rec in caplog.records)
 
 
-def test_skip_when_state_too_stale(caplog) -> None:
-    """age > self_state_max_age_s — safety net на мёртвый воркер, WARNING."""
+def test_skip_when_active_state_too_stale(caplog) -> None:
+    """АКТИВНАЯ (norm >= min_norm) эмоция + age > max_age_s — safety net на
+    мёртвый воркер: старую активную точку decay должен был бы демпфировать,
+    но не пишет → WARNING про styx-worker + return None."""
     h = _handle(_StubQueries(latest=_entry(0.9, 0.8, 0.7, age_s=901.0)))
     with caplog.at_level("WARNING"):
         assert channel_self_state(h, {}) is None
-    assert any("self_state" in rec.getMessage() for rec in caplog.records)
+    assert any("styx-worker" in rec.getMessage() for rec in caplog.records)
+
+
+def test_idle_near_neutral_stale_skips_without_warning(caplog) -> None:
+    """idle near-neutral (norm < min_norm) + age > max_age_s — покой, не
+    отказ воркера: у idle-агента decay законно перестаёт писать новые
+    строки (осознанный no-op в apply_instant_decay), нейтральная точка
+    закономерно стареет. Проверка нейтральности идёт РАНЬШЕ возраста,
+    поэтому канал молчит и cry-wolf WARNING НЕ логируется."""
+    # norm = sqrt(0.05²·3) ≈ 0.087 < 0.2, но возраст сильно за max_age_s
+    h = _handle(_StubQueries(latest=_entry(0.05, 0.05, 0.05, age_s=5000.0)))
+    with caplog.at_level("WARNING"):
+        assert channel_self_state(h, {}) is None
+    assert not any("styx-worker" in rec.getMessage() for rec in caplog.records)
+
+
+def test_fresh_active_state_yields_phrase() -> None:
+    """(regression) свежая ненейтральная эмоция → фраза, порядок проверок
+    не изменил основной вывод инжекта."""
+    h = _handle(_StubQueries(latest=_entry(0.9, 0.8, 0.7, age_s=1.0)))
+    out = channel_self_state(h, {})
+    assert out == "Тебе сейчас воодушевлённо и уверенно."
 
 
 def test_does_not_skip_when_state_fresh_enough() -> None:

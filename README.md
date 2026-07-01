@@ -367,5 +367,5 @@ Anthropic / OpenAI / z.ai / Codex).
 
 ## Статус
 
-`styx-core` 1.0.8 · `styx-hermes` 1.0.8. Пакеты версионируются
+`styx-core` 1.0.9 · `styx-hermes` 1.0.9. Пакеты версионируются
 независимо — см. [`CHANGELOG.md`](CHANGELOG.md).

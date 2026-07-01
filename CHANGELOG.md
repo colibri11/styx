@@ -7,6 +7,68 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.9] — 2026-07-01
+
+Defect-fix триада по отзыву девопса (живой деплой Hermes 0.17.0 на builder,
+стек Алёны, 2026-07-01) — три независимых фикса observability/robustness
+фоновых pipeline'ов (ADR § 62). `styx-hermes` без изменений (1.0.9).
+
+### Исправлено
+
+- **self_state: ложный WARNING «styx-worker вероятно не работает» у
+  спокойного агента.** В `channel_self_state` проверка возраста состояния
+  шла раньше проверки нейтральности — idle-агент (near-neutral, у которого
+  `apply_instant_decay` законно перестал писать новые decay-строки) со
+  старым состоянием ловил age-WARNING «воркер мёртв» до того, как отработала
+  бы тихая norm-ветка «агент спокоен». Cry-wolf: заглушал реальный сигнал
+  мёртвого воркера. Переупорядочено: нейтральность (`norm <
+  self_state_min_norm`) → тихий skip **независимо от возраста**; age-WARNING
+  только для ненейтрального состояния (старая активная эмоция, decay которой
+  не пишется — вот это настоящий сигнал проблемы). Вывод инжекта self_state
+  не изменился ни в одном случае.
+- **chat_json: терминальный крах на почти-JSON от локальной модели →
+  залипание importance/usage/consolidation задач в `failed`.** `_parse`
+  делал `json.loads` по всей строке `content`; локальная модель
+  (qwen3:4b-local) вопреки уже включённому `format=json` иногда отдаёт
+  валидный объект в обрамлении (markdown-fence, трейлинг-проза после `}`,
+  `<think>`-блоки), и `OllamaTerminalError` уводил задачу в `failed` без
+  ретраев (перезапуск не помогал). Добавлен защитный `_tolerant_json_extract`
+  (transport-слой, чинит всех потребителей `chat_json` разом): fast-path
+  чистого JSON → снятие `<think>`/fence → fall-forward по сбалансированным
+  `{...}`-кандидатам слева направо (первый валидно-парсящийся, проходит мимо
+  битого decoy перед реальным ответом). Реально-битый ответ (валидного
+  объекта нет) остаётся терминальным. Примечание: `format=json` из ТЗ был
+  уже включён — реальным фиксом стал именно защитный разбор.
+- **memory_daily_consolidation: доброкачественная гонка supersede/delete
+  трактовалась как ошибка.** `len(memories) < 2` после claim (источники
+  кластера слиты/удалены другим apply-проходом между enqueue и claim)
+  бросало `OllamaTerminalError` → задача `failed` терминально (10 задач
+  залипло на Алёне). Консолидировать нечего — это ожидаемый исход гонки, а
+  не сбой. Теперь — штатный skip-no-op (`HandlerResult`, `skipped_by_llm=
+  True`, `log.info`), задача завершается `done`/skipped. Соседний
+  `some_source_already_superseded` и настоящие ошибки (`schema_mismatch`,
+  `embedder_unavailable`, `invalid_payload`) остаются терминальными.
+
+### Гейты
+
+Drift-sentinel **57/57** (0 drift); host styx-core **1292 passed / 0 failed**
+(реальные PG+Ollama, за вычетом docker-stack integration-директорий);
+точечные тесты трёх фиксов **73 passed** под `-W error::DeprecationWarning`
+(0 новых warning); Docker in-container core **1506 passed / 13 design-skip**
+(1 инфра-флейк `test_process_one_handles_transient_error_as_failed` — гонка
+тестового claim с worker-pool живого daemon на общей БД, файл фиксом не
+тронут, изолированно 3/3 green; тот же класс, что ADR § 53). Real-Ollama
+`chat_json` e2e (`importance`/`classifier`/`sentiment`/`usage`) — зелёные.
+Методология agent-team (3 dev ∥ → 3 ревьюера → адъюдикация ТЛ → свежий
+фиксер → гейты).
+
+### Развёртывание
+
+Редеплой styx-daemon на прод (builder / стек Алёны) и рестарт залипших
+importance/usage/`memory_daily_consolidation` задач (`status=failed→pending`,
+`retry_count=0`) — **отдельным шагом prod-исполнителем** (acceptance #4 ТЗ
+#2/#3). В этот commit не входит.
+
 ## [styx-hermes 1.0.9] — 2026-07-01
 
 Compat-валидация против **Hermes Agent v0.17.0** (тег `v2026.6.19`, ADR

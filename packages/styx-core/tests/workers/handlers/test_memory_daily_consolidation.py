@@ -144,16 +144,55 @@ def test_handler_too_few_memory_ids_terminal(db, rate_limit) -> None:
 # ── Empty cluster / superseded ───────────────────────────────────────
 
 
-def test_handler_empty_cluster_terminal(db, rate_limit) -> None:
-    """Memory_ids в payload, но всех уже не существует → terminal."""
+def test_handler_empty_cluster_skips_no_op(db, rate_limit) -> None:
+    """Memory_ids в payload, но всех уже не существует (race
+    supersede/delete между enqueue и claim) → skip no-op, НЕ terminal.
+
+    Acceptance #3: пустой кластер после claim трактуется как успешный
+    skip, а задача помечается done/skipped (return HandlerResult), а не
+    failed (raise). LLM не вызывается — источников уже нет.
+    """
     handler = create_memory_daily_consolidation_handler()
     llm = _ScriptedChat({})
     fake_ids = [uuid.uuid4(), uuid.uuid4()]
-    with pytest.raises(OllamaTerminalError, match="empty_cluster"):
-        handler(
-            _make_task(agent_id="alpha", memory_ids=fake_ids),
-            _ctx(db, llm, rate_limit),
-        )
+    out = handler(
+        _make_task(agent_id="alpha", memory_ids=fake_ids),
+        _ctx(db, llm, rate_limit),
+    )
+    assert out.skipped_by_llm is True
+    assert out.result["skip"] is True
+    assert "race supersede/delete" in out.result["skip_reason"]
+    assert out.result["consolidated_text"] is None
+    assert out.result["consolidated_embedding"] is None
+    assert out.result["source_ids"] == []  # никто не выжил
+    assert out.result["source_kinds"] is None
+    assert out.result["source_visibility"] is None
+    assert llm.calls == 0  # LLM не звался — консолидировать нечего
+
+
+def test_handler_collapsed_cluster_one_survivor_skips_no_op(
+    db, rate_limit,
+) -> None:
+    """Частичный коллапс: из 3 источников до claim выжил только 1 →
+    skip no-op, source_ids содержит единственного выжившего."""
+    ids = _seed_memories(db, "alpha", 3)
+    # Удаляем 2 из 3 источников между enqueue и claim (race delete).
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM memories WHERE id = ANY(%s)", (ids[1:],))
+    db.commit()
+    handler = create_memory_daily_consolidation_handler()
+    llm = _ScriptedChat({})
+    out = handler(
+        _make_task(agent_id="alpha", memory_ids=ids),
+        _ctx(db, llm, rate_limit),
+    )
+    assert out.skipped_by_llm is True
+    assert out.result["skip"] is True
+    assert out.result["source_ids"] == [str(ids[0])]  # выживший источник
+    assert out.result["consolidated_text"] is None
+    assert out.result["consolidated_embedding"] is None
+    assert out.result["source_kinds"] is None
+    assert llm.calls == 0
 
 
 def test_handler_some_superseded_terminal(db, rate_limit) -> None:
@@ -269,15 +308,19 @@ def test_handler_schema_mismatch_terminal(db, rate_limit) -> None:
 def test_handler_other_agent_sources_filtered_to_empty_cluster(
     db, rate_limit,
 ) -> None:
-    """payload.agent_id='alpha' с memory_ids от 'beta' → empty cluster terminal."""
+    """payload.agent_id='alpha' с memory_ids от 'beta' → cross-agent
+    scope отфильтровывает всё → empty cluster → skip no-op (не terminal)."""
     ids_beta = _seed_memories(db, "beta", 3)
     handler = create_memory_daily_consolidation_handler()
     llm = _ScriptedChat({})
-    with pytest.raises(OllamaTerminalError, match="empty_cluster"):
-        handler(
-            _make_task(agent_id="alpha", memory_ids=ids_beta),
-            _ctx(db, llm, rate_limit),
-        )
+    out = handler(
+        _make_task(agent_id="alpha", memory_ids=ids_beta),
+        _ctx(db, llm, rate_limit),
+    )
+    assert out.skipped_by_llm is True
+    assert out.result["skip"] is True
+    assert out.result["source_ids"] == []
+    assert llm.calls == 0
 
 
 # ── System prompt sanity ─────────────────────────────────────────────

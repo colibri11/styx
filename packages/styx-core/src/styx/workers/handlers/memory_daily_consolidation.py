@@ -148,13 +148,34 @@ def create_memory_daily_consolidation_handler() -> Handler:
         queries = AgentScopedQueries(ctx.conn, agent_id)
         memories = queries.load_memories_for_consolidation(memory_ids)
 
-        # Минимальная защита от race с supersede/delete: если после
-        # enqueue источники успели поглотиться другим apply'ем, мы не
-        # хотим консолидировать одинокую memory или пустой кластер.
+        # Штатная гонка supersede/delete: между enqueue задачи и её
+        # claim источники кластера успели быть слиты/удалены другим
+        # apply-проходом. Консолидировать одинокую memory или пустой
+        # кластер нечего — это ожидаемый no-op, а не сбой. Возвращаем
+        # skip-результат (зеркалит LLM-skip ветку ниже), чтобы задача
+        # пометилась done/skipped, а не failed терминально.
         if len(memories) < 2:
-            raise OllamaTerminalError(
-                f"empty_cluster: только {len(memories)} из {len(memory_ids)} "
-                "источников выжили до claim"
+            surviving_ids = [str(m["id"]) for m in memories]
+            skip_reason = (
+                f"cluster схлопнулся до N<2 — race supersede/delete "
+                f"({len(memories)} из {len(memory_ids)} источников выжили "
+                "до claim)"
+            )
+            log.info(
+                "memory_daily_consolidation: %s → skip no-op", skip_reason,
+            )
+            return HandlerResult(
+                result={
+                    "skip": True,
+                    "skip_reason": skip_reason,
+                    "consolidated_text": None,
+                    "consolidated_embedding": None,
+                    "agent_id": agent_id,
+                    "source_ids": surviving_ids,
+                    "source_kinds": None,
+                    "source_visibility": None,
+                },
+                skipped_by_llm=True,
             )
         for m in memories:
             if m.get("superseded_by") is not None:
