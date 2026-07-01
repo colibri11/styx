@@ -225,23 +225,23 @@ class StyxMemoryCore:
                 threshold=self._config.eviction_relevance_threshold,
             )
 
-        # Pre-LLM focus inject (волна 15). Multi-channel framework для
-        # инжекта в user message через Hermes pre_llm_call hook. Hook
-        # регистрируется в plugin.py::register; здесь только configure
-        # framework state'а (handle + channels list).
+        # Pre-LLM focus inject (волна 15; канал переопределён волной 35).
+        # Multi-channel framework для инжекта в user message через Hermes
+        # pre_llm_call hook. Hook регистрируется в plugin.py::register;
+        # здесь только configure framework state'а (handle + channels list).
         if self._config.pre_llm_inject_enabled:
             from styx.engine import pre_llm_inject
-            from styx.engine.pre_llm_channels.peer_vad import channel_peer_vad
+            from styx.engine.pre_llm_channels.self_state import channel_self_state
             handle = pre_llm_inject.ChannelHandle(
                 queries=self._queries,
-                peer_vad_enabled=self._config.peer_vad_enabled,
-                peer_vad_min_norm=self._config.peer_vad_min_norm,
-                peer_vad_ttl_s=self._config.peer_vad_ttl_s,
+                self_state_enabled=self._config.self_state_enabled,
+                self_state_min_norm=self._config.self_state_min_norm,
+                self_state_max_age_s=self._config.self_state_max_age_s,
             )
             pre_llm_inject.configure(
                 self._agent_id,
                 handle=handle,
-                channels=[("peer_vad", channel_peer_vad)],
+                channels=[("self_state", channel_self_state)],
                 enabled=True,
             )
 
@@ -575,10 +575,13 @@ class StyxMemoryCore:
                 if vad is not None:
                     delta = scale_hot_vad_delta(vad)
                     try:
-                        # Волна 15: пишем raw VAD в metadata.hot_vad для
-                        # peer_vad канала pre_llm_inject. Без этого канал
-                        # видел бы только аккумулированное состояние
-                        # (base + delta), не «острый» peer-сигнал.
+                        # Волна 15: пишем raw VAD в metadata.hot_vad —
+                        # дешёвый write, полезен для диагностики и для
+                        # потенциального будущего "как прозвучал peer"
+                        # канала. С волны 35 pre_llm_inject эту metadata
+                        # больше не читает: канал self_state берёт
+                        # накопленное состояние через read_last_state
+                        # (см. .design/waves/35-self-state-expression.md D1).
                         append_emotional_state(
                             self._conn,  # type: ignore[arg-type]
                             self._agent_id,

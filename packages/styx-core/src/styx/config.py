@@ -78,11 +78,15 @@ class StyxConfig:
     focus_window_size: int = 3
     # Pre-LLM focus inject (волна 15). Multi-channel framework для
     # инжекта в user message через Hermes pre_llm_call hook. Канал
-    # peer_vad — короткая отметка о тоне последней peer-реплики.
+    # self_state (волна 35, заменяет прежний peer_vad) — отметка о
+    # накопленном эмоциональном состоянии самого агента (read_last_state,
+    # не raw peer VAD). min_norm — тот же gating что был у peer_vad;
+    # max_age_s — safety net на случай мёртвого styx-worker (не «окно
+    # свежести реакции»), см. .design/waves/35-self-state-expression.md D3.
     pre_llm_inject_enabled: bool = True
-    peer_vad_enabled: bool = True
-    peer_vad_min_norm: float = 0.2
-    peer_vad_ttl_s: float = 60.0
+    self_state_enabled: bool = True
+    self_state_min_norm: float = 0.2
+    self_state_max_age_s: float = 900.0
     # Selective gatekeeper (волна 17). На subjective writes (insert_memory
     # / batch consolidation) выбирает skip / merge / supersede / store по
     # similarity + Levenshtein. enabled=False → каждый subjective write
@@ -421,9 +425,9 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "drift_threshold",
         "focus_window_size",
         "pre_llm_inject_enabled",
-        "peer_vad_enabled",
-        "peer_vad_min_norm",
-        "peer_vad_ttl_s",
+        "self_state_enabled",
+        "self_state_min_norm",
+        "self_state_max_age_s",
         "selective_enabled",
         "selective_merge_threshold",
         "selective_supersede_threshold",
@@ -575,9 +579,9 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         drift_threshold=float(merged.get("drift_threshold", 0.4)),
         focus_window_size=int(merged.get("focus_window_size", 3)),
         pre_llm_inject_enabled=bool(merged.get("pre_llm_inject_enabled", True)),
-        peer_vad_enabled=bool(merged.get("peer_vad_enabled", True)),
-        peer_vad_min_norm=float(merged.get("peer_vad_min_norm", 0.2)),
-        peer_vad_ttl_s=float(merged.get("peer_vad_ttl_s", 60.0)),
+        self_state_enabled=bool(merged.get("self_state_enabled", True)),
+        self_state_min_norm=float(merged.get("self_state_min_norm", 0.2)),
+        self_state_max_age_s=float(merged.get("self_state_max_age_s", 900.0)),
         selective_enabled=bool(merged.get("selective_enabled", True)),
         selective_merge_threshold=float(
             merged.get("selective_merge_threshold", 0.92)
@@ -906,19 +910,19 @@ def _read_env() -> dict[str, Any]:
             if os.environ.get("STYX_PRE_LLM_INJECT_ENABLED") is not None
             else None
         ),
-        "peer_vad_enabled": (
-            os.environ["STYX_PRE_LLM_PEER_VAD_ENABLED"].lower() not in ("0", "false", "no")
-            if os.environ.get("STYX_PRE_LLM_PEER_VAD_ENABLED") is not None
+        "self_state_enabled": (
+            os.environ["STYX_SELF_STATE_ENABLED"].lower() not in ("0", "false", "no")
+            if os.environ.get("STYX_SELF_STATE_ENABLED") is not None
             else None
         ),
-        "peer_vad_min_norm": (
-            float(os.environ["STYX_PEER_VAD_MIN_NORM"])
-            if os.environ.get("STYX_PEER_VAD_MIN_NORM")
+        "self_state_min_norm": (
+            float(os.environ["STYX_SELF_STATE_MIN_NORM"])
+            if os.environ.get("STYX_SELF_STATE_MIN_NORM")
             else None
         ),
-        "peer_vad_ttl_s": (
-            float(os.environ["STYX_PEER_VAD_TTL_S"])
-            if os.environ.get("STYX_PEER_VAD_TTL_S")
+        "self_state_max_age_s": (
+            float(os.environ["STYX_SELF_STATE_MAX_AGE_S"])
+            if os.environ.get("STYX_SELF_STATE_MAX_AGE_S")
             else None
         ),
         "selective_enabled": (

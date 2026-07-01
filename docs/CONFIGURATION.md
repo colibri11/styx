@@ -73,9 +73,9 @@
 | Var | Default | Назначение |
 |---|---|---|
 | `STYX_PRE_LLM_INJECT_ENABLED` | on | `=0` отключает hook целиком. |
-| `STYX_PRE_LLM_PEER_VAD_ENABLED` | on | `=0` отключает только peer VAD channel. |
-| `STYX_PEER_VAD_MIN_NORM` | `0.2` | VAD с нормой ниже считается слишком нейтральным — skip. |
-| `STYX_PEER_VAD_TTL_S` | `60.0` | Максимальный возраст hot_sentiment записи для inject'а. |
+| `STYX_SELF_STATE_ENABLED` | on | `=0` отключает только self_state channel. |
+| `STYX_SELF_STATE_MIN_NORM` | `0.2` | VAD с нормой ниже считается слишком нейтральным — skip. |
+| `STYX_SELF_STATE_MAX_AGE_S` | `900.0` | Максимальный возраст `emotional_state` записи для inject'а — safety net на случай мёртвого `styx-worker`, не «окно свежести реакции» (см. волна 35 D3). |
 
 ## Sentiment / emotional baseline
 

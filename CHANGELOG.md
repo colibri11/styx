@@ -7,7 +7,41 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.7] — 2026-07-01
+
+Волна 35: self-state expression channel (ADR § 58). `styx-hermes` без
+изменений — чисто server-side, wire-протокол к Hermes не менялся.
+
+### Изменено
+
+- **Канал `channel_peer_vad` заменён на `channel_self_state`.** Раньше
+  канал читал сырой VAD последней peer-реплики и генерил «Peer прозвучал:
+  X» — описание собеседника. Теперь читает накопленное состояние агента
+  (`emotional.state.read_last_state` — уже с decay и K_HOT-резонансом
+  peer'а) и говорит от лица агента: «Тебе сейчас X». Закрывает открытый
+  вопрос Q6/§21.1 (волна 7d) со ссылкой на IAmBook §29/§IX.
+- **`dialogue_batch_consolidation.py`** — добавлен явно демаркированный
+  user-only VAD-блок в промпт (усиление role-separation поверх уже
+  существующей инструкции).
+- Конфиг `peer_vad_enabled`/`peer_vad_min_norm`/`peer_vad_ttl_s`
+  (`STYX_PEER_VAD_*`) удалён; новый `self_state_enabled`/
+  `self_state_min_norm`/`self_state_max_age_s` (`STYX_SELF_STATE_*`).
+  **Прод-деплой:** если Hermes-агент выставлял старые `STYX_PEER_VAD_*`
+  ENV — переключиться на новые имена.
+
+### Исправлено
+
+- **User-only VAD-блок в batch-path не был ограничен по размеру** и
+  приклеивался целиком к промпту каждого chunk'а — на большом backlog'е
+  (окно > 85k символов) это давало HTTP 400 "exceeds available context
+  size" на каждом chunk-вызове, причём неудачный tick не продвигал окно
+  вперёд, гарантируя повторный и всё более тяжёлый отказ (потенциальный
+  перманентный стопор consolidation). Добавлена граница
+  `USER_ONLY_VAD_MAX_CHARS=18000` с обрезкой по хвосту.
+
 ## [styx-core 1.0.6] — 2026-07-01
+
+Compat-доводка: `recall_memory_limit` — настраиваемый лимит memories в
 
 Compat-доводка: `recall_memory_limit` — настраиваемый лимит memories в
 salient-блоке (ADR § 57). `styx-hermes` без изменений.

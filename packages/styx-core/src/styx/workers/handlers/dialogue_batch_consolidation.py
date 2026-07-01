@@ -12,6 +12,14 @@ INSERT новых memories с ``kind_src='dialogue_batch_consolidation'``
 вернулся) — атомарно в одной транзакции. State в
 ``consolidation_state`` обновляется тем же commit'ом.
 
+Волна 35 (D7): user-промпт дополнительно включает демаркированный блок
+только user-реплик окна, непосредственно перед VAD-инструкцией — модели
+не нужно самой вычленять роли из смешанного транскрипта. Облегчённое
+усиление ролевого разделения, не замена текстовой инструкции в
+``SYSTEM_PROMPT`` и не полная структурная развязка (отдельный LLM-вызов
+— отложенный follow-up, см. ``.design/waves/35-self-state-expression.md``
+§ D7).
+
 Контракт фиксирован в ``.design/waves/14-dialogue-consolidation.md``
 и буквально port'нут из memorybox
 ``llm-worker/handlers/dialogue-batch-consolidation.ts``.
@@ -69,6 +77,12 @@ OVERLAP_CHARS = 17_000
 OVERLAP_MESSAGES = 30
 FEEDBACK_MEMORIES_LIMIT = 30
 FEEDBACK_WINDOW_HOURS = 24
+# Волна 35 fix: user_only_vad_section строится один раз из ПОЛНОГО rows
+# и приклеивается неизменной к промпту КАЖДОГО chunk'а (см.
+# build_user_only_vad_section). Без верхней границы большой backlog
+# (окно > L_BATCH_CHARS, несколько chunk'ов) даёт HTTP 400 "exceeds
+# available context size" на каждом chunk-вызове.
+USER_ONLY_VAD_MAX_CHARS = 18_000
 
 
 # ── System prompt (port из memorybox dialogue-batch-consolidation.ts) ──
@@ -120,6 +134,35 @@ SYSTEM_PROMPT = """Ты — подкорка агента, которая вед
   — vad заполняется тремя числами в [-1, +1], либо null если peer-часть окна эмоционально нейтральна.
 
 Отвечай только JSON. Без markdown, без заголовков, без комментариев."""
+
+
+# ── User-only VAD section (волна 35 D7 — batch-path role separation) ──
+#
+# SYSTEM_PROMPT выше уже просит "role=assistant в этой оценке не
+# учитывай" — но эта инструкция стоит над цельным смешанным
+# транскриптом (window), и модели приходится самой вычленять роли из
+# interleaved-текста. Секция ниже — облегчённое, но реальное усиление:
+# предварительно отфильтрованный, однозначный span только с
+# user-репликами окна, вставляемый в user-промпт непосредственно перед
+# VAD-инструкцией (build_user_prompt). Существующая инструкция в
+# SYSTEM_PROMPT остаётся как есть (defense in depth, не замена).
+# Полная структурная развязка (отдельный LLM-вызов только над
+# user-репликами) — отложенный follow-up, см.
+# .design/waves/35-self-state-expression.md § D7 / Q3.
+
+USER_ONLY_VAD_HEADER = "--- Только реплики пользователя (для оценки VAD) ---"
+USER_ONLY_VAD_FOOTER = "--- конец реплик пользователя ---"
+USER_ONLY_VAD_EMPTY_NOTE = "(в этом окне нет реплик пользователя)"
+
+VAD_INSTRUCTION_REMINDER = (
+    "Инструкция по VAD-оценке: оценивай эмоциональный тон только по "
+    "репликам пользователя из блока выше; реплики агента (role=assistant) "
+    "не учитывай."
+)
+VAD_INSTRUCTION_REMINDER_EMPTY = (
+    "Инструкция по VAD-оценке: реплик пользователя в этом окне нет — "
+    "верни \"vad\": null."
+)
 
 
 # ── Output schema (validator-based, без Pydantic) ────────────────────
@@ -293,14 +336,75 @@ def format_window(rows: list[dict]) -> str:
     return "\n".join(f"[{r['role']}]: {r['content']}" for r in rows)
 
 
+def format_user_only_window(rows: list[dict]) -> str:
+    """Те же строки, что ``format_window``, отфильтрованные до ``role ==
+    'user'``. Пустая строка, если в окне нет ни одной user-реплики —
+    edge case обрабатывается отдельно в ``build_user_only_vad_section``
+    (волна 35 D7)."""
+    return format_window([r for r in rows if r["role"] == "user"])
+
+
+def build_user_only_vad_section(rows: list[dict]) -> str:
+    """Демаркированный user-only блок + VAD-инструкция (волна 35 D7).
+
+    Возвращает ``HEADER + user-строки + FOOTER``, сразу следом —
+    короткая VAD-инструкция-напоминание. Порядок внутри этой секции
+    (данные → инструкция) целенаправленный: ``build_user_prompt``
+    добавляет её последней, так что итоговый user-промпт заканчивается
+    ``... window ... memory_context ... [user-only блок] [VAD-
+    инструкция]`` — готовый, однозначный span из только user-реплик
+    идёт непосредственно перед инструкцией её оценивать, вместо того
+    чтобы модель сама вычленяла роли из смешанного ``window``.
+
+    Если в окне нет ни одной user-реплики — явное примечание вместо
+    пустого демаркированного блока (пустой блок хуже, чем его
+    отсутствие), а инструкция-напоминание меняется на «вернуть vad:
+    null» (``VAD_INSTRUCTION_REMINDER_EMPTY``).
+
+    Итоговый user-only текст ограничен ``USER_ONLY_VAD_MAX_CHARS``
+    независимо от размера ``rows`` (волна 35 fix): эта секция строится
+    один раз из ПОЛНОГО окна и приклеивается неизменной к промпту
+    каждого chunk'а в цикле вызывающего handler'а, поэтому без верхней
+    границы большой backlog даёт HTTP 400 "exceeds available context
+    size" на каждом chunk-вызове. Обрезаем С НАЧАЛА, оставляя ХВОСТ
+    (последние ``USER_ONLY_VAD_MAX_CHARS`` символов) — недавний тон
+    релевантнее для VAD-оценки, чем начало окна.
+    """
+    user_only = format_user_only_window(rows)
+    if len(user_only) > USER_ONLY_VAD_MAX_CHARS:
+        user_only = user_only[-USER_ONLY_VAD_MAX_CHARS:]
+    if not user_only:
+        return (
+            f"{USER_ONLY_VAD_HEADER}\n"
+            f"{USER_ONLY_VAD_EMPTY_NOTE}\n"
+            f"{USER_ONLY_VAD_FOOTER}\n\n"
+            f"{VAD_INSTRUCTION_REMINDER_EMPTY}"
+        )
+    return (
+        f"{USER_ONLY_VAD_HEADER}\n"
+        f"{user_only}\n"
+        f"{USER_ONLY_VAD_FOOTER}\n\n"
+        f"{VAD_INSTRUCTION_REMINDER}"
+    )
+
+
 def format_memory_context(rows: list[dict]) -> str:
     if not rows:
         return "(пусто)"
     return "\n".join(f"- {r['kind_src']}: {r['content']}" for r in rows)
 
 
-def build_user_prompt(window_text: str, memory_context: str) -> str:
-    return f"window:\n---\n{window_text}\n---\n\nmemory_context:\n{memory_context}"
+def build_user_prompt(
+    window_text: str, memory_context: str, user_only_vad_section: str,
+) -> str:
+    """``user_only_vad_section`` (волна 35 D7, ``build_user_only_vad_section``)
+    идёт последней секцией — после общего окна и memory_context,
+    непосредственно перед VAD-инструкцией внутри неё самой."""
+    return (
+        f"window:\n---\n{window_text}\n---\n\n"
+        f"memory_context:\n{memory_context}\n\n"
+        f"{user_only_vad_section}"
+    )
 
 
 def truncate(text: str, limit: int) -> str:
@@ -413,6 +517,15 @@ def create_dialogue_batch_handler(
 
         window_text = format_window(rows)
         memory_context = format_memory_context(feedback)
+        # Волна 35 D7: тот же rows, целиком (не по chunk'ам — chunker
+        # ниже режет по символам, не по строкам/ролям; см. докстринг
+        # build_user_only_vad_section). Итоговый текст секции теперь
+        # ограничен USER_ONLY_VAD_MAX_CHARS независимо от размера
+        # окна (волна 35 fix) — иначе на большом backlog'е неизменный
+        # блок из полного rows приклеивается к промпту КАЖДОГО chunk'а
+        # и может дать HTTP 400 "exceeds available context size" на
+        # каждом вызове.
+        user_only_vad_section = build_user_only_vad_section(rows)
         chunks = chunk_window_text(window_text)
 
         metrics.record_call()
@@ -421,7 +534,7 @@ def create_dialogue_batch_handler(
         # вызовы занимают секунды, не держим pg locks.
         outcomes: list[ChunkOutcome] = []
         for i, chunk in enumerate(chunks):
-            user_prompt = build_user_prompt(chunk, memory_context)
+            user_prompt = build_user_prompt(chunk, memory_context, user_only_vad_section)
             try:
                 raw = ctx.llm.chat_json(
                     messages=[

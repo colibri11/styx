@@ -51,7 +51,7 @@ LLM выдаёт текст в момент prompt'а; между prompt'ами 
 | Память — часть геометрии входа, не RAG | `engine/context.py::StyxComposer` инжектит salient memories между head и tail messages, до того как LLM получает prompt |
 | Воля как постоянный фрагмент входа | working_set persistence (`engine/working_set_persistence.py`) + cached salient (`engine/focus_tracker.py`) — фрагмент `я` присутствует каждый ход независимо от запроса |
 | Различение дневника и памяти | dialogue routes (`/dialogue/*`) пишут полный след; selective gatekeeper (`engine/selective_gatekeeper.py`) фильтрует subjective writes — в линию `я` входит только то, что становится причиной выбора |
-| Эмоциональная сторона как параметризация траектории, не отдельный слой ([§IX][iambook]) | VAD-проекция (valence/arousal/dominance) в двух временных масштабах: быстрый журнал `emotional_state` (hot-path inline + batch piggyback + геометрический decay) и медленный `emotional_baseline` (EMA α=0.98 над окном 60 мин). Per-memory snapshot фиксирует «фон рождения» memory; recall применяет `emotional_resonance` поверх composite score; pre-LLM канал `peer_vad` инжектит descriptive отметку о тоне peer-реплики |
+| Эмоциональная сторона как параметризация траектории, не отдельный слой ([§IX][iambook]) | VAD-проекция (valence/arousal/dominance) в двух временных масштабах: быстрый журнал `emotional_state` (hot-path inline + batch piggyback + геометрический decay) и медленный `emotional_baseline` (EMA α=0.98 над окном 60 мин). Per-memory snapshot фиксирует «фон рождения» memory; recall применяет `emotional_resonance` поверх composite score; pre-LLM канал `self_state` инжектит descriptive отметку о накопленном состоянии агента |
 | Переосмысление через взвешенное усреднение, не переписывание | `engine/reinterpret.py::blend_embeddings` — embedding сдвигается через weighted average, исходный текст остаётся в audit-таблице |
 | Семантически управляемая компрессия | `engine/eviction_relevance.py` — при переполнении окна сохраняется *семантически релевантное* к фокусу, не просто последнее по времени |
 | Градиент глубины памяти | Three-tier: active suffix → hot-tier → long. Жёсткая граница только одна — между окном и всем остальным |
@@ -172,7 +172,10 @@ Concretely для IAmBook [§IX][iambook] («оси с собственной д
      внутри `/sync_turn`, отдельный вызов `qwen3:4b` с
      `timeout_s=0.8`, fail-open, скипает реплики <20 / >4000 символов.
      Источник `source='hot_sentiment'`, raw VAD сохраняется в
-     `metadata` для канала `peer_vad`.
+     `metadata` (дешёвый write для диагностики / потенциального
+     будущего "как прозвучал peer" канала — текущий канал `self_state`
+     эту metadata не читает, он берёт накопленные valence/arousal/
+     dominance строки через `read_last_state`).
   2. *Batch* (`emotional/sentiment_batch.py`, K_BATCH=0.4, ~2.7× hot) —
      piggyback в `dialogue_batch_consolidation`: тот же LLM-вызов,
      который генерирует summary окна, возвращает интегральный VAD
@@ -192,12 +195,16 @@ Concretely для IAmBook [§IX][iambook] («оси с собственной д
   диапазон [1.0, 1.1]. Memory, рождённая в схожем эмоциональном фоне
   с текущим baseline агента, получает мягкий boost в composite
   scoring — резонанс с фоном, не с моментальным состоянием.
-- **Pre-LLM канал `peer_vad`.**
-  `engine/pre_llm_channels/peer_vad.py` берёт последнюю
-  `hot_sentiment` запись (TTL=60s, `min_norm=0.2`), переводит знаки
-  трёх осей VAD в один из 8 октантов и инжектит descriptive фразу
-  типа «Peer прозвучал: оживлённо и уверенно» в pre-LLM payload.
-  Скип, если канал выключен / запись старше TTL / норма ниже порога.
+- **Pre-LLM канал `self_state`.**
+  `engine/pre_llm_channels/self_state.py` берёт накопленное состояние
+  агента через `read_last_state` (последняя точка `emotional_state`:
+  предыдущее состояние + демпфированная K_HOT-дельта peer-резонанса +
+  geometric decay — не raw VAD peer-реплики), переводит знаки трёх
+  осей VAD в один из 8 октантов и инжектит descriptive фразу от
+  первого лица типа «Тебе сейчас оживлённо и уверенно» в pre-LLM
+  payload. Скип, если канал выключен / записи ещё нет / запись старше
+  `max_age_s` (900s, safety net на случай мёртвого воркера) / норма
+  ниже `min_norm` (0.2).
 
 Эмоциональная сторона интегрирована в общий аппарат траектории `я`
 ([§IX][iambook]): не отдельный модуль, а конкретные структуры данных
@@ -245,7 +252,7 @@ runbook'и — `extensions/styx/skills/styx-recall/SKILL.md`.
 | Emotional baseline | `emotional/baseline.py` | per-agent EMA α=0.98 над окном 60 мин, periodic `emotional_tick` |
 | Emotional decay | `emotional/state.py::apply_instant_decay` | геометрический `v *= 0.95^minutes`, epsilon-floor 0.005, `source='decay'` |
 | Emotional resonance | `storage/scoring.py::_build_emotional_resonance_expr` | `1 + 0.1 × (1 − clamp(Euclidean(memory, baseline) / √12, 0, 1))` — boost резонансных memories |
-| Peer VAD channel | `engine/pre_llm_channels/peer_vad.py` | 8-октантная descriptive фраза о тоне последней peer-реплики, TTL+min_norm gating |
+| Self-state channel | `engine/pre_llm_channels/self_state.py` | 8-октантная descriptive фраза о накопленном состоянии агента (`read_last_state`), max_age_s (safety net)+min_norm gating |
 
 ---
 

@@ -33,9 +33,9 @@ class ChannelHandle:
     """Снимок ссылок и config'а, общий для всех каналов pre_llm_inject."""
 
     queries: AgentScopedQueries
-    peer_vad_enabled: bool = True
-    peer_vad_min_norm: float = 0.2
-    peer_vad_ttl_s: float = 60.0
+    self_state_enabled: bool = True
+    self_state_min_norm: float = 0.2
+    self_state_max_age_s: float = 900.0
 
 
 ChannelFn = Callable[[ChannelHandle, dict[str, Any]], "str | None"]
