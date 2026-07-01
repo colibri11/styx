@@ -263,7 +263,7 @@ update, eviction relevance).
 ### `POST /pre_llm_inject`
 
 Multi-channel framework: возвращает строки каналов для inject'а в user
-message. Сейчас единственный канал — peer VAD.
+message. Сейчас единственный канал — self_state (волна 35).
 
 **Request:**
 ```json
@@ -280,7 +280,7 @@ message. Сейчас единственный канал — peer VAD.
 **Response 200:**
 ```json
 {
-  "context": "Peer прозвучал: оживлённо и уверенно."
+  "context": "Тебе сейчас воодушевлённо и уверенно."
 }
 ```
 
