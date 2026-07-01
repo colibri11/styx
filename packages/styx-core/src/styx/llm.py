@@ -25,15 +25,24 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from typing import Any
 
 from styx.observability.logging import log_event
 
 log = logging.getLogger(__name__)
+
+# ``<think>...</think>``-блоки локальной модели (qwen3:4b-local умеет их
+# эмитить даже под ``format=json``). DOTALL — блок может быть многострочным.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+# Маркеры markdown-fence: ``\`\`\`json`` (открывающий) и голый ``\`\`\``` —
+# срезаем сами маркеры, не пытаясь угадать границы содержимого.
+_FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*")
 
 
 class OllamaError(RuntimeError):
@@ -46,6 +55,114 @@ class OllamaTransientError(OllamaError):
 
 class OllamaTerminalError(OllamaError):
     """Терминальная ошибка — retry не поможет."""
+
+
+def _iter_balanced_objects(text: str) -> Iterator[str]:
+    """Итерировать сбалансированные ``{...}``-объекты слева направо.
+
+    Депт-каунтер по фигурным скобкам, игнорирующий скобки внутри
+    строковых литералов (уважает ``\\"``-экранирование): скобка внутри
+    строки не двигает глубину. На каждой итерации выдаёт подстроку от
+    очередной ``{`` до парной закрывающей ``}`` включительно и
+    продолжает поиск после неё. ``{`` без сбалансированного закрытия
+    (глубина не вернулась к нулю до конца строки) пропускается — поиск
+    продолжается со следующей ``{``.
+    """
+    n = len(text)
+    i = 0
+    while i < n:
+        start = text.find("{", i)
+        if start == -1:
+            return
+        depth = 0
+        in_string = False
+        escaped = False
+        end = -1
+        for j in range(start, n):
+            ch = text[j]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            # `{` без сбалансированного закрытия — ищем следующую `{`.
+            i = start + 1
+        else:
+            yield text[start : end + 1]
+            i = end + 1
+
+
+def _first_balanced_object(text: str) -> str | None:
+    """Первый сбалансированный ``{...}``-объект (или ``None``).
+
+    Тонкая обёртка над :func:`_iter_balanced_objects` — возвращает
+    первого кандидата слева либо ``None``, если сбалансированного
+    объекта в строке нет.
+    """
+    return next(_iter_balanced_objects(text), None)
+
+
+def _tolerant_json_extract(content: str) -> Any | None:
+    r"""Терпимо извлечь JSON-объект из почти-JSON контента модели.
+
+    Локальная модель (qwen3:4b-local) на части ответов возвращает
+    валидный объект в обрамлении: markdown-fence (``\`\`\`json ... \`\`\```),
+    трейлинг-проза после ``}``, ``<think>...</think>``-блоки. ``format=json``
+    у Ollama это не всегда снимает, поэтому разбор защитный.
+
+    Шаги:
+      1. Fast-path — ``json.loads(content)`` как есть (чистый JSON,
+         включая list/scalar — поведение не меняется).
+      2. Снять ``<think>...</think>``-блоки и маркеры markdown-fence,
+         повторить ``json.loads`` (ловит массивы/скаляры в fence).
+      3. Перебрать сбалансированные ``{...}``-объекты слева направо и
+         вернуть первый, который парсится (ловит fence/трейлинг-прозу
+         вокруг объекта, а также битый ``{...}``-decoy перед валидным
+         ответом — fall-forward мимо непарсящихся кандидатов).
+
+    Возвращает распарсенный JSON либо ``None``, если валидного JSON в
+    строке нет (реально-битый ответ — терминальная ошибка у caller'а).
+    Битую *внутренность* объекта (неэкранированные кавычки/переводы
+    строк) не чиним: невалидный кандидат пропускается, и если ни один
+    сбалансированный ``{...}`` не парсится — ``None``.
+    """
+    # 1. Fast-path: чистый JSON без обрамления — поведение не меняется.
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Снять think-блоки и fence-маркеры, повторить строгий разбор.
+    cleaned = _THINK_RE.sub("", content)
+    cleaned = _FENCE_RE.sub("", cleaned)
+    stripped = cleaned.strip()
+    if stripped:
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Перебрать сбалансированные ``{...}``-кандидаты слева направо и
+    #    вернуть первый, который парсится (fall-forward мимо битых decoy).
+    for candidate in _iter_balanced_objects(cleaned):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 class OllamaChatClient:
@@ -219,12 +336,12 @@ class OllamaChatClient:
             raise OllamaTerminalError(
                 f"Ollama: пустой message.content: {envelope!r}"
             )
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError as e:
+        parsed = _tolerant_json_extract(content)
+        if parsed is None:
             raise OllamaTerminalError(
                 f"Ollama content не-JSON: {content[:200]!r}"
-            ) from e
+            )
+        return parsed
 
 
 # ── Rate limiter ────────────────────────────────────────────────────────

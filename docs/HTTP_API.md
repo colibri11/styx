@@ -1,4 +1,4 @@
-# Styx HTTP API (styx-core 1.0.8)
+# Styx HTTP API (styx-core 1.0.9)
 
 Контракт REST API styx-core daemon. Поддерживается через FastAPI, OpenAPI
 schema автогенерируется на `GET /openapi.json`, интерактивные docs —
@@ -96,7 +96,7 @@ Liveness probe — процесс жив, Postgres ping ok.
   "status": "ok",
   "uptime_s": 12.3,
   "postgres": "ok",
-  "version": "1.0.8"
+  "version": "1.0.9"
 }
 ```
 
@@ -114,7 +114,7 @@ Readiness — Ollama ping + drain progress (если worker pool запущен)
   "last_drain_progress_age_s": 0.5,
   "ollama": "ok",
   "queue": {"processed": 4, "failed": 0},
-  "version": "1.0.8"
+  "version": "1.0.9"
 }
 ```
 

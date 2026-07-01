@@ -15,16 +15,22 @@ K_HOT-дельта peer-резонанса + geometric decay, см.
 («Тебе сейчас X»), не директива: канал не инструктирует агента
 упоминать состояние явно, просто добавляет фон в pre-LLM payload.
 
-Skip-условия (fail-open, канал никогда не роняет turn):
+Skip-условия (fail-open, канал никогда не роняет turn). Порядок
+проверок значим: нейтральность проверяется РАНЬШЕ возраста.
 - ``handle.self_state_enabled = False`` — молча;
 - нет ни одной записи в ``emotional_state`` — молча (агент только
   что провизионирован, истории ещё нет);
-- ``age > handle.self_state_max_age_s`` — WARNING в лог. TTL здесь —
-  safety net на случай мёртвого ``styx-worker`` (``emotional_tick`` не
-  пишет decay раз в минуту), не «окно свежести реакции» (см. волна 35
-  D3) — если сработало, стоит проверить воркер;
-- ``norm < handle.self_state_min_norm`` — молча (агент слишком
-  нейтрален; частое и ожидаемое состояние, не сигнал проблемы);
+- ``norm < handle.self_state_min_norm`` — молча, НЕЗАВИСИМО от возраста
+  (агент слишком нейтрален; частое и ожидаемое состояние покоя. У idle-
+  агента decay законно перестаёт писать новые строки — осознанный no-op
+  в ``apply_instant_decay`` — поэтому нейтральная точка закономерно
+  стареет, это не отказ воркера);
+- ``norm >= self_state_min_norm`` И ``age > handle.self_state_max_age_s``
+  — WARNING в лог. TTL здесь — safety net на случай мёртвого
+  ``styx-worker``: старая АКТИВНАЯ эмоция значит, что ``emotional_tick``
+  не демпфирует её decay'ем раз в минуту (см. волна 35 D3) — стоит
+  проверить воркер. Это не «окно свежести реакции». Проверка идёт после
+  нейтральности, чтобы idle+старое не давало ложный cry-wolf;
 - ошибка при чтении из БД — WARNING в лог, fail-open.
 """
 
@@ -83,6 +89,21 @@ def channel_self_state(
         return None
     vector, at = entry
 
+    # Порядок проверок важен. Сначала — тихая нейтральность:
+    # near-neutral состояние молчит НЕЗАВИСИМО от возраста. У idle-агента
+    # decay законно перестаёт писать новые строки (осознанный no-op в
+    # `emotional/state.py::apply_instant_decay`), поэтому нейтральная точка
+    # закономерно стареет — это покой, не отказ воркера. Age-WARNING здесь
+    # был бы cry-wolf и заглушал бы реальный случай мёртвого воркера.
+    norm = math.sqrt(
+        vector.valence ** 2 + vector.arousal ** 2 + vector.dominance ** 2
+    )
+    if norm < handle.self_state_min_norm:
+        return None
+
+    # Состояние ненейтрально (есть что инжектить). Только теперь возраст —
+    # сигнал: старая АКТИВНАЯ эмоция означает, что decay её не демпфирует,
+    # т.е. `emotional_tick` не пишется раз в минуту — воркер под подозрением.
     now = _dt.datetime.now(tz=_dt.timezone.utc)
     if at.tzinfo is None:
         at = at.replace(tzinfo=_dt.timezone.utc)
@@ -93,12 +114,6 @@ def channel_self_state(
             "styx-worker, вероятно, не работает (emotional_tick decay не пишется)",
             age_s, handle.self_state_max_age_s,
         )
-        return None
-
-    norm = math.sqrt(
-        vector.valence ** 2 + vector.arousal ** 2 + vector.dominance ** 2
-    )
-    if norm < handle.self_state_min_norm:
         return None
 
     octant = _sign(vector.valence) + _sign(vector.arousal) + _sign(vector.dominance)
