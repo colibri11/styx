@@ -180,24 +180,38 @@ class StyxMemoryProvider(MemoryProvider):
         return None
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
-        """Защита salient при сжатии context (волна 29 Phase D).
+        """Задумано как защита salient при сжатии context (волна 29 Phase D).
 
-        Hermes зовёт hook когда context_compressor собирается отбросить
-        старые messages. Provider возвращает текст для compression
-        summary prompt — compressor включит этот текст и сохранит его
-        смысл в финальном summary, который замещает удаляемые messages.
-        Без этого hook'а old turns с памятью просто disappear после
-        compress, и Styx-агент теряет cross-compression continuity.
+        **Известный upstream-gap Hermes, подтверждён 2026-07-01 (ADR § 60),
+        актуально и на v0.16.0, и на v0.17.0.** По контракту MemoryProvider
+        ABC — Hermes зовёт этот hook перед тем как context_compressor
+        отбросит старые messages, и должен включить возвращённый текст в
+        финальное compression summary. По факту — единственный call site
+        (`agent/conversation_compression.py`) вызывает hook и **выбрасывает
+        возвращаемое значение**, никуда его не передавая; сам
+        `context_compressor.py` вообще не упоминает `on_pre_compress`.
+        Hook честно зовётся, `prefetch()` внутри честно делает HTTP
+        round-trip к daemon'у — но результат до summary не доезжает ни в
+        одной версии Hermes.
 
-        Реализация: извлекаем последний user/assistant turn в messages
-        как focus topic → переиспользуем prefetch() механизм →
+        Сергей подтвердил (2026-07-01): оставить реализацию как есть, не
+        убирать вызов `prefetch()` — несмотря на то что Hermes сейчас его
+        не использует. Не критично: непрерывность памяти Styx не опирается
+        на этот механизм — `prefetch()` перезапрашивает актуальную память с
+        нуля на КАЖДОМ ходу независимо от истории/summary Hermes (см. ADR
+        § 56, Locus — память подмешивается как часть геометрии входа, не
+        хранится "внутри" сжимаемой истории). Цена — периодический (не
+        на каждый ход, только когда срабатывает компрессия Hermes) лишний
+        HTTP round-trip без видимого эффекта.
+
+        Реализация (не меняется): извлекаем последний user/assistant turn
+        в messages как focus topic → переиспользуем prefetch() механизм →
         возвращаем его result (уже обёрнутый в `<styx-salient>`) с
-        короткой preamble. Compressor видит «Previously remembered
-        (preserve in summary): <styx-salient>...</styx-salient>» и
-        включит memories в summary verbatim.
+        короткой preamble — на случай если Hermes когда-нибудь довяжет
+        этот hook до своего summary-промпта.
 
         Fail-open: пустой text → "" (compressor получит default summary
-        без provider contribution).
+        без provider contribution, если вообще что-то с ним делает).
         """
         if not messages:
             return ""
