@@ -7,6 +7,20 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.6] — 2026-07-01
+
+Compat-доводка: `recall_memory_limit` — настраиваемый лимит memories в
+salient-блоке (ADR § 57). `styx-hermes` без изменений.
+
+### Добавлено
+
+- **`StyxConfig.recall_memory_limit`** (+ `STYX_RECALL_MEMORY_LIMIT`) —
+  override для `FullRecallConfig.memory_limit` (сколько memories попадает
+  в salient-блок, инжектируемый через `prefetch()`/`build_salient_block()`
+  каждый turn). Дефолт остаётся `6`. Fail-fast валидация диапазона `[1,
+  20]` на этапе `load()` — по прецеденту `message_split_part_chars`; те же
+  границы, что уже использует per-call override тула `styx_recall`.
+
 ## [styx-hermes 1.0.8] — 2026-06-15
 
 Архитектурный фикс роли Styx в Hermes. `styx-core` без изменений (1.0.5).

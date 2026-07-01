@@ -50,6 +50,7 @@
 |---|---|---|
 | `STYX_RECALL_MIN_SCORE` | `0.32` | Composite-score cutoff в `recall_full` (откалиброван под embeddinggemma). |
 | `STYX_RECALL_DIALOGUE_MIN_SCORE` | `0.6` | Отдельный порог для companion-mode dialogue recall (зарезервировано). |
+| `STYX_RECALL_MEMORY_LIMIT` | `6` | Сколько memories максимум попадает в `recall_full` / salient-блок. |
 
 ## Salient injection (ContextEngine)
 
