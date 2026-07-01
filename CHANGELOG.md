@@ -7,6 +7,34 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-hermes 1.0.9] — 2026-07-01
+
+Compat-валидация против **Hermes Agent v0.17.0** (тег `v2026.6.19`, ADR
+§ 60). `styx-core` без изменений на этом релизе (1.0.8).
+
+### Изменено
+
+- **ABI-breaks не найдены.** `MemoryProvider` ABC и `pre_llm_call`
+  hook-контракт побайтово идентичны v0.16.0; tool-dispatch (`add_provider`
+  до `initialize()`, ADR § 54) — тот же таймінг, только номера строк
+  уехали.
+- Найден и проверен новый tool-injection гейт Hermes
+  (`memory_provider_tools_enabled`) — по умолчанию пропускает `styx_*`
+  тулы (`"memory"` не в `_DEFAULT_OFF_TOOLSETS`); подтверждено живым
+  e2e (`styx_recall` вызван и вернул данные).
+- Обновлены 3 докстринг-комментария в коде адаптера со ссылками на
+  номера строк Hermes (без функциональных изменений).
+- Протухший пин `styx-core==1.0.5` → **`==1.0.8`** (styx-core уже был
+  1.0.8 к моменту этого релиза, из отдельной волны той же сессии).
+
+### Гейты
+
+Drift-sentinel 57/57 (0 drift); host styx-hermes 172/6-skip + styx-core
+838/660-skip; Docker in-container styx-hermes 128/1-skip + core
+1485/13-design-skip; live e2e (локальная Ollama `coding-model:latest`,
+GLM/z.ai был недоступен на момент теста) — полный цикл `sync_turn` →
+embed → `styx_recall` подтверждён на двух ходах.
+
 ## [styx-core 1.0.8] — 2026-07-01
 
 Волна 35 follow-up: переформулировка 3 фраз `OCTANTS` (ADR § 59).

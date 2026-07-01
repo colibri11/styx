@@ -397,7 +397,7 @@ curl -s http://127.0.0.1:8788/healthz | jq .
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
 
 # Из Hermes-process (one-shot turn; с v2026.5.29.2 subcommand — chat, не ask;
-# выверено против v2026.6.5)
+# выверено против v2026.6.19)
 hermes chat -q "Привет"  # в логах: "StyxMemoryProvider initialized" + "Styx pre_llm_call hook зарегистрирован"
 ```
 
