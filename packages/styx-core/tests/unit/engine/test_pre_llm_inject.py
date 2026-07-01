@@ -15,9 +15,9 @@ class _StubQueries:
 def _handle(**overrides) -> ChannelHandle:
     base = dict(
         queries=_StubQueries(),
-        peer_vad_enabled=True,
-        peer_vad_min_norm=0.2,
-        peer_vad_ttl_s=60.0,
+        self_state_enabled=True,
+        self_state_min_norm=0.2,
+        self_state_max_age_s=900.0,
     )
     base.update(overrides)
     return ChannelHandle(**base)

@@ -1,12 +1,15 @@
-"""End-to-end pre_llm_inject (волна 15) в реальном Hermes-Docker.
+"""End-to-end pre_llm_inject (волна 15, канал переопределён волной 35)
+в реальном Hermes-Docker.
 
 Pipeline:
 1. Поднимаем StyxMemoryCore — он configure'ит pre_llm_inject framework.
 2. sync_turn с эмоциональной peer-репликой — qwen3:4b-local через РЕАЛЬНЫЙ
    Ollama извлекает VAD, sync_turn пишет в emotional_state с
-   metadata={"hot_vad": [v, a, d]}.
-3. Вызываем on_pre_llm_call — channel peer_vad читает запись, формирует
-   текст «Peer прозвучал: <phrase>.».
+   metadata={"hot_vad": [v, a, d]} (и накопленным valence/arousal/dominance
+   в самих колонках строки).
+3. Вызываем on_pre_llm_call — channel self_state читает накопленное
+   состояние агента через read_last_state, формирует текст
+   «Тебе сейчас <phrase>.».
 4. Если VAD не извлёкся (qwen3 redirected, time-out) — тест skipped с
    объяснением (так же как test_sentiment_e2e на pure-VAD'е).
 
@@ -97,7 +100,12 @@ def test_on_pre_llm_call_returns_none_without_sync_turn(styx_stack) -> None:
 
 
 def test_sync_turn_writes_hot_vad_metadata(styx_stack) -> None:
-    """sync_turn → emotional_state row с metadata.hot_vad от реального qwen3."""
+    """sync_turn → emotional_state row с metadata.hot_vad от реального qwen3.
+
+    С волны 35 channel self_state эту metadata не читает (берёт
+    накопленное valence/arousal/dominance строки через read_last_state) —
+    write остаётся ради диагностики и потенциального будущего "как
+    прозвучал peer" канала (см. D1)."""
     import psycopg
 
     p, sid, agent = styx_stack
@@ -136,7 +144,8 @@ def test_sync_turn_writes_hot_vad_metadata(styx_stack) -> None:
 def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
     """Детерминированный e2e: пишем VAD напрямую в emotional_state, минуя
     sentiment hot-path. Проверяем что pipeline pre_llm_inject → channel
-    peer_vad возвращает корректный текст с phrase'ом из правильного октанта."""
+    self_state возвращает корректный текст с phrase'ом из правильного
+    октанта, читая накопленное состояние через read_last_state."""
     from styx.emotional.state import EmotionalVector, append_emotional_state
     from styx.engine import pre_llm_inject
 
@@ -154,7 +163,7 @@ def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
         )
         p._conn.commit()
 
-    out = pre_llm_inject.on_pre_llm_call("alpha", 
+    out = pre_llm_inject.on_pre_llm_call("alpha",
         session_id=sid,
         user_message="follow-up",
         conversation_history=[],
@@ -165,7 +174,7 @@ def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
     )
     assert out is not None
     assert "context" in out
-    assert "Peer прозвучал:" in out["context"]
+    assert "Тебе сейчас" in out["context"]
     assert "оживлённо и уверенно" in out["context"]
 
 
@@ -197,11 +206,11 @@ def test_pre_llm_call_skips_below_min_norm(styx_stack) -> None:
 
 
 def test_full_pipeline_inject_through_pre_llm_call(styx_stack) -> None:
-    """sync_turn → emotional_state → channel peer_vad → on_pre_llm_call inject."""
+    """sync_turn → emotional_state → channel self_state → on_pre_llm_call inject."""
     import psycopg
 
     from styx.engine import pre_llm_inject
-    from styx.engine.pre_llm_channels.peer_vad import OCTANTS
+    from styx.engine.pre_llm_channels.self_state import OCTANTS
 
     p, sid, agent = styx_stack
     p.sync_turn(
@@ -224,7 +233,7 @@ def test_full_pipeline_inject_through_pre_llm_call(styx_stack) -> None:
     if count == 0:
         pytest.skip("sentiment не вернул VAD — sentiment fail-open")
 
-    out = pre_llm_inject.on_pre_llm_call("alpha", 
+    out = pre_llm_inject.on_pre_llm_call("alpha",
         session_id=sid,
         user_message="follow-up message",
         conversation_history=[],
@@ -239,12 +248,12 @@ def test_full_pipeline_inject_through_pre_llm_call(styx_stack) -> None:
     # на конкретной реплике может выйти близко к нулю.
     if out is None:
         pytest.skip(
-            "VAD близок к нейтральному (norm < 0.2) — channel peer_vad "
+            "VAD близок к нейтральному (norm < 0.2) — channel self_state "
             "skip'нул как design intends"
         )
 
     assert "context" in out
-    assert out["context"].startswith("Peer прозвучал:")
+    assert out["context"].startswith("Тебе сейчас")
     # Phrase должна быть из словаря OCTANTS
     phrase_found = any(p in out["context"] for p in OCTANTS.values())
     assert phrase_found, (

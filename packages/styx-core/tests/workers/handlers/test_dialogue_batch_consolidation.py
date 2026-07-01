@@ -19,12 +19,20 @@ from styx.workers.handlers.dialogue_batch_consolidation import (
     L_BATCH_CHARS,
     OVERLAP_CHARS,
     SYSTEM_PROMPT,
+    USER_ONLY_VAD_EMPTY_NOTE,
+    USER_ONLY_VAD_FOOTER,
+    USER_ONLY_VAD_HEADER,
+    USER_ONLY_VAD_MAX_CHARS,
+    VAD_INSTRUCTION_REMINDER,
+    VAD_INSTRUCTION_REMINDER_EMPTY,
     _validate_batch_response,
     build_archive_ref,
+    build_user_only_vad_section,
     build_user_prompt,
     chunk_window_text,
     create_dialogue_batch_handler,
     format_memory_context,
+    format_user_only_window,
     format_window,
     truncate,
 )
@@ -176,10 +184,94 @@ def test_format_memory_context_lines() -> None:
 
 
 def test_build_user_prompt_shape() -> None:
-    out = build_user_prompt("[user]: hi", "(пусто)")
+    out = build_user_prompt("[user]: hi", "(пусто)", "user-only-section")
     assert "window:" in out
     assert "memory_context:" in out
     assert "[user]: hi" in out
+    assert "user-only-section" in out
+
+
+# ── User-only VAD section (волна 35 D7 — batch-path role separation) ──
+
+
+def test_format_user_only_window_filters_to_user_role() -> None:
+    rows = [
+        {"role": "user", "content": "мне тревожно"},
+        {"role": "assistant", "content": "я тебя понимаю"},
+        {"role": "user", "content": "спасибо"},
+    ]
+    text = format_user_only_window(rows)
+    assert "[user]: мне тревожно" in text
+    assert "[user]: спасибо" in text
+    assert "[assistant]" not in text
+    assert "я тебя понимаю" not in text
+
+
+def test_format_user_only_window_empty_when_no_user_rows() -> None:
+    rows = [{"role": "assistant", "content": "монолог агента"}]
+    assert format_user_only_window(rows) == ""
+
+
+def test_build_user_only_vad_section_contains_only_user_lines() -> None:
+    """(б) секция содержит ТОЛЬКО user-строки данного окна — никаких
+    assistant-строк внутри демаркированного блока."""
+    rows = [
+        {"role": "user", "content": "мне тревожно"},
+        {"role": "assistant", "content": "я тебя понимаю"},
+        {"role": "user", "content": "спасибо"},
+    ]
+    section = build_user_only_vad_section(rows)
+    assert USER_ONLY_VAD_HEADER in section
+    assert USER_ONLY_VAD_FOOTER in section
+
+    body = section.split(USER_ONLY_VAD_HEADER, 1)[1].split(USER_ONLY_VAD_FOOTER, 1)[0]
+    assert "[user]: мне тревожно" in body
+    assert "[user]: спасибо" in body
+    assert "[assistant]" not in body
+    assert "я тебя понимаю" not in body
+    # Инструкция-напоминание идёт ПОСЛЕ футера, не смешана с данными.
+    assert VAD_INSTRUCTION_REMINDER in section
+    assert section.index(USER_ONLY_VAD_FOOTER) < section.index(VAD_INSTRUCTION_REMINDER)
+
+
+def test_build_user_only_vad_section_no_user_rows_is_explicit_not_empty() -> None:
+    """Edge case: окно без единой user-реплики — секция не пустая
+    (header/footer без содержимого), а явно помечена; инструкция
+    говорит вернуть vad: null, а не молчит про отсутствие блока."""
+    rows = [{"role": "assistant", "content": "монолог агента, без ответа"}]
+    section = build_user_only_vad_section(rows)
+    assert USER_ONLY_VAD_HEADER in section
+    assert USER_ONLY_VAD_FOOTER in section
+    assert USER_ONLY_VAD_EMPTY_NOTE in section
+    assert "монолог агента" not in section
+    assert VAD_INSTRUCTION_REMINDER_EMPTY in section
+    assert "null" in section
+
+
+def test_build_user_prompt_places_user_only_section_after_window_before_reminder() -> None:
+    """(в) порядок в итоговом user-промпте: общий текст окна → ... →
+    user-only блок → VAD-инструкция (волна 35 D7)."""
+    rows = [
+        {"role": "user", "content": "вопрос про qwen3"},
+        {"role": "assistant", "content": "qwen3 50k окно"},
+    ]
+    window_text = format_window(rows)
+    section = build_user_only_vad_section(rows)
+    prompt = build_user_prompt(window_text, "(пусто)", section)
+
+    idx_general_window = prompt.index("[assistant]: qwen3 50k окно")
+    idx_header = prompt.index(USER_ONLY_VAD_HEADER)
+    idx_footer = prompt.index(USER_ONLY_VAD_FOOTER)
+    idx_reminder = prompt.index(VAD_INSTRUCTION_REMINDER)
+
+    assert idx_general_window < idx_header, (
+        "user-only блок должен идти после общего текста окна"
+    )
+    assert idx_header < idx_footer < idx_reminder, (
+        "VAD-инструкция должна идти сразу после user-only блока"
+    )
+    # Не в самом начале промпта.
+    assert prompt.index("window:") < idx_header
 
 
 def test_truncate_no_op() -> None:
@@ -561,3 +653,150 @@ def test_handler_chunked_multiple_calls(db, rate_limit) -> None:
     assert llm.calls >= 2
     # Каждый chunk → отдельная memory
     assert len(out.result["memories_created"]) >= 2
+
+
+# ── User-only VAD section — end-to-end wiring (волна 35 D7) ────────────
+
+
+def test_handler_sends_user_only_vad_section_to_llm(db, rate_limit) -> None:
+    """(a)(б)(в) сквозная проверка: то, что реально уходит в
+    ``ctx.llm.chat_json`` (не только изолированные функции), содержит
+    демаркированный user-only блок после общего окна и перед
+    VAD-инструкцией, и блок содержит только user-строки этого окна."""
+    agent = "alpha-user-only-vad"
+    base = _dt.datetime(2026, 5, 2, 12, 0, tzinfo=_dt.timezone.utc)
+    _insert_dialogue(db, agent, [
+        ("user", "мне сегодня тревожно", base),
+        ("assistant", "я рядом, расскажи подробнее", base + _dt.timedelta(seconds=5)),
+        ("user", "спасибо что выслушал", base + _dt.timedelta(seconds=20)),
+    ])
+    handler = create_dialogue_batch_handler()
+    llm = _ScriptedChat({
+        "skip": False, "skip_reason": None,
+        "summary": "Обсудили тревогу пользователя, стало легче.",
+        "archive_hints": [],
+        "vad": {"valence": -0.3, "arousal": 0.4, "dominance": -0.1},
+    })
+    task = _make_task({
+        "agent_id": agent,
+        "window_from": _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc).isoformat(),
+        "window_to": (base + _dt.timedelta(seconds=30)).isoformat(),
+        "with_overlap": False,
+    })
+    handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    assert llm.calls == 1
+    messages = llm.captured_messages[0]
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    content = messages[1]["content"]
+
+    # (a) блок присутствует в итоговом тексте, отправленном LLM.
+    assert USER_ONLY_VAD_HEADER in content
+    assert USER_ONLY_VAD_FOOTER in content
+
+    # (б) блок содержит ТОЛЬКО user-строки этого окна.
+    body = content.split(USER_ONLY_VAD_HEADER, 1)[1].split(USER_ONLY_VAD_FOOTER, 1)[0]
+    assert "[user]: мне сегодня тревожно" in body
+    assert "[user]: спасибо что выслушал" in body
+    assert "[assistant]" not in body
+    assert "я рядом" not in body
+
+    # (в) порядок: общий текст окна → ... → блок → VAD-инструкция.
+    idx_general_window = content.index("я рядом, расскажи подробнее")
+    idx_header = content.index(USER_ONLY_VAD_HEADER)
+    idx_reminder = content.index(VAD_INSTRUCTION_REMINDER)
+    assert idx_general_window < idx_header < idx_reminder
+
+
+def test_handler_all_assistant_window_marks_no_user_replies(db, rate_limit) -> None:
+    """Edge case сквозь весь handler: окно без единой user-реплики — LLM
+    получает явную пометку "нет реплик пользователя", а не пустой блок."""
+    agent = "alpha-no-user-rows"
+    base = _dt.datetime(2026, 5, 2, 12, 0, tzinfo=_dt.timezone.utc)
+    _insert_dialogue(db, agent, [
+        ("assistant", "агент рассуждает сам с собой", base),
+    ])
+    handler = create_dialogue_batch_handler()
+    llm = _ScriptedChat({
+        "skip": False, "skip_reason": None,
+        "summary": "Агент зафиксировал собственную мысль.",
+        "archive_hints": [], "vad": None,
+    })
+    task = _make_task({
+        "agent_id": agent,
+        "window_from": _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc).isoformat(),
+        "window_to": (base + _dt.timedelta(seconds=30)).isoformat(),
+        "with_overlap": False,
+    })
+    handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    content = llm.captured_messages[0][1]["content"]
+    assert USER_ONLY_VAD_HEADER in content
+    assert USER_ONLY_VAD_EMPTY_NOTE in content
+    assert VAD_INSTRUCTION_REMINDER_EMPTY in content
+    assert "агент рассуждает сам с собой" not in content.split(
+        USER_ONLY_VAD_HEADER, 1
+    )[1].split(USER_ONLY_VAD_FOOTER, 1)[0]
+
+
+def test_handler_user_only_vad_section_bounded_on_large_window(db, rate_limit) -> None:
+    """Регрессионный фикс (волна 35): раньше ``user_only_vad_section``
+    строился из ПОЛНОГО ``rows`` без ограничения размера и
+    приклеивался неизменным к промпту КАЖДОГО chunk'а в цикле. При
+    большом backlog'е (окно > L_BATCH_CHARS, несколько chunk'ов) это
+    могло дать HTTP 400 "exceeds available context size" на каждом
+    chunk-вызове — причём неудачный tick не продвигает ``window_from``
+    (``set_batch_state`` двигает состояние только при успехе), так что
+    окно продолжает расти и отказ повторяется. Теперь секция ограничена
+    ``USER_ONLY_VAD_MAX_CHARS`` независимо от размера ``rows``."""
+    agent = "alpha-user-only-vad-bounded"
+    base = _dt.datetime(2026, 5, 2, 12, 0, tzinfo=_dt.timezone.utc)
+    # CHECK constraint memories.content ≤ 2400 (MAX_CONTENT_CHARS) —
+    # держим построчный content под лимитом, как в
+    # test_handler_chunked_multiple_calls. Преимущественно user-реплики
+    # (единственная assistant-реплика — i == 0).
+    big_chunk = "x" * 2000
+    entries = [
+        {
+            "role": "assistant" if i == 0 else "user",
+            "content": f"{big_chunk} реплика {i}",
+        }
+        for i in range(150)
+    ]
+    # sanity: окно действительно большое (≥200k) и user-only текст (до
+    # обрезки) значительно больше USER_ONLY_VAD_MAX_CHARS — иначе тест
+    # не нагружает обрезку и не проверяет фикс.
+    assert len(format_window(entries)) >= 200_000
+    assert len(format_user_only_window(entries)) > USER_ONLY_VAD_MAX_CHARS
+
+    rows = [
+        (e["role"], e["content"], base + _dt.timedelta(seconds=i))
+        for i, e in enumerate(entries)
+    ]
+    _insert_dialogue(db, agent, rows)
+    handler = create_dialogue_batch_handler()
+    llm = _ScriptedChat([
+        {"skip": False, "skip_reason": None, "summary": f"Сводка {i}.",
+         "archive_hints": [], "vad": None}
+        for i in range(10)
+    ])
+    task = _make_task({
+        "agent_id": agent,
+        "window_from": _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc).isoformat(),
+        "window_to": (base + _dt.timedelta(seconds=200)).isoformat(),
+        "with_overlap": False,
+    })
+    handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    assert llm.calls >= 2  # окно > L_BATCH_CHARS → несколько chunk'ов,
+    # секция приклеивается к промпту каждого из них.
+    for messages in llm.captured_messages:
+        content = messages[1]["content"]
+        body = content.split(USER_ONLY_VAD_HEADER, 1)[1].split(
+            USER_ONLY_VAD_FOOTER, 1
+        )[0].strip("\n")
+        assert len(body) <= USER_ONLY_VAD_MAX_CHARS

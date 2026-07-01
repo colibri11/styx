@@ -40,9 +40,9 @@ def test_initialize_configures_pre_llm_inject(styx_env) -> None:
         handle = pre_llm_inject.get_handle("alpha")
         assert handle is not None
         assert handle.queries is p.queries
-        assert handle.peer_vad_enabled is True
-        assert handle.peer_vad_min_norm == 0.2
-        assert handle.peer_vad_ttl_s == 60.0
+        assert handle.self_state_enabled is True
+        assert handle.self_state_min_norm == 0.2
+        assert handle.self_state_max_age_s == 900.0
         assert pre_llm_inject.is_enabled("alpha") is True
     finally:
         p.shutdown()
@@ -73,35 +73,35 @@ def test_inject_disabled_via_env(
         p.shutdown()
 
 
-def test_peer_vad_disabled_via_env(
+def test_self_state_disabled_via_env(
     styx_env, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """STYX_PRE_LLM_PEER_VAD_ENABLED=0 → handle.peer_vad_enabled=False
+    """STYX_SELF_STATE_ENABLED=0 → handle.self_state_enabled=False
     → channel skip'нет, framework configured но channel молчит."""
-    monkeypatch.setenv("STYX_PRE_LLM_PEER_VAD_ENABLED", "0")
+    monkeypatch.setenv("STYX_SELF_STATE_ENABLED", "0")
     p = StyxMemoryCore()
     sid = str(uuid.uuid4())
     p.initialize(session_id=sid, agent_identity="alpha")
     try:
         handle = pre_llm_inject.get_handle("alpha")
         assert handle is not None
-        assert handle.peer_vad_enabled is False
+        assert handle.self_state_enabled is False
     finally:
         p.shutdown()
 
 
-def test_peer_vad_thresholds_propagate(
+def test_self_state_thresholds_propagate(
     styx_env, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STYX_PEER_VAD_MIN_NORM", "0.5")
-    monkeypatch.setenv("STYX_PEER_VAD_TTL_S", "120.0")
+    monkeypatch.setenv("STYX_SELF_STATE_MIN_NORM", "0.5")
+    monkeypatch.setenv("STYX_SELF_STATE_MAX_AGE_S", "120.0")
     p = StyxMemoryCore()
     sid = str(uuid.uuid4())
     p.initialize(session_id=sid, agent_identity="alpha")
     try:
         handle = pre_llm_inject.get_handle("alpha")
         assert handle is not None
-        assert handle.peer_vad_min_norm == 0.5
-        assert handle.peer_vad_ttl_s == 120.0
+        assert handle.self_state_min_norm == 0.5
+        assert handle.self_state_max_age_s == 120.0
     finally:
         p.shutdown()

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 import psycopg
 from psycopg.rows import dict_row
 
+from ..emotional.state import EmotionalVector, read_last_state
 from .recall_config import DEFAULT_RECALL_CONFIG, FullRecallConfig
 from .scoring import (
     BuildFactorExprsOptions,
@@ -1572,45 +1573,22 @@ class AgentScopedQueries:
         p75 = float(row[0])
         return p75 if p75 > 0 else 0.0
 
-    # -- low-level хелперы (не для внешнего использования) ---------------
+    # -- Self-state read (волна 35, low-level хелпер) ---------------------
 
-    def get_latest_hot_sentiment(
-        self, *, within_seconds: float
-    ) -> tuple[tuple[float, float, float], Any] | None:
-        """Latest emotional_state entry с ``source='hot_sentiment'`` и
-        ``metadata.hot_vad`` (raw VAD peer-реплики) не старее ``within_seconds``.
+    def get_last_emotional_state(self) -> tuple[EmotionalVector, Any] | None:
+        """Последняя точка ``emotional_state`` — накопленное состояние агента.
 
-        Возвращает ``((v, a, d), at)`` либо ``None``. Используется каналом
-        peer_vad волны 15 для inject'а через pre_llm_call hook.
+        Тонкая делегация в ``styx.emotional.state.read_last_state`` — не
+        дублирует SQL/decay-логику. В отличие от удалённого волны-15
+        ``get_latest_hot_sentiment`` (raw VAD последней peer-реплики) —
+        отдаёт уже демпфированную позицию линии агента (предыдущее
+        состояние + decay + K_HOT-интеграция peer-резонанса, см.
+        ``append_emotional_state``/``apply_instant_decay``). Используется
+        каналом self_state для pre_llm_call inject'а.
 
-        Backward compat: legacy записи без ``metadata`` или с metadata без
-        ``hot_vad`` ключа дают None — channel skip'нет canal silently.
+        Возвращает ``(vector, at)`` либо ``None``, если истории ещё нет.
         """
-        sql = (
-            "SELECT metadata, at "
-            "FROM emotional_state "
-            "WHERE agent_id = %s "
-            "  AND source = 'hot_sentiment' "
-            "  AND at >= now() - make_interval(secs => %s) "
-            "ORDER BY at DESC "
-            "LIMIT 1"
-        )
-        with self._conn.cursor() as cur:
-            cur.execute(sql, (self._agent_id, float(within_seconds)))
-            row = cur.fetchone()
-        if row is None:
-            return None
-        metadata, at = row
-        if not isinstance(metadata, dict):
-            return None
-        vad = metadata.get("hot_vad")
-        if not (
-            isinstance(vad, list)
-            and len(vad) == 3
-            and all(isinstance(x, (int, float)) for x in vad)
-        ):
-            return None
-        return ((float(vad[0]), float(vad[1]), float(vad[2])), at)
+        return read_last_state(self._conn, self._agent_id)
 
     # ── Волна 14: queries для batch consolidation ───────────────────
 
