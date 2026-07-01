@@ -261,14 +261,22 @@ class StyxMemoryProvider(MemoryProvider):
             return list(self._tool_schemas)
         # Hermes строит routing-индекс _tool_to_provider в
         # MemoryManager.add_provider(), который вызывается ДО initialize()
-        # (agent_init.py:1101 vs :1144). Наши daemon-схемы наполняются только
+        # (agent_init.py:1165 vs :1211, Hermes v0.17.0/v2026.6.19 — было
+        # :1101/:1144 на v0.16.0). Наши daemon-схемы наполняются только
         # в initialize(); вернуть [] здесь = индекс построится пустым и любой
         # styx_* вызов упадёт в "Unknown tool" (хотя схема к этому моменту уже
-        # доходит до модели через тот же get_tool_schemas, вызываемый ПОСЛЕ
-        # init на agent_init.py:1176). Отдаём статический каталог ядра
-        # (чистый: без БД/HTTP — __init__ StyxMemoryCore не коннектится) —
-        # initialize() затем заменит self._tool_schemas авторитетными
-        # config-схемами daemon'а для поверхности модели.
+        # доходит до модели через инъекцию тулов ПОСЛЕ init —
+        # agent_init.py:1220-1221 зовёт
+        # memory_manager.inject_memory_provider_tools(agent), которая внутри
+        # берёт agent._memory_manager.get_all_tool_schemas(); в v0.16.0 это
+        # был инлайн-цикл на agent_init.py:1176, в v0.17.0 вынесен в отдельную
+        # функцию с доп. гейтом memory_provider_tools_enabled(agent.enabled_toolsets)
+        # — по умолчанию enabled_toolsets=None → гейт пропускает; "memory" не
+        # входит в _DEFAULT_OFF_TOOLSETS, так что явного opt-in не требуется).
+        # Отдаём статический каталог ядра (чистый: без БД/HTTP — __init__
+        # StyxMemoryCore не коннектится) — initialize() затем заменит
+        # self._tool_schemas авторитетными config-схемами daemon'а для
+        # поверхности модели.
         from styx.providers.memory import StyxMemoryCore
 
         return StyxMemoryCore(self._agent_id or "").get_tool_schemas()
