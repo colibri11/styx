@@ -151,7 +151,7 @@ def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
 
     p, sid, agent = styx_stack
     # Записываем известную VAD (positive valence, positive arousal,
-    # positive dominance → октант "pospospos" → "оживлённо и уверенно").
+    # positive dominance → октант "pospospos" → "воодушевлённо и уверенно").
     vad = EmotionalVector(valence=0.8, arousal=0.6, dominance=0.5)
     # append_emotional_state применяет clamp; мы передаём как delta поверх
     # neutral base — итог в БД равен этому VAD'у.
@@ -175,7 +175,7 @@ def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
     assert out is not None
     assert "context" in out
     assert "Тебе сейчас" in out["context"]
-    assert "оживлённо и уверенно" in out["context"]
+    assert "воодушевлённо и уверенно" in out["context"]
 
 
 def test_pre_llm_call_skips_below_min_norm(styx_stack) -> None:
