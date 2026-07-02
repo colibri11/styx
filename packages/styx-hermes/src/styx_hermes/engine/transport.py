@@ -90,7 +90,7 @@ class StyxCodexTransport(ResponsesApiTransport):
 
         override = _resolve_cache_key(params)
         # Гейтим установку prompt_cache_key по тому же условию, что Hermes
-        # (agent/transports/codex.py:158): GitHub Models и xAI Responses
+        # (agent/transports/codex.py:262-263): GitHub Models и xAI Responses
         # намеренно опускают cache-key (xAI получает его отдельно через
         # extra_body, GitHub Models opt-out из cache-key routing).
         cache_key_allowed = not params.get("is_github_responses") and not params.get(
