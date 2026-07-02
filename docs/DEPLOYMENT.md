@@ -1,6 +1,6 @@
-# Styx — Deployment Runbook (styx-core 1.0.9 / styx-hermes 1.0.9)
+# Styx — Deployment Runbook (styx-core 1.0.10 / styx-hermes 1.0.9)
 
-Инструкция по установке Styx в production (`styx-core` 1.0.9, `styx-hermes`
+Инструкция по установке Styx в production (`styx-core` 1.0.10, `styx-hermes`
 1.0.9). Архитектура изменилась относительно 0.1.0 — теперь это два пакета и
 три процесса:
 
@@ -391,7 +391,7 @@ styx-привязку от прошлых сессий (config уже пропа
 ```bash
 # Daemon живой
 curl -s http://127.0.0.1:8788/healthz | jq .
-# {"status":"ok","postgres":"ok","version":"1.0.9",...}
+# {"status":"ok","postgres":"ok","version":"1.0.10",...}
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'

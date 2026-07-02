@@ -7,6 +7,53 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.0.10] — 2026-07-01
+
+Defect-fix по отзыву девопса (ADR § 63): `usage_classification` валил весь
+батч терминально при неполном/неидеальном ответе локальной модели.
+Отдельный участок от триады § 62 (найден на проде **после** её деплоя),
+родственный § 62.2 (устойчивость к неидеальному выводу qwen3:4b-local).
+`styx-hermes` без изменений (1.0.9).
+
+### Исправлено
+
+- **usage_classification: строгая реконсиляция валила весь батч на
+  неполном ответе модели → задачи залипали в `failed`.** Блок «Reconcile»
+  требовал «каждый входной memory_id ровно один раз, ничего лишнего» и
+  бросал `OllamaTerminalError` на любом отклонении: `unknown` (id вне
+  входного набора), `duplicate`, `missing` (модель пропустила элемент).
+  qwen3:4b-local на части контента детерминированно пропускает элемент →
+  перезапуск не помогал. Реконсиляция сделана **терпимой**: применяются
+  валидные классификации (`unknown` игнорируется — не в живом наборе,
+  корректность; `duplicate` — first-seen wins); пропущенные `memory_id`
+  остаются `used_in_output=false` до естественной переклассификации на
+  будущем recall-событии. `log.info` при неполноте (не terminal), задача
+  завершается `done` с observability-полями (`unknown_memory_ids`,
+  `duplicate_memory_ids`, `unclassified_memory_ids`). Границы:
+  `schema_mismatch`/`bad_payload` остаются терминальными; классификация к
+  `memory_id` вне живого набора не применяется. Реконсиляция теперь
+  расходится с memorybox-портом (был strict-terminal) — задокументировано
+  в докстринге модуля.
+
+### Гейты
+
+Drift-sentinel 57/57 (0 drift); host styx-core 1295 passed / 0 failed
+(реальные PG+Ollama); точечный тест usage_classification 20 passed под
+`-W error::DeprecationWarning` (0 warning); Docker in-container —
+real-Ollama `test_classifier_real_qwen3_flips_used_in_output` PASSED +
+все 20 usage-тестов на реальном PG (non-DB core 901/0-fail; полная
+~1500-батарея зависла на неотносящемся docker-exec integration-тесте
+изнутри контейнера — инфра, прогнан fix-релевантный сигнал напрямую).
+Методология agent-team (1 dev → 2 ревьюера → адъюдикация ТЛ → свежий
+фиксер → гейты).
+
+### Развёртывание
+
+Редеплой styx-daemon + рестарт залипших `usage_classification` задач
+(`status=failed→pending`, `retry_count=0`, `error LIKE
+'%classification_mismatch%'`) — отдельным шагом prod-исполнителем
+(acceptance #5). В commit не входит.
+
 ## [styx-core 1.0.9] — 2026-07-01
 
 Defect-fix триада по отзыву девопса (живой деплой Hermes 0.17.0 на builder,
