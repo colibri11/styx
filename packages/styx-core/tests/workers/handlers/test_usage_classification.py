@@ -272,9 +272,11 @@ def test_handler_scored_flips_used_in_output(db, rate_limit) -> None:
     assert rows[r2] is False
 
 
-def test_handler_reconcile_unknown_memory_id(db, rate_limit) -> None:
+def test_handler_reconcile_ignores_unknown_memory_id(db, rate_limit) -> None:
+    """Лишний id (вне живого набора) — игнор, задача done, валидные применены."""
     agent = f"classifier-test-{uuid.uuid4().hex[:6]}"
-    _, r1 = _seed(db, agent, content="some content")
+    m1, r1 = _seed(db, agent, content="some content")
+    phantom = str(uuid.uuid4())
 
     handler = create_usage_classification_handler()
     llm = _ScriptedChat(
@@ -282,11 +284,8 @@ def test_handler_reconcile_unknown_memory_id(db, rate_limit) -> None:
             "skip": False,
             "skip_reason": None,
             "classifications": [
-                {
-                    "memory_id": str(uuid.uuid4()),  # фантом
-                    "used": True,
-                    "reason": "x",
-                }
+                {"memory_id": str(m1), "used": True, "reason": "опирается"},
+                {"memory_id": phantom, "used": True, "reason": "фантом"},
             ],
         }
     )
@@ -300,17 +299,32 @@ def test_handler_reconcile_unknown_memory_id(db, rate_limit) -> None:
         },
         retry_count=0,
     )
-    with pytest.raises(OllamaTerminalError, match="classification_mismatch"):
-        handler(task, _ctx(db, llm, rate_limit))
+    # НЕ raise — терпимая реконсиляция.
+    out = handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    assert out.skipped_by_llm is False
+    assert out.result is not None
+    # phantom — вне живого набора, попал в unknown, не применён.
+    assert out.result["unknown_memory_ids"] == [phantom]
+    assert out.result["duplicate_memory_ids"] == []
+    assert out.result["unclassified_memory_ids"] == []
+    # валидный m1 — применён.
+    assert out.result["flipped"] == 1
+    assert r1 in out.result["used_recall_ids"]
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT used_in_output FROM recall_events WHERE id = %s", (r1,))
+        assert cur.fetchone()["used_in_output"] is True
 
 
-def test_handler_reconcile_missing_memory_id(db, rate_limit) -> None:
+def test_handler_reconcile_incomplete_set_partial(db, rate_limit) -> None:
+    """Неполный набор (модель пропустила live id) — задача done, missing НЕ флипнут."""
     agent = f"classifier-test-{uuid.uuid4().hex[:6]}"
     m1, r1 = _seed(db, agent, content="aaa")
     m2, r2 = _seed(db, agent, content="bbb")
 
     handler = create_usage_classification_handler()
-    # классификация только m1, m2 пропущен.
+    # классификация только m1 (used=true), m2 пропущен моделью.
     llm = _ScriptedChat(
         {
             "skip": False,
@@ -330,7 +344,149 @@ def test_handler_reconcile_missing_memory_id(db, rate_limit) -> None:
         },
         retry_count=0,
     )
-    with pytest.raises(OllamaTerminalError, match="missing memory_id"):
+    # НЕ raise.
+    out = handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    assert out.skipped_by_llm is False
+    assert out.result is not None
+    # m2 — живой, но не классифицирован → в unclassified, дефолт false.
+    assert out.result["unclassified_memory_ids"] == [str(m2)]
+    assert out.result["unknown_memory_ids"] == []
+    assert out.result["flipped"] == 1
+    assert r1 in out.result["used_recall_ids"]
+    assert r2 not in out.result["used_recall_ids"]
+
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, used_in_output FROM recall_events WHERE id = ANY(%s::bigint[])",
+            ([r1, r2],),
+        )
+        rows = {int(r["id"]): r["used_in_output"] for r in cur.fetchall()}
+    assert rows[r1] is True
+    # missing memory_id — консервативный дефалт, used_in_output остался false.
+    assert rows[r2] is False
+
+
+def test_handler_reconcile_duplicate_first_seen_wins(db, rate_limit) -> None:
+    """Дубль memory_id — игнор повтора, оставляем первое решение (first-seen)."""
+    agent = f"classifier-test-{uuid.uuid4().hex[:6]}"
+    m1, r1 = _seed(db, agent, content="aaa")
+    m2, r2 = _seed(db, agent, content="bbb")
+
+    handler = create_usage_classification_handler()
+    # m1 встречается дважды: первое used=false, повтор used=true.
+    # first-seen wins → m1 остаётся used=false (не флипается).
+    llm = _ScriptedChat(
+        {
+            "skip": False,
+            "skip_reason": None,
+            "classifications": [
+                {"memory_id": str(m1), "used": False, "reason": "first"},
+                {"memory_id": str(m1), "used": True, "reason": "dup, игнор"},
+                {"memory_id": str(m2), "used": True, "reason": "y"},
+            ],
+        }
+    )
+    task = LlmTask(
+        id=uuid.uuid4(), task_type=USAGE_CLASSIFICATION_TASK_TYPE,
+        memory_id=None,
+        payload={
+            "recall_event_ids": [r1, r2],
+            "llm_output_text": "x",
+            "agent_id": agent,
+        },
+        retry_count=0,
+    )
+    out = handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    assert out.result is not None
+    assert out.result["duplicate_memory_ids"] == [str(m1)]
+    assert out.result["unknown_memory_ids"] == []
+    assert out.result["unclassified_memory_ids"] == []
+    # first-seen для m1 = false → не флипнут; m2 = true → флипнут.
+    assert out.result["flipped"] == 1
+    assert r2 in out.result["used_recall_ids"]
+    assert r1 not in out.result["used_recall_ids"]
+
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, used_in_output FROM recall_events WHERE id = ANY(%s::bigint[])",
+            ([r1, r2],),
+        )
+        rows = {int(r["id"]): r["used_in_output"] for r in cur.fetchall()}
+    assert rows[r1] is False
+    assert rows[r2] is True
+
+
+def test_handler_reconcile_all_unknown_full_hallucination(db, rate_limit) -> None:
+    """Полная галлюцинация — ни один id не в живом наборе: задача done, ничего не флипнуто."""
+    agent = f"classifier-test-{uuid.uuid4().hex[:6]}"
+    m1, r1 = _seed(db, agent, content="реальный контент")
+    phantom_a = str(uuid.uuid4())
+    phantom_b = str(uuid.uuid4())
+
+    handler = create_usage_classification_handler()
+    # Модель вернула skip=false с непустым набором, но все id — вымышленные.
+    llm = _ScriptedChat(
+        {
+            "skip": False,
+            "skip_reason": None,
+            "classifications": [
+                {"memory_id": phantom_a, "used": True, "reason": "фантом A"},
+                {"memory_id": phantom_b, "used": True, "reason": "фантом B"},
+            ],
+        }
+    )
+    task = LlmTask(
+        id=uuid.uuid4(), task_type=USAGE_CLASSIFICATION_TASK_TYPE,
+        memory_id=None,
+        payload={
+            "recall_event_ids": [r1],
+            "llm_output_text": "содержательный ответ",
+            "agent_id": agent,
+        },
+        retry_count=0,
+    )
+    # НЕ raise — handler возвращает HandlerResult (задача done).
+    out = handler(task, _ctx(db, llm, rate_limit))
+    db.commit()
+
+    assert out.skipped_by_llm is False
+    assert out.result is not None
+    # Все вернувшиеся id — unknown, ничего не применено.
+    assert out.result["unknown_memory_ids"] == [phantom_a, phantom_b]
+    assert out.result["duplicate_memory_ids"] == []
+    # Единственный живой id остался неклассифицированным → консервативный дефолт.
+    assert out.result["unclassified_memory_ids"] == [str(m1)]
+    assert out.result["flipped"] == 0
+    assert out.result["used_recall_ids"] == []
+
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT used_in_output FROM recall_events WHERE id = %s", (r1,))
+        assert cur.fetchone()["used_in_output"] is False
+
+
+def test_handler_schema_mismatch_terminal(db, rate_limit) -> None:
+    """Битая схема ответа (не про полноту набора) — остаётся terminal."""
+    agent = f"classifier-test-{uuid.uuid4().hex[:6]}"
+    _, r1 = _seed(db, agent, content="aaa")
+
+    handler = create_usage_classification_handler()
+    # skip не bool → _validate_response падает.
+    llm = _ScriptedChat({"skip": "нет", "skip_reason": None, "classifications": None})
+    task = LlmTask(
+        id=uuid.uuid4(), task_type=USAGE_CLASSIFICATION_TASK_TYPE,
+        memory_id=None,
+        payload={
+            "recall_event_ids": [r1],
+            "llm_output_text": "x",
+            "agent_id": agent,
+        },
+        retry_count=0,
+    )
+    with pytest.raises(OllamaTerminalError, match="schema_mismatch"):
         handler(task, _ctx(db, llm, rate_limit))
 
 

@@ -1,8 +1,12 @@
 """LLM usage classifier — post-hoc проставляет ``recall_events.used_in_output``.
 
 Прямой port memorybox `llm-worker/handlers/usage-classification.ts`.
-SYSTEM_PROMPT, MAX_REPLY_CHARS, MAX_MEMORY_CHARS, reconciliation
-strict — буквально.
+SYSTEM_PROMPT, MAX_REPLY_CHARS, MAX_MEMORY_CHARS — буквально из порта.
+Реконсиляция же расходится с портом: memorybox валил весь батч
+терминально на неполном/неидеальном ответе модели, а Styx применяет
+валидные классификации частично (unknown/дубль игнорируются,
+пропущенный memory_id остаётся ``used_in_output=false`` до
+естественной переклассификации). См. ADR § 63.
 
 Scheduler (kто enqueue'ит task'ы) — собственный дизайн Styx, не port
 (memorybox skeleton). См. ADR § 20.
@@ -14,7 +18,7 @@ Cross-agent: handler читает recall_events / memories по PK, без agent
 from __future__ import annotations
 
 import json
-import math
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +28,8 @@ from psycopg.rows import dict_row
 from styx.llm import OllamaTerminalError
 from styx.workers.runtime import Handler, HandlerContext, HandlerResult, LlmTask
 
+
+log = logging.getLogger(__name__)
 
 USAGE_CLASSIFICATION_TASK_TYPE = "usage_classification"
 
@@ -305,27 +311,46 @@ def create_usage_classification_handler() -> Handler:
                 skipped_by_llm=True,
             )
 
-        # Reconcile: каждый live memory_id ровно один раз; никаких лишних.
+        # Reconcile (терпимая обработка): неидеальность вывода локальной
+        # модели не валит весь батч. Неполный/неидеальный набор — это
+        # content-детерминированный отказ, retry не помогает, задачи
+        # залипают в failed. Поэтому:
+        #   — unknown (id вне живого набора): игнорируем классификацию
+        #     (не применяем — корректность-граница);
+        #   — duplicate (уже виден): игнорируем повтор, first-seen wins;
+        #   — unclassified (живой id, которого модель не вернула): не валим,
+        #     оставляем used_in_output=false — консервативный дефолт по
+        #     bias системного промпта, естественная переклассификация на
+        #     будущем recall-событии.
+        # Применяем только валидные (в живом наборе, first-seen) c used=true.
         live_memory_id_set = {r.memory_id for r in rows}
-        seen: set[str] = set()
         assert parsed.classifications is not None
+        classified: dict[str, bool] = {}  # memory_id -> used, first-seen wins
+        unknown_ids: list[str] = []
+        duplicate_ids: list[str] = []
         for c in parsed.classifications:
             if c.memory_id not in live_memory_id_set:
-                raise OllamaTerminalError(
-                    f"classification_mismatch: unknown memory_id {c.memory_id}"
-                )
-            if c.memory_id in seen:
-                raise OllamaTerminalError(
-                    f"classification_mismatch: duplicate memory_id {c.memory_id}"
-                )
-            seen.add(c.memory_id)
-        for mid in live_memory_id_set:
-            if mid not in seen:
-                raise OllamaTerminalError(
-                    f"classification_mismatch: missing memory_id {mid}"
-                )
+                unknown_ids.append(c.memory_id)
+                continue
+            if c.memory_id in classified:
+                duplicate_ids.append(c.memory_id)
+                continue
+            classified[c.memory_id] = c.used
+        unclassified_ids = sorted(
+            mid for mid in live_memory_id_set if mid not in classified
+        )
 
-        used_memory_ids = {c.memory_id for c in parsed.classifications if c.used}
+        if unknown_ids or duplicate_ids or unclassified_ids:
+            log.info(
+                "usage_classification task %s: терпимый reconcile — "
+                "unknown=%d duplicate=%d unclassified=%d",
+                task.id,
+                len(unknown_ids),
+                len(duplicate_ids),
+                len(unclassified_ids),
+            )
+
+        used_memory_ids = {mid for mid, used in classified.items() if used}
         used_recall_ids = [r.id for r in rows if r.memory_id in used_memory_ids]
 
         flipped = 0
@@ -338,6 +363,9 @@ def create_usage_classification_handler() -> Handler:
                 "flipped": flipped,
                 "used_recall_ids": used_recall_ids,
                 "missing_recall_ids": missing_ids,
+                "unknown_memory_ids": unknown_ids,
+                "duplicate_memory_ids": duplicate_ids,
+                "unclassified_memory_ids": unclassified_ids,
             },
         )
 
