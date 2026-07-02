@@ -66,16 +66,27 @@ def test_no_arg_constructor() -> None:
 # -- cache_key resolution -------------------------------------------------
 
 
-def test_hermes_default_session_id_preserved_when_unconfigured() -> None:
-    """Если Styx session не set — поведение Hermes сохраняется.
+def test_hermes_default_preserved_when_unconfigured() -> None:
+    """Если Styx session не set — Styx НЕ перетирает Hermes-default (passthrough).
 
-    Hermes-default: ``prompt_cache_key = session_id``. Styx это уважает.
+    Контракт Styx здесь — «unconfigured → отдать то, что поставил super()»,
+    а не конкретное значение cache_key. Сам Hermes-default менялся между
+    версиями (v0.17.0: ``session_id``; v0.18.0: content-addressed
+    ``_content_cache_key(...) or session_id`` = ``pck_<hash>``, фикс
+    cron-cache-cold). Поэтому сверяемся с выводом самого
+    ``ResponsesApiTransport``, а не хардкодим значение — тест устойчив к
+    будущим сменам дефолта Hermes.
     """
+    from agent.transports.codex import ResponsesApiTransport
+
+    base_kwargs = ResponsesApiTransport().build_kwargs(
+        "gpt-5.5", _msgs(("user", "hi")), session_id="hermes-sess-1"
+    )
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "hi")), session_id="hermes-sess-1"
     )
-    assert kwargs["prompt_cache_key"] == "hermes-sess-1"
+    assert kwargs["prompt_cache_key"] == base_kwargs["prompt_cache_key"]
 
 
 def test_agent_id_overrides_hermes_default() -> None:

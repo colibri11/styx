@@ -7,6 +7,53 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-hermes 1.0.10] — 2026-07-02
+
+Compat-валидация под **Hermes Agent v0.18.0 (тег `v2026.7.1`)** (ADR § 64).
+`styx-core` без изменений (1.0.10).
+
+### Изменено
+
+- **ABI-breaks на наших поверхностях НЕ найдены** — код адаптера функционально
+  не менялся (выверено по всем зависимым surface'ам). Diff 0.17.0→0.18.0
+  крупный (мажорный релиз), но memory-provider контракт цел:
+  - `MemoryProvider` ABC — новый **не-абстрактный** `backup_paths() -> list[str]`
+    (default `[]`, Styx не реализует — состояние в PG); абстрактный набор
+    (`name`/`is_available`/`initialize`/`get_tool_schemas`) не изменился →
+    `StyxMemoryProvider` инстанцируется без правок.
+  - Plugin lifecycle (kind=exclusive по маркеру, `get_tool_schemas` статичен
+    до init — § 54, `styx_*` тулы on-by-default) — живы; аддитивные фичи
+    (override-гейт `register_tool`, `normalize_tool_schema`,
+    `notify_memory_tool_write`) Styx-нейтральны.
+  - Transport ABC / codex / chat_completions — без новых abstract; гейт
+    `not is_github and not is_xai` жив. Hermes-default сменил дефолтный
+    `prompt_cache_key` с `session_id` на content-addressed `pck_<hash>`
+    (фикс cron-cache-cold) — `StyxCodexTransport` перетирает своим agent-scope
+    ключом, не задет.
+  - prefetch (§ 56, непрерывность памяти) жив: `turn_context` → `memory_manager`
+    → `provider.prefetch`, инъекция в `conversation_loop`.
+- **Обновлён 1 тест** — `test_codex_transport.py` пинил старый Hermes-default
+  cache_key (`session_id`); переписан на проверку **контракта passthrough**
+  (сверка с выводом `ResponsesApiTransport`, а не с конкретным значением) —
+  устойчив к будущим сменам дефолта Hermes.
+- Переякорены ~40 координат в `hermes-anchors.md` (0.17.0→0.18.0, drift 0) +
+  3 семантические заметки (`backup_paths` / content-addressed cache_key /
+  compression-lock в compress-пути).
+- Протухший пин `styx-core==1.0.8` → `==1.0.10`. Дефолт `HERMES_IMAGE` →
+  `v2026.7.1` (compose + Dockerfile).
+
+### Гейты
+
+Drift-sentinel **56/56** (0 drift; счётчик 57→56 при переякоривании); host
+styx-hermes **172 passed / 6 skip**; Docker in-container hermes **178 passed /
+0 fail**; live e2e на официальном образе `nousresearch/hermes-agent:v2026.7.1`
+(локальная Ollama `coding-model` — GLM 429 избегнут): Hermes 0.18.0 boot,
+`StyxMemoryProvider` инстанцируется, attach идемпотентен (`context.engine:
+compressor` — Styx = memory-provider, § 56), `sync_turn 200`, memories 0→2,
+`styx_search_archive` вызван → `POST /search_archive 200` (§ 54 жив), корректный
+recall на 2-м ходу. Методология agent-team (4 аналитика ∥ → адъюдикация ТЛ →
+2 фиксера ∥ → гейты). Новый worktree `~/OpenCode/hermes-agent-v2026.7.1`.
+
 ## [styx-core 1.0.10] — 2026-07-01
 
 Defect-fix по отзыву девопса (ADR § 63): `usage_classification` валил весь

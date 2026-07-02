@@ -274,13 +274,14 @@ class StyxMemoryProvider(MemoryProvider):
         if self._tool_schemas:
             return list(self._tool_schemas)
         # Hermes строит routing-индекс _tool_to_provider в
-        # MemoryManager.add_provider(), который вызывается ДО initialize()
-        # (agent_init.py:1165 vs :1211, Hermes v0.17.0/v2026.6.19 — было
-        # :1101/:1144 на v0.16.0). Наши daemon-схемы наполняются только
-        # в initialize(); вернуть [] здесь = индекс построится пустым и любой
-        # styx_* вызов упадёт в "Unknown tool" (хотя схема к этому моменту уже
-        # доходит до модели через инъекцию тулов ПОСЛЕ init —
-        # agent_init.py:1220-1221 зовёт
+        # MemoryManager.add_provider() (memory_manager.py:374, индекс
+        # :409-426), который вызывается ДО initialize_all()
+        # (agent_init.py:1242 vs :1288, Hermes v0.18.0/v2026.7.1 — было
+        # :1165/:1211 на v0.17.0/v2026.6.19). Наши daemon-схемы наполняются
+        # только в initialize_all(); вернуть [] здесь = индекс построится
+        # пустым и любой styx_* вызов упадёт в "Unknown tool" (хотя схема
+        # к этому моменту уже доходит до модели через инъекцию тулов ПОСЛЕ
+        # init — agent_init.py:1297-1298 зовёт
         # memory_manager.inject_memory_provider_tools(agent), которая внутри
         # берёт agent._memory_manager.get_all_tool_schemas(); в v0.16.0 это
         # был инлайн-цикл на agent_init.py:1176, в v0.17.0 вынесен в отдельную
