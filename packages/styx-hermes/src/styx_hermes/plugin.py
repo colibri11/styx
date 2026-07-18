@@ -13,9 +13,9 @@ shim'а в ``$HERMES_HOME/plugins/styx-memory/`` — ``styx-hermes-setup`` CLI.
 регистрации memory provider'а — общий PluginManager Hermes эвристически
 ищет такую строку в плагин ``__init__.py`` и помечает плагин
 ``kind="exclusive"``, после чего отказывается его грузить (см.
-``hermes_cli/plugins.py:1549-1571`` (маркер ``:1561``, discovery-skip
-``:1355``), Hermes v0.18.0/v2026.7.1 — было ``:1314-1336`` на
-v0.17.0/v2026.6.19).
+``hermes_cli/plugins.py:1592-1612`` (маркер ``:1604``, discovery-skip
+``:1398``), Hermes v0.18.2/v2026.7.7.2 — было ``:1549-1571`` на
+v0.18.0/v2026.7.1).
 """
 
 from __future__ import annotations

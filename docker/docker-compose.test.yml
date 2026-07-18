@@ -41,7 +41,7 @@
 #   docker compose -f docker/docker-compose.test.yml down -v
 #
 # Базовый образ hermes-styx по умолчанию — официальный s6-overlay
-# nousresearch/hermes-agent:v2026.7.1 (тянется pull'ом автоматически).
+# nousresearch/hermes-agent:v2026.7.7.2 (тянется pull'ом автоматически).
 # Override через env HERMES_IMAGE ОБЯЗАН быть s6-overlay образом (gateway
 # поднимает s6-супервизор; см. Dockerfile.styx-hermes). Orphan-модель
 # (волна 33): чистый контейнер оставляет Styx обнаружимым (bundled shim),
@@ -158,7 +158,7 @@ services:
         # Официальный s6-overlay образ (как на проде). Override через env
         # HERMES_IMAGE обязан быть тоже s6-overlay образом (gateway под s6;
         # см. Dockerfile.styx-hermes).
-        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.7.1}
+        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.7.7.2}
     image: hermes-agent-styx-test
     container_name: styx-test-hermes
     depends_on:
