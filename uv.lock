@@ -812,7 +812,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "styx-hermes"
-version = "1.0.10"
+version = "1.0.11"
 source = { editable = "packages/styx-hermes" }
 dependencies = [
     { name = "pyyaml" },

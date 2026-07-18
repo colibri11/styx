@@ -7,6 +7,45 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-hermes 1.0.11] — 2026-07-18
+
+Compat-валидация под **Hermes Agent v0.18.2 (тег `v2026.7.7.2`)** (ADR § 65).
+`styx-core` без изменений (1.0.10). Патч-бамп Hermes 0.18.0→0.18.2 (v0.18.1 —
+infra-patch, ~667 коммитов почти целиком installer/dashboard/WhatsApp/MCP;
+v0.18.2 — WhatsApp Baileys dep fix).
+
+### Изменено
+
+- **ABI-breaks на наших поверхностях НЕ найдены** — код адаптера не менялся
+  (4 аналитика ∥ по поверхностям, скоуп § 56: Styx = memory-provider):
+  - `MemoryProvider` ABC (`agent/memory_provider.py`) — **байт-в-байт не менялся**
+    между v0.18.0 и v0.18.2. `StyxMemoryProvider` инстанцируется без правок.
+  - `agent/transports/{codex,base,anthropic}.py` — не менялись; `super().build_kwargs`
+    обоих Styx-транспортов цел. `chat_completions.py` (+11) — только тела метода
+    (reasoning effort из `reasoning_config`, Poolside int `finish_reason`→str),
+    сигнатуры целы.
+  - Plugin lifecycle (`hermes_cli/plugins.py` +214) — exclusive-эвристика,
+    `hermes_plugins.<slug>` namespace, `invoke_hook`/`pre_llm_call` живы; двойной
+    shim не задет (`styx-memory` защищён явным `kind: exclusive` + маркером).
+  - `memory_manager.py` (+7) — off-path `sync_turn` executor переведён на
+    `DaemonThreadPoolExecutor` (нейтрально); § 54 routing-порядок цел.
+  - `prompt_caching.py` (+48) — контракт cache-control цел; native-anthropic
+    путь Styx идентичен.
+- Переякорены координаты в `hermes-anchors.md` (0.18.0→0.18.2, drift 0) +
+  4 семантические заметки (DaemonThreadPoolExecutor / model-provider ветка
+  эвристики / `_can_carry_marker` / chat_completions тела). Поправлен
+  drift-checker blindspot на `prompt_caching.py:49-79`→`:84-119`. Обновлён
+  устаревший комментарий координат agent_init в `providers/memory.py`.
+- Дефолт `HERMES_IMAGE` → `v2026.7.7.2` (compose + Dockerfile). Пин
+  `styx-core==1.0.10` без изменений.
+
+### Гейты
+
+Drift-sentinel **56/56** (0 drift); host styx-hermes (числа впишет ТЛ после
+прогона); Docker in-container hermes; live e2e на официальном образе
+`nousresearch/hermes-agent:v2026.7.7.2`. Методология agent-team (4 аналитика ∥
+→ адъюдикация ТЛ → 2 фиксера ∥ → гейты).
+
 ## [styx-hermes 1.0.10] — 2026-07-02
 
 Compat-валидация под **Hermes Agent v0.18.0 (тег `v2026.7.1`)** (ADR § 64).
