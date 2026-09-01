@@ -4,8 +4,8 @@ Pipeline:
 1. sync_turn × 25 с эмоциональными парами.
 2. schedule_batch_tick() ставит llm_task с правильным payload.
 3. Handler выполняется через worker → memory с kind_src='dialogue_batch_consolidation'.
-4. VAD piggyback пишет emotional_state с source='sentiment:batch'
-   (если qwen3 вернул VAD).
+4. VAD piggyback пишет peer evidence, не назначая его состоянием агента
+   (если модель вернула VAD).
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ def styx_stack():
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM emotional_state WHERE agent_id = %s", (agent,))
+            cur.execute("DELETE FROM emotional_events WHERE agent_id = %s", (agent,))
             cur.execute("DELETE FROM memories WHERE agent_id = %s", (agent,))
             cur.execute("DELETE FROM working_set WHERE agent_id = %s", (agent,))
             cur.execute("DELETE FROM sessions WHERE agent_id = %s", (agent,))

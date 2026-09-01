@@ -8,8 +8,8 @@ Pipeline:
    metadata={"hot_vad": [v, a, d]} (и накопленным valence/arousal/dominance
    в самих колонках строки).
 3. Вызываем on_pre_llm_call — channel self_state читает накопленное
-   состояние агента через read_last_state, формирует текст
-   «Тебе сейчас <phrase>.».
+   состояние агента через read_last_state и формирует структурированную
+   cognitive posture без эмоционального ярлыка или стилевой команды.
 4. Если VAD не извлёкся (qwen3 redirected, time-out) — тест skipped с
    объяснением (так же как test_sentiment_e2e на pure-VAD'е).
 
@@ -144,14 +144,13 @@ def test_sync_turn_writes_hot_vad_metadata(styx_stack) -> None:
 def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
     """Детерминированный e2e: пишем VAD напрямую в emotional_state, минуя
     sentiment hot-path. Проверяем что pipeline pre_llm_inject → channel
-    self_state возвращает корректный текст с phrase'ом из правильного
-    октанта, читая накопленное состояние через read_last_state."""
+    self_state возвращает причинные координаты и decision policy, читая
+    накопленное состояние через read_last_state."""
     from styx.emotional.state import EmotionalVector, append_emotional_state
     from styx.engine import pre_llm_inject
 
     p, sid, agent = styx_stack
-    # Записываем известную VAD (positive valence, positive arousal,
-    # positive dominance → октант "pospospos" → "воодушевлённо и уверенно").
+    # Записываем известную VAD: active state должен попасть в causal coordinates.
     vad = EmotionalVector(valence=0.8, arousal=0.6, dominance=0.5)
     # append_emotional_state применяет clamp; мы передаём как delta поверх
     # neutral base — итог в БД равен этому VAD'у.
@@ -174,8 +173,11 @@ def test_pre_llm_call_inject_with_seeded_vad(styx_stack) -> None:
     )
     assert out is not None
     assert "context" in out
-    assert "Тебе сейчас" in out["context"]
-    assert "воодушевлённо и уверенно" in out["context"]
+    assert out["context"].startswith('<styx-self-state version="1">')
+    assert '"source":"emotional_state:last"' in out["context"]
+    assert '"coordinates":{"valence":0.8' in out["context"]
+    assert '"branch_budget":"one_primary"' in out["context"]
+    assert "Тебе сейчас" not in out["context"]
 
 
 def test_pre_llm_call_skips_below_min_norm(styx_stack) -> None:
@@ -210,7 +212,6 @@ def test_full_pipeline_inject_through_pre_llm_call(styx_stack) -> None:
     import psycopg
 
     from styx.engine import pre_llm_inject
-    from styx.engine.pre_llm_channels.self_state import OCTANTS
 
     p, sid, agent = styx_stack
     p.sync_turn(
@@ -253,9 +254,7 @@ def test_full_pipeline_inject_through_pre_llm_call(styx_stack) -> None:
         )
 
     assert "context" in out
-    assert out["context"].startswith("Тебе сейчас")
-    # Phrase должна быть из словаря OCTANTS
-    phrase_found = any(p in out["context"] for p in OCTANTS.values())
-    assert phrase_found, (
-        f"phrase не из словаря OCTANTS: {out['context']!r}"
-    )
+    assert out["context"].startswith('<styx-self-state version="1">')
+    assert '"kind":"cognitive_posture"' in out["context"]
+    assert '"decision_policy"' in out["context"]
+    assert "Тебе сейчас" not in out["context"]

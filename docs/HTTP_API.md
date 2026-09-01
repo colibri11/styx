@@ -165,8 +165,11 @@ agent_id обновляет session_id и tools, не пересоздаёт sta
 
 ### `POST /sync_turn`
 
-Запись turn'а — INSERT memory, embedding-after-commit, sentiment hot-path,
-importance enqueue, classifier enqueue.
+Запись turn'а — INSERT memory с текущим affective provenance,
+embedding-after-commit, importance enqueue, classifier enqueue. Причинный
+переход finalized turn принимается отдельным `/affect/observe_turn` до этого
+вызова. Legacy peer-only sentiment работает только при отключённом causal
+observer.
 
 **Defect-fix B — split больших реплик:** реплика (user/assistant)
 длиннее `STYX_MESSAGE_SPLIT_PART_CHARS` (default 2000) режется на N
@@ -187,9 +190,14 @@ embed ограничен `STYX_MESSAGE_SPLIT_INLINE_EMBED_CAP` (default 4) —
   "session_id": "20260504_103000_abc123",
   "user_content": "Привет",
   "assistant_content": "Привет, что нового?",
+  "idempotency_key": "hermes:physical-session:turn-9",
   "ts": "2026-05-04T10:00:00Z"
 }
 ```
+
+`idempotency_key` необязателен для legacy callers, но host adapters передают
+устойчивый идентификатор физического turn. Повтор после неоднозначного сетевого
+исхода, включая повтор с изменившимся content/split, не создаёт вторую пару.
 
 **Response 200:**
 ```json
@@ -226,7 +234,16 @@ On-demand recall — embed query, search_similar, format. Используетс
       "content": "...",
       "score": 0.45,
       "role": "user",
-      "created_at": "2026-05-01T10:00:00Z"
+      "created_at": "2026-05-01T10:00:00Z",
+      "affective_provenance": {
+        "state_id": 42,
+        "context_at": "2026-05-01T10:00:00Z",
+        "vad": {"valence": -0.1, "arousal": 0.3, "dominance": 0.4},
+        "confidence": 0.8,
+        "causal_refs": [
+          {"evidence_id": 17, "source_ref": "turn-17", "cause_class": "semantic_alignment", "cause_subject": "response_correctness", "status_at_capture": "active", "current_status": "resolved", "current_active": false, "intensity": 0.7, "confidence": 0.8, "observed_at": "2026-05-01T09:59:00Z", "lease_expires_at": "2026-05-01T10:14:00Z"}
+        ]
+      }
     }
   ],
   "queried_count": 12,
@@ -234,6 +251,11 @@ On-demand recall — embed query, search_similar, format. Используетс
   "elapsed_ms": 31
 }
 ```
+
+`affective_provenance` — optional снимок координат в момент рождения memory;
+для legacy rows он `null`. `causal_refs` ограничены восемью controlled
+записями, явно разделяют статус при capture и текущий lifecycle и не содержат
+`cause_summary`, posture или команды стиля.
 
 ### `POST /context/build`
 
@@ -280,15 +302,60 @@ message. Сейчас единственный канал — self_state (вол
 **Response 200:**
 ```json
 {
-  "context": "Тебе сейчас воодушевлённо и уверенно."
+  "context": "<styx-self-state version=\"1\">{\"kind\":\"cognitive_posture\",\"version\":1,\"causal_coordinates\":{...},\"decision_policy\":{\"attention_order\":[\"task_goal\",\"explicit_constraints\",\"semantic_alignment\"],\"verification_depth\":\"high\",\"branch_budget\":\"one_primary\",\"ambiguity_handling\":\"track\",\"closure_threshold\":\"high\",\"constraint_priority\":\"explicit_first\"}}</styx-self-state>"
 }
 ```
 
-или `{"context": null}` если каналы вернули None.
+или `{"context": null}` если нет достаточно сильного residue и текущих
+явных сигналов. Payload не содержит названия эмоции и не является командой
+по тону; он распределяет внимание и глубину проверки до генерации текста.
+
+### `POST /affect/observe_turn`
+
+Idempotent fail-open observation завершённого когнитивного акта. Hermes
+вызывает endpoint из `post_llm_call`, OpenClaw — из terminal `agent_end`, до
+записи реплик в дневник. Следующий OpenClaw pre-prompt ограниченно ждёт
+незавершённый terminal transition. Core отделяет stimulus от reaction и
+сохраняет immutable evidence плюс append-only transition. Последовательный
+повтор с тем же `idempotency_key` возвращает `duplicate=true` без повторного
+model-call; конкурентный evaluator может стартовать дважды, но UNIQUE и
+advisory-lock позволяют применить переход только один раз.
+
+**Request:**
+```json
+{
+  "agent_id": "agent_demo",
+  "idempotency_key": "host:session:turn",
+  "turn_id": "turn",
+  "session_id": "session",
+  "user_message": "Проверь, что механизм не подменён формулировкой",
+  "assistant_response": "Проверил причинный путь и исправил переход",
+  "conversation_history": [
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."}
+  ],
+  "tool_events": [
+    {"kind": "result", "tool_call_id": "call-1", "name": "tests", "content": "passed"}
+  ],
+  "model": "local-model",
+  "platform": "cli"
+}
+```
+
+History ограничена 24 сообщениями, tool events — 32; все строковые поля
+имеют schema bounds. Сырой turn в `emotional_events.metadata` не хранится.
+
+**Response 200:**
+```json
+{"accepted": true, "duplicate": false, "reason": null}
+```
+
+`accepted=false` с `reason=observation_failed|write_failed|affective_transition_disabled` не
+делает host turn ошибочным.
 
 ### `GET /agent_state?agent_id=agent_demo`
 
-Snapshot эмоционального состояния (instant, baseline, mood).
+Snapshot причинного состояния (legacy VAD ABI + evidence provenance).
 
 **Response 200:**
 ```json
@@ -296,11 +363,29 @@ Snapshot эмоционального состояния (instant, baseline, moo
   "agent_id": "agent_demo",
   "instant": {"valence": 0.2, "arousal": 0.5, "dominance": 0.1},
   "baseline": {"valence": 0.15, "arousal": 0.4, "dominance": 0.05},
-  "mood": null
+  "mood": null,
+  "instant_evidence": {
+    "state_id": 42,
+    "at": "2026-09-01T10:00:00Z",
+    "source": "turn_transition",
+    "parent_state_id": 41,
+    "event_id": 17,
+    "delta": {"valence": -0.04, "arousal": 0.12, "dominance": 0.09},
+    "intensity": 0.75,
+    "transition_confidence": 0.72,
+    "confidence": 0.8,
+    "causal_components": [{"evidence_id": 17, "cause_class": "semantic_alignment", "cause_subject": "response_correctness", "status_at_capture": "active", "current_status": "active", "current_active": true, "intensity": 0.75, "confidence": 0.72, "observed_at": "2026-09-01T10:00:00Z", "lease_expires_at": "2026-09-01T10:15:00Z"}],
+    "computation_version": "causal-turn-v1"
+  }
 }
 ```
 
-`mood` derivation отложен — поле зарезервировано.
+`mood` остаётся legacy-зарезервированным полем; отдельная mood-сущность не
+вычисляется. Старые клиенты могут игнорировать additive `instant_evidence`.
+`transition_confidence` относится только к последнему наблюдению;
+`confidence` — агрегированная достоверность всей текущей проекции.
+Причины типизированы и ограничены восемью наиболее значимыми; audit prose и
+`cognitive_posture` через observability API не возвращаются.
 
 ### `POST /memory_store`
 

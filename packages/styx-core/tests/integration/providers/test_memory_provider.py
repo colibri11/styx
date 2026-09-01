@@ -113,6 +113,46 @@ def test_sync_turn_writes_user_and_assistant(styx_env) -> None:
         p.shutdown()
 
 
+def test_sync_turn_idempotency_metadata_is_deterministic(styx_env) -> None:
+    p = StyxMemoryCore()
+    sid = str(uuid.uuid4())
+    p.initialize(session_id=sid, agent_identity="alpha")
+    try:
+        p.sync_turn(
+            "user", "assistant", session_id=sid,
+            idempotency_key="host:session:turn-1",
+        )
+        rows = p.queries.recent_messages(
+            limit=10, session_id=uuid.UUID(sid), reassemble_groups=False,
+        )
+        assert {
+            (
+                row.metadata["styx_sync_turn_key"],
+                row.metadata["styx_sync_turn_role"],
+                row.metadata["styx_sync_turn_part"],
+            )
+            for row in rows
+        } == {
+            ("host:session:turn-1", "user", 0),
+            ("host:session:turn-1", "assistant", 0),
+        }
+        # A durable retry is a no-op even if a buggy caller changes content;
+        # it cannot append extra split parts under the old identity.
+        p.sync_turn(
+            "different user", "different assistant", session_id=sid,
+            idempotency_key="host:session:turn-1",
+        )
+        rows_after_retry = p.queries.recent_messages(
+            limit=10, session_id=uuid.UUID(sid), reassemble_groups=False,
+        )
+        assert len(rows_after_retry) == 2
+        assert {row.content for row in rows_after_retry} == {"user", "assistant"}
+        with pytest.raises(ValueError, match="idempotency_key"):
+            p.sync_turn("user", "assistant", idempotency_key="   ")
+    finally:
+        p.shutdown()
+
+
 def test_sync_turn_default_session_id(styx_env) -> None:
     p = StyxMemoryCore()
     sid = str(uuid.uuid4())

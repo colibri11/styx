@@ -42,6 +42,11 @@ class StyxConfig:
     # Sentiment hot-path (волна 7d). Inline в sync_turn после embed.
     sentiment_enabled: bool = True
     sentiment_timeout_s: float = 0.8
+    # Причинное наблюдение completed turn (после post_llm_call). В отличие
+    # от legacy sentiment не зеркалит peer tone в состояние: учитывает
+    # фактический ответ/решения и сохраняет stimulus отдельно от reaction.
+    affective_transition_enabled: bool = True
+    affective_transition_timeout_s: float = 8.0
     # Baseline tick (волна 7d). EMA α=0.98 над окном 60min, периодически.
     emotional_tick_interval_s: float = 60.0
     # Recall classifier (волна 7c). Минимальная длина assistant-ответа,
@@ -218,8 +223,8 @@ class StyxConfig:
     batch_trigger_interval_s: int = 1200  # 20 мин
     batch_period_gap_s: int = 21600  # 6 ч
     # Batch sentiment piggyback (волна 14, memorybox 26b). Тот же
-    # LLM-вызов возвращает интегральный VAD; handler пишет в
-    # emotional_state с source='sentiment:batch' и K_BATCH=0.4.
+    # LLM-вызов возвращает интегральный peer VAD; causal emotion wave
+    # сохраняет его как evidence и не назначает состоянием агента.
     batch_sentiment_enabled: bool = True
     # Hot-tier (волна 11). In-process store memory items, прошедших
     # через recall_full недавно (TTL). Используется как supplement
@@ -412,6 +417,8 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "sweep_lock_timeout_s",
         "sentiment_enabled",
         "sentiment_timeout_s",
+        "affective_transition_enabled",
+        "affective_transition_timeout_s",
         "emotional_tick_interval_s",
         "classifier_min_assistant_length",
         "classifier_max_recall_events_per_turn",
@@ -558,6 +565,12 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         sweep_lock_timeout_s=float(merged.get("sweep_lock_timeout_s", 1800.0)),
         sentiment_enabled=bool(merged.get("sentiment_enabled", True)),
         sentiment_timeout_s=float(merged.get("sentiment_timeout_s", 0.8)),
+        affective_transition_enabled=bool(
+            merged.get("affective_transition_enabled", True)
+        ),
+        affective_transition_timeout_s=float(
+            merged.get("affective_transition_timeout_s", 8.0)
+        ),
         emotional_tick_interval_s=float(
             merged.get("emotional_tick_interval_s", 60.0)
         ),
@@ -843,6 +856,17 @@ def _read_env() -> dict[str, Any]:
         "sentiment_timeout_s": (
             float(os.environ["STYX_SENTIMENT_TIMEOUT_S"])
             if os.environ.get("STYX_SENTIMENT_TIMEOUT_S")
+            else None
+        ),
+        "affective_transition_enabled": (
+            os.environ["STYX_AFFECTIVE_TRANSITION_ENABLED"].lower()
+            not in ("0", "false", "no")
+            if os.environ.get("STYX_AFFECTIVE_TRANSITION_ENABLED") is not None
+            else None
+        ),
+        "affective_transition_timeout_s": (
+            float(os.environ["STYX_AFFECTIVE_TRANSITION_TIMEOUT_S"])
+            if os.environ.get("STYX_AFFECTIVE_TRANSITION_TIMEOUT_S")
             else None
         ),
         "emotional_tick_interval_s": (

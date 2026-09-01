@@ -74,17 +74,19 @@
 |---|---|---|
 | `STYX_PRE_LLM_INJECT_ENABLED` | on | `=0` отключает hook целиком. |
 | `STYX_SELF_STATE_ENABLED` | on | `=0` отключает только self_state channel. |
-| `STYX_SELF_STATE_MIN_NORM` | `0.2` | VAD с нормой ниже считается слишком нейтральным — skip. |
-| `STYX_SELF_STATE_MAX_AGE_S` | `900.0` | Максимальный возраст `emotional_state` записи для inject'а — safety net на случай мёртвого `styx-worker`, не «окно свежести реакции» (см. волна 35 D3). |
+| `STYX_SELF_STATE_MIN_NORM` | `0.2` | Норма causal residue, ниже которой унаследованное состояние не создаёт cognitive posture само по себе. |
+| `STYX_SELF_STATE_MAX_AGE_S` | `900.0` | Максимальный возраст активного residue для inject'а — safety net на случай мёртвого `styx-worker`; текущие явные сигналы хода всё равно учитываются. |
 
-## Sentiment / emotional baseline
+## Causal affect / emotional baseline
 
 | Var | Default | Назначение |
 |---|---|---|
-| `STYX_SENTIMENT_ENABLED` | on | `=0` отключает hot-path VAD-extraction в `sync_turn`. |
-| `STYX_SENTIMENT_TIMEOUT_S` | `0.8` | Timeout `extract_vad` в hot-path. |
+| `STYX_AFFECTIVE_TRANSITION_ENABLED` | on | `=0` отключает причинное наблюдение finalized turn. При выключении доступен legacy sentiment rollback path. |
+| `STYX_AFFECTIVE_TRANSITION_TIMEOUT_S` | `8.0` | Жёсткий timeout одного fail-open наблюдения завершённого хода. |
+| `STYX_SENTIMENT_ENABLED` | on | Используется только legacy rollback path, когда causal transition выключен. |
+| `STYX_SENTIMENT_TIMEOUT_S` | `0.8` | Timeout legacy peer-only extractor. |
 | `STYX_EMOTIONAL_TICK_INTERVAL_S` | `60` | Интервал periodic-task `emotional_tick` (decay + baseline EMA). |
-| `STYX_BATCH_SENTIMENT_ENABLED` | on | `=0` отключает apply batch sentiment в `dialogue_batch_consolidation`. |
+| `STYX_BATCH_SENTIMENT_ENABLED` | on | `=0` отключает сохранение batch peer-signal evidence; signal никогда не применяется к agent state напрямую. |
 
 ## Classifier (post-hoc usage)
 

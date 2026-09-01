@@ -11,8 +11,9 @@ from typing import Any
 import psycopg
 import pytest
 
-from styx.emotional.sentiment_batch import K_BATCH, SentimentBatchMetrics
+from styx.emotional.sentiment_batch import SentimentBatchMetrics
 from styx.emotional.state import EmotionalVector
+from styx.embedding import FakeEmbeddingClient
 from styx.llm import LLMRateLimiter, OllamaChatClient, OllamaTerminalError
 from styx.workers.handlers.dialogue_batch_consolidation import (
     DIALOGUE_BATCH_TASK_TYPE,
@@ -358,9 +359,10 @@ def rate_limit() -> LLMRateLimiter:
     return LLMRateLimiter(capacity=4, refill_per_second=10.0)
 
 
-def _ctx(conn, llm, rate_limit) -> HandlerContext:
+def _ctx(conn, llm, rate_limit, embedder=None) -> HandlerContext:
     return HandlerContext(
-        conn=conn, llm=llm, rate_limit=rate_limit, logger=logging.getLogger("test"),
+        conn=conn, llm=llm, rate_limit=rate_limit,
+        logger=logging.getLogger("test"), embedder=embedder,
     )
 
 
@@ -449,6 +451,89 @@ def test_handler_happy_path_creates_memory(db, rate_limit) -> None:
     assert row[3]["kind"] == "dialogue_message"
 
 
+@pytest.mark.parametrize(
+    ("summary", "use_routing"),
+    [
+        ("Короткая производная память.", False),
+        (("Длинная производная память с важным решением. " * 80), True),
+    ],
+)
+def test_handler_short_and_routed_tail_inherit_source_affect_not_worker_state(
+    db,
+    rate_limit,
+    summary: str,
+    use_routing: bool,
+) -> None:
+    agent = f"batch-source-affect-{use_routing}"
+    base = _dt.datetime(2026, 5, 2, 12, 0, tzinfo=_dt.timezone.utc)
+    _insert_dialogue(db, agent, [
+        ("user", "проверь решение", base),
+        ("assistant", "решение проверено", base + _dt.timedelta(seconds=10)),
+    ])
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, at, valence, arousal, dominance, confidence, "
+            " causal_context, computation_version) "
+            "VALUES (%s, %s, 0.35, 0.2, 0.1, 0.8, "
+            " '[{\"evidence_id\": 5, \"source_ref\": \"source-turn\", "
+            "\"cause_class\": \"goal_progress\", \"status\": \"active\"}]'::jsonb, "
+            " 'source') RETURNING id",
+            (agent, base + _dt.timedelta(seconds=9)),
+        )
+        source_state_id = cur.fetchone()[0]
+        cur.execute(
+            "UPDATE memories SET emotional_context_valence=0.35, "
+            " emotional_context_arousal=0.2, emotional_context_dominance=0.1, "
+            " emotional_context_state_id=%s, emotional_context_at=%s, "
+            " emotional_context_confidence=0.8, "
+            " emotional_context_causes='[{\"evidence_id\": 5, "
+            "\"source_ref\": \"source-turn\", \"cause_class\": "
+            "\"goal_progress\", \"status\": \"active\"}]'::jsonb "
+            "WHERE agent_id=%s AND role='assistant'",
+            (source_state_id, base + _dt.timedelta(seconds=9), agent),
+        )
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, at, valence, arousal, dominance, confidence, "
+            " computation_version) VALUES (%s, %s, -0.95, 0.9, 0.9, 1.0, "
+            " 'worker')",
+            (agent, base + _dt.timedelta(minutes=1)),
+        )
+    db.commit()
+
+    handler = create_dialogue_batch_handler()
+    llm = _ScriptedChat({
+        "skip": False,
+        "skip_reason": None,
+        "summary": summary,
+        "archive_hints": [],
+        "vad": None,
+    })
+    task = _make_task({
+        "agent_id": agent,
+        "window_from": _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc).isoformat(),
+        "window_to": (base + _dt.timedelta(minutes=2)).isoformat(),
+        "with_overlap": False,
+    })
+    embedder = FakeEmbeddingClient() if use_routing else None
+    handler(task, _ctx(db, llm, rate_limit, embedder=embedder))
+    db.commit()
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT emotional_context_state_id, emotional_context_valence, "
+            " emotional_context_confidence FROM memories "
+            "WHERE agent_id=%s AND kind_src='dialogue_batch_consolidation'",
+            (agent,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == source_state_id
+    assert float(row[1]) == pytest.approx(0.35)
+    assert float(row[2]) == pytest.approx(0.8)
+
+
 def test_handler_llm_skip_no_memory(db, rate_limit) -> None:
     agent = "alpha-skip"
     base = _dt.datetime(2026, 5, 2, 12, 0, tzinfo=_dt.timezone.utc)
@@ -502,8 +587,8 @@ def test_handler_schema_mismatch_terminal(db, rate_limit) -> None:
         handler(task, _ctx(db, llm, rate_limit))
 
 
-def test_handler_vad_apply_first_in_transaction(db, rate_limit) -> None:
-    """VAD apply ПЕРВЫМ — emotional_state записан до INSERT memory."""
+def test_handler_vad_captured_as_peer_evidence_not_agent_state(db, rate_limit) -> None:
+    """Batch VAD сохраняется как peer evidence и не назначается state."""
     agent = "alpha-vad"
     base = _dt.datetime(2026, 5, 2, 12, 0, tzinfo=_dt.timezone.utc)
     _insert_dialogue(db, agent, [
@@ -528,21 +613,28 @@ def test_handler_vad_apply_first_in_transaction(db, rate_limit) -> None:
     handler(task, _ctx(db, llm, rate_limit))
     db.commit()
 
-    # emotional_state has sentiment:batch entry
+    # Есть evidence исходного peer signal, но нет state transition.
     with db.cursor() as cur:
         cur.execute(
-            "SELECT valence, arousal, dominance, source, metadata "
-            "FROM emotional_state WHERE agent_id = %s "
-            "AND source = 'sentiment:batch'",
+            "SELECT valence, arousal, dominance, source_kind, confidence, metadata, occurred_at "
+            "FROM emotional_events WHERE agent_id = %s "
+            "AND source_kind = 'peer_signal:batch'",
             (agent,),
         )
         row = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM emotional_state WHERE agent_id = %s",
+            (agent,),
+        )
+        states = cur.fetchone()[0]
     assert row is not None
-    # K_BATCH=0.4 scale
-    assert row[0] == pytest.approx(-0.6 * K_BATCH, abs=0.01)
-    assert row[3] == "sentiment:batch"
-    assert row[4]["chunks"] == 1
-    assert row[4]["vad_samples"] == 1
+    assert tuple(float(v) for v in row[:3]) == pytest.approx((-0.6, 0.4, -0.3))
+    assert row[3] == "peer_signal:batch"
+    assert row[4] is None  # batch model не отдаёт calibrated confidence
+    assert row[5]["chunks"] == 1
+    assert row[5]["vad_samples"] == 1
+    assert row[6] == base + _dt.timedelta(seconds=30)
+    assert states == 0
     assert metrics.snapshot()["applied"] == 1
 
 
@@ -577,10 +669,10 @@ def test_handler_vad_disabled_no_apply(db, rate_limit) -> None:
             (agent,),
         )
         assert cur.fetchone()[0] == 1
-        # emotional_state НЕ имеет sentiment:batch записи
+        # evidence/state отсутствуют при disabled.
         cur.execute(
-            "SELECT count(*) FROM emotional_state "
-            "WHERE agent_id = %s AND source = 'sentiment:batch'",
+            "SELECT count(*) FROM emotional_events "
+            "WHERE agent_id = %s AND source_kind = 'peer_signal:batch'",
             (agent,),
         )
         assert cur.fetchone()[0] == 0

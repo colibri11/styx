@@ -175,6 +175,7 @@ def route_long_content(
     size_bytes: int | None = None,
     visibility: str | None = None,
     document_metadata_extra: dict[str, Any] | None = None,
+    tail_emotional_source_ids: list[uuid.UUID] | None = None,
 ) -> RoutedWriteResult:
     """Route long content в documents + chunks + опц. tail-memory.
 
@@ -229,6 +230,10 @@ def route_long_content(
     - ``document_metadata_extra`` — дополнительные ключи в
       documents.metadata JSONB (page_count для PDF, sheet_names для
       XLSX, etc — output парсеров).
+    - ``tail_emotional_source_ids`` — source memories, от которых
+      производная tail-memory наследует affect snapshot. ``None`` сохраняет
+      обычную семантику synchronous write (текущее state); явный список,
+      включая пустой, запрещает подменять provenance состоянием worker'а.
 
     Raises:
     - ``ValueError`` — если chunker вернул 0 chunks (degenerate input).
@@ -352,6 +357,7 @@ def route_long_content(
         metadata=metadata or {},
         importance_provisional=importance_provisional,
         archive_ref=archive_ref,
+        emotional_source_ids=tail_emotional_source_ids,
     )
 
     return RoutedWriteResult(

@@ -1,9 +1,36 @@
 # styx — OpenClaw plugin (TypeScript)
 
 OpenClaw plugin под `~/.openclaw/plugins/styx/`. Подключает Styx-core
-(FastAPI HTTP API daemon) к OpenClaw gateway: hooks (`message:preprocessed`
-/ `message:sent` → `POST /sync_turn`), tools (`api.registerTool`),
-context engine (`api.registerContextEngine`).
+(FastAPI HTTP API daemon) к OpenClaw gateway: typed hooks
+(`before_prompt_build` + финальный `agent_end`), tools
+(`api.registerTool`), context engine (`api.registerContextEngine`).
+
+Требуется **OpenClaw >= 2026.5.3**. Плагин собирается и проверяется с
+OpenClaw 2026.5.7 из lock-файла. Начиная с этой линии OpenClaw стороннему
+плагину нужно явно разрешить чтение финального диалога:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "styx": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+Без `allowConversationAccess=true` сам OpenClaw блокирует `agent_end`:
+salient-контекст продолжит собираться, но финальный turn не попадёт в
+дневник и не станет причинным affect-событием. При обнаружении такой
+конфигурации Styx пишет actionable warning в лог gateway.
+
+Завершение `agent_end` связано с началом следующего turn через локальный
+per-agent/session barrier: affect фиксируется перед dialogue ingest, а
+`before_prompt_build` ждёт этот terminal work не более 10 секунд (настраивается
+`terminalDrainTimeoutMs`) и затем продолжает fail-open.
 
 См. дизайн в `.design/NEXT.md` (раздел «Следующая задача — OpenClaw
 plugin track») и будущий `.design/openclaw-plugin-v1.md`.
@@ -27,7 +54,8 @@ extensions/styx/
 ├── src/
 │   ├── index.ts           # definePluginEntry — entry point
 │   ├── client.ts          # HTTP клиент к styx-daemon (8788)
-│   ├── context-engine.ts  # bootstrap/ingest/assemble/compact/afterTurn/dispose
+│   ├── context-engine.ts  # bootstrap/ingest/assemble/compact/maintenance/dispose
+│   ├── hooks/agent-end.ts # finalized dialogue + affect observation
 │   └── tools/             # 16 tools (recall/store/search_archive/...)
 ├── skills/                # LLM runbook'и (мини-волна 26.6)
 │   ├── styx-capture/SKILL.md      # когда вызывать styx_store

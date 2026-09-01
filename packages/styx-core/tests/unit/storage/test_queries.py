@@ -97,6 +97,49 @@ def test_metadata_round_trip(conn: psycopg.Connection) -> None:
     assert msg.metadata == {"source": "telegram", "thread_id": 17}
 
 
+def test_insert_message_captures_current_affective_snapshot(
+    conn: psycopg.Connection,
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="affect-snapshot")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, valence, arousal, dominance, confidence, causal_context, "
+            " computation_version) VALUES "
+            "(%s, -0.2, 0.5, 0.6, 0.75, %s, 'test-causal-v1') RETURNING id, at",
+            (
+                "affect-snapshot",
+                psycopg.types.json.Jsonb([
+                    {
+                        "evidence_id": 7,
+                        "cause": "semantic mismatch",
+                        "cause_active": True,
+                        "confidence": 0.75,
+                    }
+                ]),
+            ),
+        )
+        state_id, state_at = cur.fetchone()
+    mid = q.insert_message(role="assistant", content="checked answer")
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT emotional_context_valence, emotional_context_arousal, "
+            "       emotional_context_dominance, emotional_context_state_id, "
+            "       emotional_context_at, emotional_context_confidence, "
+            "       emotional_context_causes "
+            "  FROM memories WHERE id = %s",
+            (mid,),
+        )
+        row = cur.fetchone()
+    assert tuple(float(v) for v in row[:3]) == pytest.approx((-0.2, 0.5, 0.6))
+    assert row[3] == state_id
+    assert row[4] == state_at
+    assert float(row[5]) == pytest.approx(0.75)
+    assert row[6][0]["cause"] == "semantic mismatch"
+
+
 def test_no_raw_sql_to_memories_outside_wrapper() -> None:
     """Guard: storage/queries.py — единственное место с SQL на memories.
 

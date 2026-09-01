@@ -313,6 +313,24 @@ def test_kind_src_and_role_forwarded() -> None:
     assert tail_args["role"] == "summary"
 
 
+def test_tail_affective_source_ids_forwarded() -> None:
+    queries = _StubQueries()
+    source_ids = [uuid.uuid4(), uuid.uuid4()]
+    route_long_content(
+        queries,  # type: ignore[arg-type]
+        _StubEmbedder(),
+        content=_LONG_CONTENT,
+        kind="episode",
+        kind_src="dialogue_batch_consolidation",
+        role="summary",
+        config=_config(),
+        source="insert_batch_memory",
+        tail_emotional_source_ids=source_ids,
+    )
+    assert queries.insert_memory_args is not None
+    assert queries.insert_memory_args["emotional_source_ids"] == source_ids
+
+
 def test_session_id_and_importance_forwarded() -> None:
     queries = _StubQueries()
     embedder = _StubEmbedder()

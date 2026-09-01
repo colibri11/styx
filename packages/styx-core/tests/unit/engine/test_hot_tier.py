@@ -9,7 +9,12 @@ import uuid
 import pytest
 
 from styx.engine import hot_tier
-from styx.storage.queries import MemoryHit
+from styx.emotional.state import EmotionalVector
+from styx.storage.queries import (
+    MemoryAffectiveCauseRef,
+    MemoryAffectiveProvenance,
+    MemoryHit,
+)
 from styx.turn_state import RecallSnapshot
 
 
@@ -104,6 +109,40 @@ def test_put_many_stores_entries() -> None:
     s = hot_tier.get_state("test-agent")
     assert s is not None
     assert set(s.entries.keys()) == {h1.id, h2.id}
+
+
+def test_hot_roundtrip_preserves_affective_provenance() -> None:
+    hot_tier.configure("agent-a")
+    provenance = MemoryAffectiveProvenance(
+        state_id=3,
+        context_at=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+        vad=EmotionalVector(0.2, 0.3, -0.1),
+        confidence=0.8,
+        causal_refs=(MemoryAffectiveCauseRef(
+            evidence_id=4,
+            source_ref="turn-4",
+            cause_class="goal_progress",
+            cause_subject="task_completion",
+            status_at_capture="active",
+            current_status=None,
+            current_active=None,
+            intensity=0.7,
+            confidence=0.8,
+            observed_at=None,
+            lease_expires_at=None,
+        ),),
+    )
+    from dataclasses import replace
+
+    hit = replace(
+        _hit(embedding=_unit([1.0, 0.0, 0.0])),
+        affective_provenance=provenance,
+    )
+    hot_tier.put_many("agent-a", [hit])
+    restored = hot_tier.scan_candidates(
+        "agent-a", hit.embedding or [], min_score=0.0,
+    )
+    assert restored[0].affective_provenance == provenance
 
 
 def test_put_skips_hit_without_embedding() -> None:

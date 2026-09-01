@@ -1,12 +1,14 @@
 """Hermes general-plugin entry для Styx.
 
-Styx в Hermes — memory-provider + transport + pre_llm hook. Память
+Styx в Hermes — memory-provider + transport + turn hooks. Память
 подмешивается каналами provider'а (``prefetch`` / ``system_prompt_block``
 per-turn + tools + ``on_pre_compress``), а компрессию всего окна ведёт
 сам Hermes своим штатным компрессором — Styx context engine'ом НЕ
 подменяется. Этот entry-point регистрирует только Transport (через
 ``register_with_hermes``) и pre_llm hook. Долгая память регистрируется
-отдельным shim'ом (см. ``styx_hermes.memory_plugin``); установка memory
+отдельным shim'ом (см. ``styx_hermes.memory_plugin``); ``post_llm_call``
+передаёт в core ограниченный finalized-turn для последующего
+affect processing. Установка memory
 shim'а в ``$HERMES_HOME/plugins/styx-memory/`` — ``styx-hermes-setup`` CLI.
 
 ВАЖНО: исходник этого модуля НЕ должен упоминать имя метода для
@@ -24,6 +26,7 @@ from styx_hermes import _hermes_path
 
 _hermes_path.ensure_on_path()
 
+from styx_hermes.engine.post_llm_hook import on_post_llm_call  # noqa: E402
 from styx_hermes.engine.pre_llm_hook import on_pre_llm_call  # noqa: E402
 from styx_hermes.engine.transport import register_with_hermes  # noqa: E402
 
@@ -31,7 +34,7 @@ log = logging.getLogger(__name__)
 
 
 def register(ctx) -> None:
-    """Hermes plugin entry-point — transport и pre_llm hook.
+    """Hermes plugin entry-point — transport и turn hooks.
 
     Context engine НЕ регистрируется: компрессию всего окна ведёт сам
     Hermes, Styx подмешивает только память (provider-каналами).
@@ -44,3 +47,5 @@ def register(ctx) -> None:
 
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     log.info("Styx pre_llm_call hook зарегистрирован")
+    ctx.register_hook("post_llm_call", on_post_llm_call)
+    log.info("Styx post_llm_call hook зарегистрирован")

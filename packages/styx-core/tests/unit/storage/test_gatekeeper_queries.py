@@ -261,6 +261,15 @@ def test_apply_merge_redirects_relations_and_deletes_new(
         kind="note", kind_src="subjective",
         embedding=_embed_with_offset(0.05),
     )
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE memories SET emotional_context_valence=-0.4, "
+            "emotional_context_arousal=0.6, emotional_context_dominance=0.2, "
+            "emotional_context_confidence=0.7, "
+            "emotional_context_causes='[{\"evidence_id\":99,\"status\":\"active\"}]'::jsonb "
+            "WHERE id=%s",
+            (new,),
+        )
     third = q.insert_memory(
         role="summary", content="third",
         kind="note", kind_src="subjective",
@@ -291,9 +300,13 @@ def test_apply_merge_redirects_relations_and_deletes_new(
         assert cur.fetchone() is None
         # existing получил новый content (т.к. длиннее)
         cur.execute(
-            "SELECT content FROM memories WHERE id = %s", (existing,),
+            "SELECT content,emotional_context_valence,emotional_context_causes "
+            "FROM memories WHERE id = %s", (existing,),
         )
-        assert cur.fetchone()[0] == "развёрнуто и подробнее"
+        merged = cur.fetchone()
+        assert merged[0] == "развёрнуто и подробнее"
+        assert float(merged[1]) == pytest.approx(-0.4)
+        assert merged[2][0]["evidence_id"] == 99
         # relations перенаправлены на existing
         cur.execute(
             "SELECT count(*) FROM relations "

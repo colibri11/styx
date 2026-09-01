@@ -31,6 +31,26 @@ mkdir -p "$CONFIG_DIR"
 STYX_DAEMON_URL_BOOT="${STYX_DAEMON_URL:-http://styx-daemon:8788}"
 STYX_HTTP_TOKEN_BOOT="${STYX_HTTP_TOKEN:-test-token-do-not-use-in-prod}"
 
+cleanup_legacy_meta_stamp() {
+  node -e '
+const fs = require("node:fs");
+const path = process.env.OPENCLAW_CONFIG_DIR
+  ? `${process.env.OPENCLAW_CONFIG_DIR}/openclaw.json`
+  : "/home/node/.openclaw/openclaw.json";
+if (!fs.existsSync(path)) process.exit(0);
+const config = JSON.parse(fs.readFileSync(path, "utf8"));
+if (config.meta && typeof config.meta === "object") {
+  delete config.meta.lastTouchedAt;
+  if (Object.keys(config.meta).length === 0) delete config.meta;
+}
+fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+'
+}
+
+# Сначала очистить stamp от предыдущего запуска, иначе новый config-set сам
+# откажется читать уже невалидный для текущей схемы файл.
+cleanup_legacy_meta_stamp
+
 echo "[openclaw-init] applying bootstrap config…"
 # Phase E choice: primary LLM = zai/glm-5.1.
 #
@@ -57,6 +77,8 @@ node /app/dist/index.js config set --batch-json "[
   {\"path\":\"agents.defaults.model.primary\",\"value\":\"zai/glm-5.1\"},
   {\"path\":\"plugins.slots.contextEngine\",\"value\":\"styx\"},
   {\"path\":\"plugins.entries.styx.enabled\",\"value\":true},
+  {\"path\":\"plugins.entries.styx.hooks.allowConversationAccess\",\"value\":true},
+  {\"path\":\"plugins.entries.styx.hooks.timeouts.agent_end\",\"value\":30000},
   {\"path\":\"plugins.entries.styx.config.daemonUrl\",\"value\":\"${STYX_DAEMON_URL_BOOT}\"},
   {\"path\":\"plugins.entries.styx.config.httpToken\",\"value\":\"${STYX_HTTP_TOKEN_BOOT}\"},
   {\"path\":\"plugins.entries.styx.config.agentMapping\",\"value\":{\"*\":\"auto\"}},
@@ -64,6 +86,12 @@ node /app/dist/index.js config set --batch-json "[
   {\"path\":\"plugins.entries.styx.config.logging\",\"value\":true},
   {\"path\":\"plugins.entries.styx.config.ownsCompaction\",\"value\":true}
 ]"
+
+# openclaw:latest на переходе конфиг-схем может записать служебный
+# meta.lastTouchedAt старым config-set writer'ом, а gateway уже валидирует
+# новой схемой и отказывается стартовать. Удаляем только этот неоперационный
+# stamp; содержательные meta-ключи, если они появятся, сохраняются.
+cleanup_legacy_meta_stamp
 
 echo "[openclaw-init] starting gateway on :18789"
 exec node /app/dist/index.js gateway --bind lan --port 18789

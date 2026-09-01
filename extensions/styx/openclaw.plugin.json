@@ -2,7 +2,7 @@
   "id": "styx",
   "name": "Styx",
   "description": "Locus — динамический оркестратор контекстного окна на PostgreSQL+pgvector. ContextEngine + structural memory + knowledge graph поверх styx-core HTTP daemon.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "context-engine",
   "activation": {
     "onStartup": true
@@ -59,6 +59,12 @@
       "ownsCompaction": {
         "type": "boolean",
         "description": "Default true; false — Styx делегирует compaction OpenClaw legacy (для отладки)."
+      },
+      "terminalDrainTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 30000,
+        "description": "Максимальное ожидание завершения agent_end перед сборкой следующего prompt (default: 10000)."
       }
     }
   },
@@ -80,6 +86,10 @@
     "ownsCompaction": {
       "label": "Owns compaction",
       "help": "Advanced: leave on. Off — Styx делегирует compaction OpenClaw legacy (для отладки)."
+    },
+    "terminalDrainTimeoutMs": {
+      "label": "Terminal drain timeout (ms)",
+      "help": "Bounded causal hand-off from the previous agent_end to the next prompt build."
     }
   }
 }

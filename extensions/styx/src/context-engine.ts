@@ -104,9 +104,8 @@ function extractMessages(params: LifecycleParams): StyxMessage[] {
  * не пишем (это решит будущая волна на multimodal recall). Если ничего
  * текстового не нашли — возвращаем "".
  *
- * Без этого фикса ContextEngine.afterTurn слал `String([object Object])`
- * в /context/ingest_batch, и в memories.content попадало `[object Object]`
- * (Phase E e2e наблюдение).
+ * Без этого преобразования lifecycle ingest слал `String([object Object])`
+ * в core, и в memories.content попадало `[object Object]`.
  */
 function extractMessageContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -423,56 +422,12 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       if (agentId === null) {
         return;
       }
+      // Maintenance only. Final dialogue capture and affect observation live
+      // in the typed agent_end hook, whose finality contract holds across
+      // multi-pass tool loops.
       const rawMessages = Array.isArray(opts["messages"])
         ? (opts["messages"] as Array<Record<string, unknown>>)
         : [];
-
-      // OpenClaw runtime в `agent --local` (Phase E observation) НЕ зовёт
-      // engine.ingest()/ingestBatch() в lifecycle. Только bootstrap →
-      // assemble → afterTurn → dispose. Чтобы реально записать turn в
-      // память (это основное требование Phase E «write+recall работает»),
-      // выполняем ingest именно здесь.
-      //
-      // afterTurn получает полный transcript turn'а (включая историю).
-      // Чтобы не плодить дубликаты, шлём только хвостовой фрагмент:
-      // последние user+assistant сообщения. Если turn содержит больше
-      // одной user-реплики (multi-step с tools), берём всё начиная с
-      // последнего user-message — это и есть «новые» messages турна.
-      //
-      // Альтернатива (full transcript ingest_batch + content_hash dedup
-      // на стороне core) сейчас не работает: /context/ingest_batch не
-      // имеет content_hash idempotency (см. routes/context.py::sync_turn).
-      const tail = extractLastTurnMessages(rawMessages);
-      if (tail.length > 0) {
-        // Свернуть до StyxMessage shape (role+content) — core
-        // /context/ingest_batch принимает только это; tool_calls/name
-        // и прочие OpenClaw-специфичные поля игнорируются на core
-        // (model_config extra=ignore).
-        let styxTail: StyxMessage[] = tail.map((m) => ({
-          role: asString(m["role"], "user"),
-          // extractMessageContent — handle multimodal AgentMessage shape
-          // (content: string | Array<{type:'text', text:'...'}>) — без
-          // него получим '[object Object]' в memories.
-          content: extractMessageContent(m["content"]),
-        }));
-        // Defect-fix A: документы-вложения turn'а → documents-канал.
-        styxTail = (await interceptDocumentAttachments(
-          styxTail as Array<Record<string, unknown>>,
-          agentId,
-          client,
-          logger,
-        )) as StyxMessage[];
-        try {
-          await client.contextIngestBatch({
-            agent_id: agentId,
-            session_id: sessionId || null,
-            messages: styxTail,
-          });
-        } catch (err) {
-          logger.warn?.(`[styx] after_turn ingest_batch failed: ${fmtErr(err)}`);
-        }
-      }
-
       try {
         await client.contextAfterTurn({
           agent_id: agentId,
@@ -495,52 +450,6 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       bootstrapped.clear();
     },
   };
-}
-
-/**
- * Извлекает «свежие» messages последнего turn'а из transcript'а.
- *
- * Стратегия: ищем индекс последнего user-message в списке (с конца) и
- * возвращаем хвост [user, ...assistant/tool/...] от него. Это покрывает
- * типовой случай OpenClaw turn'а:
- *   single-step: [..., user, assistant] → [user, assistant]
- *   multi-step (tools): [..., user, assistant(tool_call), tool, assistant]
- *                       → [user, assistant, tool, assistant]
- *
- * Если user-сообщений нет вовсе (системный init turn), возвращаем
- * только последний assistant message (если есть) — он представляет
- * «выход» turn'а. Если нет ни user ни assistant — пустой массив.
- *
- * Для записи в memories через /context/ingest_batch ядро (sync_turn)
- * фильтрует role∈{user,assistant} само, поэтому system/tool messages
- * проигнорируются на стороне core безопасно.
- */
-function extractLastTurnMessages(
-  rawMessages: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  if (rawMessages.length === 0) return [];
-
-  let lastUserIdx = -1;
-  for (let i = rawMessages.length - 1; i >= 0; i--) {
-    const role = asString(rawMessages[i]?.["role"]);
-    if (role === "user") {
-      lastUserIdx = i;
-      break;
-    }
-  }
-
-  if (lastUserIdx >= 0) {
-    return rawMessages.slice(lastUserIdx);
-  }
-
-  // Нет user в transcript'е — fallback на последний assistant.
-  for (let i = rawMessages.length - 1; i >= 0; i--) {
-    const role = asString(rawMessages[i]?.["role"]);
-    if (role === "assistant") {
-      return [rawMessages[i]!];
-    }
-  }
-  return [];
 }
 
 function roughTokenEstimate(messages: StyxMessage[]): number {

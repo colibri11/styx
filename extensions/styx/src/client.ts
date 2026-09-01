@@ -46,6 +46,11 @@ export type StyxClientOptions = {
   fetchImpl?: typeof fetch;
 };
 
+export type StyxRequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
 export type StyxMessage = {
   role: string;
   content?: string;
@@ -98,6 +103,7 @@ export type ContextIngestBatchRequest = {
   agent_id: string;
   session_id?: string | null;
   messages: StyxMessage[];
+  idempotency_key?: string | null;
 };
 
 export type ContextIngestBatchResponse = {
@@ -156,6 +162,34 @@ export type ContextAfterTurnResponse = {
   ok: boolean;
 };
 
+export type AffectObserveTurnRequest = {
+  agent_id: string;
+  idempotency_key: string;
+  turn_id: string;
+  session_id?: string | null;
+  user_message: string;
+  assistant_response: string;
+  conversation_history: Array<{
+    role: "system" | "user" | "assistant";
+    content: string;
+    name?: string | null;
+  }>;
+  tool_events: Array<{
+    kind: "call" | "result";
+    tool_call_id: string;
+    name: string;
+    content: string;
+  }>;
+  model?: string | null;
+  platform?: string | null;
+};
+
+export type AffectObserveTurnResponse = {
+  accepted: boolean;
+  duplicate: boolean;
+  reason?: string | null;
+};
+
 // ── memory_store (волна 17) ──────────────────────────────────────────────
 
 export type MemoryStoreRequest = {
@@ -194,6 +228,25 @@ export type RecallMemory = {
   score: number;
   role: string;
   created_at?: string | null;
+  affective_provenance?: {
+    state_id?: number | null;
+    context_at?: string | null;
+    vad: { valence: number; arousal: number; dominance: number };
+    confidence?: number | null;
+    causal_refs: Array<{
+      evidence_id?: number | null;
+      source_ref?: string | null;
+      cause_class: string;
+      cause_subject: string;
+      status_at_capture: string;
+      current_status?: string | null;
+      current_active?: boolean | null;
+      intensity?: number | null;
+      confidence?: number | null;
+      observed_at?: string | null;
+      lease_expires_at?: string | null;
+    }>;
+  } | null;
 };
 
 export type RecallResponse = {
@@ -585,12 +638,14 @@ export type StyxClient = {
   // context lifecycle (Phase B/C)
   contextBootstrap: (
     body: ContextBootstrapRequest,
+    options?: StyxRequestOptions,
   ) => Promise<ContextBootstrapResponse>;
   contextIngest: (
     body: ContextIngestRequest,
   ) => Promise<ContextIngestResponse>;
   contextIngestBatch: (
     body: ContextIngestBatchRequest,
+    options?: StyxRequestOptions,
   ) => Promise<ContextIngestBatchResponse>;
   contextDispose: (
     body: ContextDisposeRequest,
@@ -604,6 +659,10 @@ export type StyxClient = {
   contextAfterTurn: (
     body: ContextAfterTurnRequest,
   ) => Promise<ContextAfterTurnResponse>;
+  affectObserveTurn: (
+    body: AffectObserveTurnRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<AffectObserveTurnResponse>;
   // tools (Phase D)
   memoryStore: (body: MemoryStoreRequest) => Promise<MemoryStoreResponse>;
   recall: (body: RecallRequest) => Promise<RecallResponse>;
@@ -616,6 +675,7 @@ export type StyxClient = {
   ) => Promise<IngestExperienceResponse>;
   ingestDocument: (
     body: IngestDocumentRequest,
+    options?: StyxRequestOptions,
   ) => Promise<IngestDocumentResponse>;
   dialogueSave: (body: DialogueSaveRequest) => Promise<DialogueSaveResponse>;
   dialogueSearch: (
@@ -688,10 +748,20 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     return headers;
   }
 
-  async function postCall<TResp>(path: string, body: unknown): Promise<TResp> {
+  async function postCall<TResp>(
+    path: string,
+    body: unknown,
+    requestOptions?: StyxRequestOptions,
+  ): Promise<TResp> {
     const url = `${baseUrl}${path}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(
+      () => controller.abort(),
+      Math.min(timeoutMs, requestOptions?.timeoutMs ?? timeoutMs),
+    );
+    const abortFromCaller = () => controller.abort();
+    requestOptions?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (requestOptions?.signal?.aborted) controller.abort();
 
     try {
       const resp = await fetchImpl(url, {
@@ -710,6 +780,7 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
       return text ? (JSON.parse(text) as TResp) : ({} as TResp);
     } finally {
       clearTimeout(timer);
+      requestOptions?.signal?.removeEventListener("abort", abortFromCaller);
     }
   }
 
@@ -750,20 +821,21 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     // agent lifecycle
     agentInitialize: (body) => postCall("/agent/initialize", body),
     // context lifecycle
-    contextBootstrap: (body) => postCall("/context/bootstrap", body),
+    contextBootstrap: (body, options) => postCall("/context/bootstrap", body, options),
     contextIngest: (body) => postCall("/context/ingest", body),
-    contextIngestBatch: (body) => postCall("/context/ingest_batch", body),
+    contextIngestBatch: (body, options) => postCall("/context/ingest_batch", body, options),
     contextDispose: (body) => postCall("/context/dispose", body),
     contextAssemble: (body) => postCall("/context/assemble", body),
     contextCompact: (body) => postCall("/context/compact", body),
     contextAfterTurn: (body) => postCall("/context/after_turn", body),
+    affectObserveTurn: (body, options) => postCall("/affect/observe_turn", body, options),
     // tools
     memoryStore: (body) => postCall("/memory_store", body),
     recall: (body) => postCall("/recall", body),
     searchArchive: (body) => postCall("/search_archive", body),
     reinterpret: (body) => postCall("/reinterpret", body),
     ingestExperience: (body) => postCall("/ingest_experience", body),
-    ingestDocument: (body) => postCall("/ingest_document", body),
+    ingestDocument: (body, options) => postCall("/ingest_document", body, options),
     dialogueSave: (body) => postCall("/dialogue/save", body),
     dialogueSearch: (body) => postCall("/dialogue/search", body),
     dialogueRecent: (body) => postCall("/dialogue/recent", body),

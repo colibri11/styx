@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import math
+import re
 import threading
 import time
 import uuid
@@ -41,9 +43,16 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from styx.engine.hot_tier import HotEntry
+from styx.emotional.state import EmotionalVector
 from styx.observability.logging import log_event
+from styx.storage.queries import (
+    MemoryAffectiveCauseRef,
+    MemoryAffectiveProvenance,
+)
 
 log = logging.getLogger(__name__)
+
+_CAUSAL_SOURCE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 
 PAYLOAD_VERSION = 1
@@ -276,6 +285,9 @@ def serialize(
                 "metadata": dict(e.metadata) if e.metadata else {},
                 "created_at": _serialize_dt(e.created_at),
                 "embedding": list(e.embedding),
+                "affective_provenance": _serialize_affective_provenance(
+                    e.affective_provenance
+                ),
                 "evicted_age_s": max(0.0, now_mono - e.evicted_at),
             }
             for e in hot_snap
@@ -398,6 +410,9 @@ def _deserialize_hot(raw: Any, embedding_dim: int) -> list[HotEntry] | None:
                     created_at=_deserialize_dt(item.get("created_at")),
                     embedding=embedding_floats,
                     evicted_at=evicted_at,
+                    affective_provenance=_deserialize_affective_provenance(
+                        item.get("affective_provenance")
+                    ),
                 )
             )
         except (TypeError, ValueError) as exc:
@@ -411,6 +426,141 @@ def _serialize_dt(value: Any) -> Any:
     if isinstance(value, _dt.datetime):
         return value.isoformat()
     return value
+
+
+def _serialize_affective_provenance(
+    value: MemoryAffectiveProvenance | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "state_id": value.state_id,
+        "context_at": _serialize_dt(value.context_at),
+        "vad": [value.vad.valence, value.vad.arousal, value.vad.dominance],
+        "confidence": value.confidence,
+        "causal_refs": [
+            {
+                "evidence_id": ref.evidence_id,
+                "source_ref": ref.source_ref,
+                "cause_class": ref.cause_class,
+                "cause_subject": ref.cause_subject,
+                "status_at_capture": ref.status_at_capture,
+                "current_status": ref.current_status,
+                "current_active": ref.current_active,
+                "intensity": ref.intensity,
+                "confidence": ref.confidence,
+                "observed_at": _serialize_dt(ref.observed_at),
+                "lease_expires_at": _serialize_dt(ref.lease_expires_at),
+            }
+            for ref in value.causal_refs[:8]
+        ],
+    }
+
+
+def _deserialize_affective_provenance(
+    raw: Any,
+) -> MemoryAffectiveProvenance | None:
+    """Read the optional v1 extension; old payloads remain valid."""
+    if not isinstance(raw, dict):
+        return None
+    vad_raw = raw.get("vad")
+    if not isinstance(vad_raw, list) or len(vad_raw) != 3:
+        return None
+    try:
+        vad = [float(axis) for axis in vad_raw]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(axis) and -1.0 <= axis <= 1.0 for axis in vad):
+        return None
+
+    state_id_raw = raw.get("state_id")
+    state_id = (
+        int(state_id_raw)
+        if isinstance(state_id_raw, int)
+        and not isinstance(state_id_raw, bool)
+        and state_id_raw > 0
+        else None
+    )
+    confidence_raw = raw.get("confidence")
+    confidence: float | None = None
+    if confidence_raw is not None:
+        try:
+            candidate = float(confidence_raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(candidate) or not 0.0 <= candidate <= 1.0:
+            return None
+        confidence = candidate
+
+    allowed_classes = {
+        "semantic_alignment", "task_uncertainty", "constraint_pressure",
+        "execution_risk", "conflicting_signals", "goal_progress",
+        "discovery", "interpersonal_tension", "resolution", "unknown",
+    }
+    allowed_statuses = {
+        "active", "resolved", "superseded", "expired", "unknown",
+    }
+    allowed_subjects = {
+        "response_correctness", "task_completion", "constraint_compliance",
+        "tool_outcome", "relationship_alignment", "uncertainty_resolution",
+        "external_event", "unknown",
+    }
+    refs: list[MemoryAffectiveCauseRef] = []
+    refs_raw = raw.get("causal_refs")
+    if isinstance(refs_raw, list):
+        for item in refs_raw[:8]:
+            if not isinstance(item, dict):
+                continue
+            evidence_raw = item.get("evidence_id")
+            evidence_id = (
+                int(evidence_raw)
+                if isinstance(evidence_raw, int)
+                and not isinstance(evidence_raw, bool)
+                and evidence_raw > 0
+                else None
+            )
+            source_raw = item.get("source_ref")
+            source_ref = (
+                source_raw
+                if isinstance(source_raw, str)
+                and _CAUSAL_SOURCE_REF_RE.fullmatch(source_raw)
+                else None
+            )
+            if evidence_id is None and source_ref is None:
+                continue
+            cause_class_raw = item.get("cause_class")
+            status_raw = item.get("status_at_capture", item.get("status"))
+            current_status_raw = item.get("current_status")
+            subject_raw = item.get("cause_subject")
+            def _unit(value: Any) -> float | None:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) and 0.0 <= parsed <= 1.0 else None
+            refs.append(MemoryAffectiveCauseRef(
+                evidence_id=evidence_id,
+                source_ref=source_ref,
+                cause_class=(
+                    cause_class_raw
+                    if cause_class_raw in allowed_classes else "unknown"
+                ),
+                cause_subject=(subject_raw if subject_raw in allowed_subjects else "unknown"),
+                status_at_capture=(status_raw if status_raw in allowed_statuses else "unknown"),
+                current_status=(current_status_raw if current_status_raw in allowed_statuses else None),
+                current_active=(item.get("current_active") if isinstance(item.get("current_active"), bool) else None),
+                intensity=_unit(item.get("intensity")),
+                confidence=_unit(item.get("confidence")),
+                observed_at=_deserialize_dt(item.get("observed_at")),
+                lease_expires_at=_deserialize_dt(item.get("lease_expires_at")),
+            ))
+
+    return MemoryAffectiveProvenance(
+        state_id=state_id,
+        context_at=_deserialize_dt(raw.get("context_at")),
+        vad=EmotionalVector(*vad),
+        confidence=confidence,
+        causal_refs=tuple(refs),
+    )
 
 
 def _deserialize_dt(value: Any) -> Any:

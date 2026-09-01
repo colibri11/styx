@@ -1,26 +1,28 @@
 {
   "name": "@styx/openclaw-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Styx Locus как OpenClaw context-engine plugin.",
   "openclaw": {
     "extensions": ["./dist/index.js"],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.5.3",
+      "minGatewayVersion": "2026.5.3"
     },
     "build": {
-      "openclawVersion": "2026.3.24-beta.2",
-      "pluginSdkVersion": "2026.3.24-beta.2"
+      "openclawVersion": "2026.5.7",
+      "pluginSdkVersion": "2026.5.7"
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run check:version && tsc",
+    "check:version": "node scripts/check-version.mjs",
+    "test": "npm run build && node scripts/test-agent-end.mjs",
     "build:watch": "tsc --watch"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.24-beta.2"
+    "openclaw": ">=2026.5.3"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

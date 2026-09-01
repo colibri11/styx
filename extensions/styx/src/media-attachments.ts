@@ -49,12 +49,15 @@ export type MediaAttachmentRef = {
  * Дубликаты одного mediaId схлопываются (один файл — один ingest),
  * но каждый маркер сохраняется для последующего вырезания из текста.
  */
-export function extractMediaAttachments(text: string): MediaAttachmentRef[] {
+export function extractMediaAttachments(
+  text: string,
+  limit = Number.POSITIVE_INFINITY,
+): MediaAttachmentRef[] {
   if (!text || text.indexOf("media://inbound/") === -1) return [];
   const out: MediaAttachmentRef[] = [];
   MEDIA_ATTACHMENT_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = MEDIA_ATTACHMENT_RE.exec(text)) !== null) {
+  while (out.length < limit && (m = MEDIA_ATTACHMENT_RE.exec(text)) !== null) {
     out.push({ marker: m[0], mediaId: m[1] });
   }
   return out;
@@ -100,6 +103,7 @@ export async function ingestMediaAttachment(
   agentId: string,
   client: StyxClient,
   logger: StyxLogger,
+  signal?: AbortSignal,
 ): Promise<IngestedAttachment | null> {
   let absPath: string;
   try {
@@ -118,7 +122,7 @@ export async function ingestMediaAttachment(
       visibility: null,
       metadata: { intake: "turn_attachment" },
       content_hash: null,
-    });
+    }, { signal });
     return {
       mediaId: ref.mediaId,
       documentId: resp.document_id,
@@ -152,15 +156,25 @@ export async function interceptDocumentAttachments(
   agentId: string,
   client: StyxClient,
   logger: StyxLogger,
+  limits?: {
+    maxMarkers?: number;
+    maxIngests?: number;
+    deadlineAt?: number;
+    signal?: AbortSignal;
+  },
 ): Promise<Array<Record<string, unknown>>> {
   const out: Array<Record<string, unknown>> = [];
+  let markersRemaining = Math.max(0, limits?.maxMarkers ?? Number.POSITIVE_INFINITY);
+  let ingestsRemaining = Math.max(0, limits?.maxIngests ?? Number.POSITIVE_INFINITY);
+  const globalResults = new Map<string, IngestedAttachment | null>();
   for (const msg of messages) {
     const content = msg["content"];
     if (typeof content !== "string") {
       out.push(msg);
       continue;
     }
-    const refs = extractMediaAttachments(content);
+    const refs = extractMediaAttachments(content, markersRemaining);
+    markersRemaining -= refs.length;
     if (refs.length === 0) {
       out.push(msg);
       continue;
@@ -168,15 +182,32 @@ export async function interceptDocumentAttachments(
     // Дедуп по mediaId — один файл ingest'им один раз. Результат
     // ingest'а складываем по mediaId: успешный → IngestedAttachment,
     // неуспешный → null. Это разделяет refs на два класса (см. ниже).
-    const seen = new Set<string>();
     const ingestByMediaId = new Map<string, IngestedAttachment | null>();
     const archived: IngestedAttachment[] = [];
+    const linkedInMessage = new Set<string>();
     for (const ref of refs) {
-      if (seen.has(ref.mediaId)) continue;
-      seen.add(ref.mediaId);
-      const res = await ingestMediaAttachment(ref, agentId, client, logger);
-      ingestByMediaId.set(ref.mediaId, res);
-      if (res !== null) archived.push(res);
+      let res = globalResults.get(ref.mediaId);
+      if (!globalResults.has(ref.mediaId)) {
+        if (ingestsRemaining <= 0) continue;
+        if (limits?.deadlineAt !== undefined && Date.now() >= limits.deadlineAt) {
+          ingestsRemaining = 0;
+          continue;
+        }
+        ingestsRemaining -= 1;
+        if (limits?.signal?.aborted) {
+          ingestsRemaining = 0;
+          continue;
+        }
+        res = await ingestMediaAttachment(
+          ref, agentId, client, logger, limits?.signal,
+        );
+        globalResults.set(ref.mediaId, res ?? null);
+      }
+      ingestByMediaId.set(ref.mediaId, res ?? null);
+      if (res != null && !linkedInMessage.has(ref.mediaId)) {
+        linkedInMessage.add(ref.mediaId);
+        archived.push(res);
+      }
     }
     // M1: стрипаем маркеры ТОЛЬКО для успешно заархивированных refs.
     // Маркер неудавшегося вложения (ingest вернул null — файл не

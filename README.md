@@ -51,7 +51,7 @@ LLM выдаёт текст в момент prompt'а; между prompt'ами 
 | Память — часть геометрии входа, не RAG | `engine/context.py::StyxComposer` инжектит salient memories между head и tail messages, до того как LLM получает prompt |
 | Воля как постоянный фрагмент входа | working_set persistence (`engine/working_set_persistence.py`) + cached salient (`engine/focus_tracker.py`) — фрагмент `я` присутствует каждый ход независимо от запроса |
 | Различение дневника и памяти | dialogue routes (`/dialogue/*`) пишут полный след; selective gatekeeper (`engine/selective_gatekeeper.py`) фильтрует subjective writes — в линию `я` входит только то, что становится причиной выбора |
-| Эмоциональная сторона как параметризация траектории, не отдельный слой ([§IX][iambook]) | VAD-проекция (valence/arousal/dominance) в двух временных масштабах: быстрый журнал `emotional_state` (hot-path inline + batch piggyback + геометрический decay) и медленный `emotional_baseline` (EMA α=0.98 над окном 60 мин). Per-memory snapshot фиксирует «фон рождения» memory; recall применяет `emotional_resonance` поверх composite score; pre-LLM канал `self_state` инжектит descriptive отметку о накопленном состоянии агента |
+| Эмоциональная сторона как параметризация траектории, не отдельный слой ([§IX][iambook]) | Завершённый turn сохраняется как причинное свидетельство (`emotional_events`: стимул, причина, сила, уверенность, длительность причины), а `emotional_state` хранит append-only переход реакции агента. Состояние меняет recall и pre-LLM политику внимания/проверки до появления языка; названия эмоций и команды тона не инжектируются |
 | Переосмысление через взвешенное усреднение, не переписывание | `engine/reinterpret.py::blend_embeddings` — embedding сдвигается через weighted average, исходный текст остаётся в audit-таблице |
 | Семантически управляемая компрессия | `engine/eviction_relevance.py` — при переполнении окна сохраняется *семантически релевантное* к фокусу, не просто последнее по времени |
 | Градиент глубины памяти | Three-tier: active suffix → hot-tier → long. Жёсткая граница только одна — между окном и всем остальным |
@@ -115,10 +115,19 @@ Hot/long различаются плотностью и latency, не приро
 ```
 user message
    │
-   ├── /sync_turn ──────── INSERT memory + embed-after-commit
+   ├── pre-LLM ─────────── recall + <styx-self-state> cognitive posture
+   │                        (attention, verification, branching, closure)
+   │
+   ├── LLM/tool loop ───── фактические решения и финальный ответ
+   │
+   ├── /affect/observe_turn
+   │                      ├── stimulus и reaction оцениваются раздельно
+   │                      ├── cause/intensity/confidence/status → evidence
+   │                      └── idempotent append-only state transition
+   │
+   ├── /sync_turn ──────── INSERT memory + affective snapshot + embed-after-commit
    │                        ├── selective gatekeeper решает skip/merge/supersede/store
    │                        ├── auto-link находит ближайших соседей по cosine → related_to рёбра
-   │                        ├── sentiment hot-path (sync VAD, K_HOT=0.15 → emotional_state, fail-open)
    │                        ├── classifier-enqueue (post-hoc usage_factor)
    │                        └── importance-enqueue (LLM скоринг через qwen3:4b)
    │
@@ -128,9 +137,6 @@ user message
    │                      + [<styx-salient>recall</styx-salient>]
    │                      + [middle eviction-relevant pairs]
    │                      + [last user turn]
-   │
-   ├── LLM call ─────────── transport инжектит prompt_cache_key
-   │                        + observe cache stats для analytics
    │
    └── /after_turn ─────── focus_tracker обновляет centroid;
                             drift check; working_set persistence flush
@@ -163,48 +169,35 @@ Concretely для IAmBook [§IX][iambook] («оси с собственной д
 к нейтральному, влияют на восприятие нового материала как фоновое
 состояние»):
 
-- **Две таблицы, два масштаба времени.** `emotional_state` —
-  append-only журнал VAD-векторов per-agent с `source` + `metadata`,
-  быстрые оси. `emotional_baseline` — per-agent EMA (α=0.98 над окном
-  60 мин), та самая инерция и возврат к фону.
-- **Три писателя в журнал.**
-  1. *Hot-path* (`emotional/sentiment.py`, K_HOT=0.15) — синхронно
-     внутри `/sync_turn`, отдельный вызов `qwen3:4b` с
-     `timeout_s=0.8`, fail-open, скипает реплики <20 / >4000 символов.
-     Источник `source='hot_sentiment'`, raw VAD сохраняется в
-     `metadata` (дешёвый write для диагностики / потенциального
-     будущего "как прозвучал peer" канала — текущий канал `self_state`
-     эту metadata не читает, он берёт накопленные valence/arousal/
-     dominance строки через `read_last_state`).
-  2. *Batch* (`emotional/sentiment_batch.py`, K_BATCH=0.4, ~2.7× hot) —
-     piggyback в `dialogue_batch_consolidation`: тот же LLM-вызов,
-     который генерирует summary окна, возвращает интегральный VAD
-     peer-части; handler усредняет VAD по chunk'ам и применяет
-     **первым** в транзакции (до INSERT memory) — чтобы snapshot
-     новой memory читался уже с свежей дельтой.
-  3. *Decay* (`emotional/state.py::apply_instant_decay`) —
-     геометрический `v *= 0.95^minutes`, epsilon-floor 0.005,
-     `source='decay'`. Гоняется periodic-task'ом `emotional_tick` раз
-     в минуту для всех `DISTINCT agent_id FROM memories`.
-- **Per-memory snapshot.** Колонки
-  `memories.emotional_context_{valence,arousal,dominance}` фиксируют
-  текущее состояние агента в момент INSERT memory и больше не
-  меняются — это «эмоциональный фон рождения» записи.
-- **Recall: `emotional_resonance` фактор.**
-  `factor = 1 + 0.1 × (1 − clamp(Euclidean(memory_snapshot, baseline) / √12, 0, 1))`,
-  диапазон [1.0, 1.1]. Memory, рождённая в схожем эмоциональном фоне
-  с текущим baseline агента, получает мягкий boost в composite
-  scoring — резонанс с фоном, не с моментальным состоянием.
-- **Pre-LLM канал `self_state`.**
-  `engine/pre_llm_channels/self_state.py` берёт накопленное состояние
-  агента через `read_last_state` (последняя точка `emotional_state`:
-  предыдущее состояние + демпфированная K_HOT-дельта peer-резонанса +
-  geometric decay — не raw VAD peer-реплики), переводит знаки трёх
-  осей VAD в один из 8 октантов и инжектит descriptive фразу от
-  первого лица типа «Тебе сейчас воодушевлённо и уверенно» в pre-LLM
-  payload. Скип, если канал выключен / записи ещё нет / запись старше
-  `max_age_s` (900s, safety net на случай мёртвого воркера) / норма
-  ниже `min_norm` (0.2).
+- **Свидетельство отделено от состояния.** `emotional_events` хранит
+  координаты стимула, причину, интенсивность, уверенность и статус причины.
+  `emotional_state` — append-only проекция реакции агента со ссылками на
+  event и предыдущее состояние. Последовательный retry дедуплицируется до
+  model-call; конкурентный retry окончательно останавливают advisory lock и
+  UNIQUE-граница БД.
+- **Состояние вычисляется после завершения хода.** Hermes передаёт
+  finalized turn через `post_llm_call`, OpenClaw — через typed `agent_end`.
+  Наблюдатель видит вход, фактический ответ, недавнюю причинную линию и
+  tool-события; peer stimulus никогда не прибавляется к состоянию напрямую.
+- **Инерция и причины.** Неактивный остаток геометрически затухает;
+  взвешенный вклад причин со статусом `active` поддерживается ограниченной
+  lease. Reaffirmation продлевает исходную причину без второй delta;
+  resolution/supersession и expiry прекращают support. Несколько причин
+  сосуществуют, а reducer не теряет их из-за prompt-bound.
+  `emotional_baseline` считается по времени, а не по плотности технических
+  строк, затем сглаживается минутной EMA.
+- **Снимок памяти содержит provenance.** Помимо VAD сохраняются state id,
+  timestamp, confidence и causal components. Суточная консолидация наследует
+  последний снимок исходных memories, а не состояние фонового worker'а.
+- **Recall меняется до генерации.** `emotional_resonance` сравнивает memories
+  с текущим residue, смешанным с baseline по confidence. Поэтому состояние
+  способно изменить top-1 ещё до LLM-вызова. Recall также возвращает bounded
+  evidence coordinates снимка памяти, без причинной прозы и style-команд.
+- **Pre-LLM канал не называет эмоцию.** `<styx-self-state>` содержит
+  ограниченную cognitive posture: порядок внимания, глубину проверки,
+  бюджет ветвления, работу с неоднозначностью и порог завершения. Это
+  операционный self-context, не голос пользователя, не тон и не требование
+  сказать «я чувствую X».
 
 Эмоциональная сторона интегрирована в общий аппарат траектории `я`
 ([§IX][iambook]): не отдельный модуль, а конкретные структуры данных
@@ -247,12 +240,13 @@ runbook'и — `extensions/styx/skills/styx-recall/SKILL.md`.
 | Hybrid search | `engine/queries.py::compute_weights` | `vector_weight × (1 − cosine) + bm25_weight × ts_rank`, веса адаптивные по query length |
 | Document parsers | `engine/document_parsers/` | pure-Python pypdf / python-docx / openpyxl / builtin Markdown |
 | Memory markers | `engine/context.py` + `http/_wrap.py` | `<styx-{salient,recall,archive,...}>` taxonomy |
-| Hot-path sentiment | `emotional/sentiment.py` | sync VAD-extract на peer-реплике через qwen3:4b, K_HOT=0.15, timeout 0.8s, fail-open |
-| Batch sentiment | `emotional/sentiment_batch.py` | piggyback в dialogue consolidation, K_BATCH=0.4, усреднение VAD по chunks, apply первым в транзакции |
-| Emotional baseline | `emotional/baseline.py` | per-agent EMA α=0.98 над окном 60 мин, periodic `emotional_tick` |
+| Causal turn observer | `emotional/transition.py` | finalized turn → stimulus/reaction/cause/intensity/confidence/status + cognitive posture, fail-open |
+| Emotional evidence | `emotional_events` | immutable source evidence, per-agent idempotency, separate from state projection |
+| Batch peer evidence | `emotional/sentiment_batch.py` | piggyback VAD сохраняется как `peer_signal:batch`, но не назначается состоянием агента |
+| Emotional baseline | `emotional/baseline.py` | time-weighted 60-minute window + per-minute EMA, provenance columns |
 | Emotional decay | `emotional/state.py::apply_instant_decay` | геометрический `v *= 0.95^minutes`, epsilon-floor 0.005, `source='decay'` |
 | Emotional resonance | `storage/scoring.py::_build_emotional_resonance_expr` | `1 + 0.1 × (1 − clamp(Euclidean(memory, baseline) / √12, 0, 1))` — boost резонансных memories |
-| Self-state channel | `engine/pre_llm_channels/self_state.py` | 8-октантная descriptive фраза о накопленном состоянии агента (`read_last_state`), max_age_s (safety net)+min_norm gating |
+| Self-state channel | `engine/pre_llm_channels/self_state.py` | causal state + current explicit signals → non-stylistic decision policy in `<styx-self-state>` |
 
 ---
 

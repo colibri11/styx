@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from styx import __version__
 from styx.config import StyxConfig
 from styx.http.routes import (
+    affect as affect_route,
     agent as agent_route,
     agent_state as agent_state_route,
     analytics as analytics_route,
@@ -56,6 +57,7 @@ def create_app(config: StyxConfig) -> FastAPI:
     app.include_router(recall_route.router)
     app.include_router(context_route.router)
     app.include_router(pre_llm_route.router)
+    app.include_router(affect_route.router)
     app.include_router(agent_state_route.router)
     app.include_router(memory_store_route.router)
     app.include_router(relations_route.router)

@@ -30,6 +30,12 @@ Hermes call-path синхронный — больший timeout не крити
 
 LONG_TIMEOUT_S = 30.0
 
+# Core's causal observer may spend up to eight seconds in the local model and
+# still needs time to acquire the per-agent lock and commit its evidence.  Keep
+# this below Hermes' 30 second post-hook budget while avoiding the ordinary
+# five second transport timeout.
+AFFECT_TIMEOUT_S = 20.0
+
 
 class StyxCoreClient:
     """Sync HTTP клиент к styx-core daemon."""
@@ -41,6 +47,7 @@ class StyxCoreClient:
         *,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         long_timeout_s: float = LONG_TIMEOUT_S,
+        affect_timeout_s: float = AFFECT_TIMEOUT_S,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("STYX_DAEMON_URL", "http://127.0.0.1:8788")
@@ -48,6 +55,7 @@ class StyxCoreClient:
         self._token = token if token is not None else os.environ.get("STYX_HTTP_TOKEN")
         self._timeout = timeout_s
         self._long_timeout = long_timeout_s
+        self._affect_timeout = affect_timeout_s
         self._session = requests.Session()
         if self._token:
             self._session.headers["Authorization"] = f"Bearer {self._token}"
@@ -105,6 +113,7 @@ class StyxCoreClient:
         assistant_content: str = "",
         session_id: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return self._post(
             "/sync_turn",
@@ -114,6 +123,7 @@ class StyxCoreClient:
                 "user_content": user_content,
                 "assistant_content": assistant_content,
                 "tool_calls": tool_calls,
+                "idempotency_key": idempotency_key,
             },
         )
 
@@ -192,6 +202,45 @@ class StyxCoreClient:
                 "platform": platform,
                 "extra": extra or {},
             },
+        )
+
+    def observe_affective_turn(
+        self,
+        agent_id: str,
+        *,
+        idempotency_key: str,
+        turn_id: str,
+        session_id: str | None = None,
+        user_message: str = "",
+        assistant_response: str = "",
+        conversation_history: list[dict[str, Any]] | None = None,
+        tool_events: list[dict[str, Any]] | None = None,
+        task_id: str | None = None,
+        model: str | None = None,
+        platform: str | None = None,
+    ) -> dict[str, Any]:
+        """Forward a finalized Hermes turn to the core affect seam.
+
+        The endpoint is additive.  Calling a pre-feature core may return 404;
+        ``post_llm_call`` owns fail-open handling so completed turns are never
+        failed by a mixed-version deployment.
+        """
+        return self._post(
+            "/affect/observe_turn",
+            {
+                "agent_id": agent_id,
+                "idempotency_key": idempotency_key,
+                "turn_id": turn_id,
+                "session_id": session_id,
+                "user_message": user_message,
+                "assistant_response": assistant_response,
+                "conversation_history": conversation_history or [],
+                "tool_events": tool_events or [],
+                "task_id": task_id,
+                "model": model,
+                "platform": platform,
+            },
+            timeout=self._affect_timeout,
         )
 
     def get_agent_state(self, agent_id: str) -> dict[str, Any]:

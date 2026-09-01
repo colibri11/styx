@@ -41,7 +41,7 @@ def test_migration_applies_to_empty_db(clean_db: str) -> None:
         "0001_init.sql", "0002_memorybox_port.sql",
         "0003_working_set.sql", "0004_relations_unique.sql",
         "0005_documents_chunks.sql", "0006_chunks_fts.sql",
-        "0007_documents_pipeline.sql",
+        "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
     ]
 
     with psycopg.connect(clean_db) as conn:
@@ -59,7 +59,7 @@ def test_migration_is_idempotent(clean_db: str) -> None:
         "0001_init.sql", "0002_memorybox_port.sql",
         "0003_working_set.sql", "0004_relations_unique.sql",
         "0005_documents_chunks.sql", "0006_chunks_fts.sql",
-        "0007_documents_pipeline.sql",
+        "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
     ]
     assert second == []
 

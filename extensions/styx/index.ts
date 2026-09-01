@@ -16,6 +16,8 @@ import { resolveAgentId } from "./src/agent-mapping.js";
 import { createStyxClient, type StyxLogger } from "./src/client.js";
 import { createStyxContextEngine } from "./src/context-engine.js";
 import { createBeforePromptBuildHook } from "./src/hooks/before-prompt-build.js";
+import { createAgentEndHook } from "./src/hooks/agent-end.js";
+import { TerminalTurnBarrier } from "./src/hooks/terminal-barrier.js";
 import {
   createAnalyticsTool,
   createConfirmUsageTool,
@@ -44,6 +46,7 @@ type PluginConfig = {
   requestTimeoutMs?: number;
   logging?: boolean;
   ownsCompaction?: boolean;
+  terminalDrainTimeoutMs?: number;
 };
 
 export default definePluginEntry({
@@ -65,6 +68,10 @@ export default definePluginEntry({
     });
 
     const ownsCompaction = cfg.ownsCompaction ?? true;
+    const terminalDrainTimeoutMs = Math.max(
+      100,
+      Math.min(cfg.terminalDrainTimeoutMs ?? 10_000, 30_000),
+    );
 
     logger.info?.(
       `[styx] registering context engine + 17 tools (daemon=${cfg.daemonUrl ?? "http://127.0.0.1:8788"}, ownsCompaction=${ownsCompaction})`,
@@ -210,18 +217,42 @@ export default definePluginEntry({
     }).on;
 
     if (typeof apiOn === "function") {
+      const hostConfig = apiAny["config"] as Record<string, unknown> | undefined;
+      const plugins = hostConfig?.["plugins"] as Record<string, unknown> | undefined;
+      const entries = plugins?.["entries"] as Record<string, unknown> | undefined;
+      const styxEntry = entries?.["styx"] as Record<string, unknown> | undefined;
+      const hookPolicy = styxEntry?.["hooks"] as Record<string, unknown> | undefined;
+      if (hookPolicy?.["allowConversationAccess"] !== true) {
+        logger.warn?.(
+          "[styx] agent_end requires " +
+          "plugins.entries.styx.hooks.allowConversationAccess=true in " +
+          "OpenClaw >=2026.5.3; without it finalized dialogue and affect " +
+          "capture are blocked",
+        );
+      }
+      const terminalBarrier = new TerminalTurnBarrier();
       const beforePromptBuild = createBeforePromptBuildHook({
         client,
         logger,
         resolveAgentId: resolve,
+        terminalBarrier,
+        terminalDrainTimeoutMs,
       });
       apiOn("before_prompt_build", beforePromptBuild);
+      const agentEnd = createAgentEndHook({
+        client,
+        logger,
+        resolveAgentId: resolve,
+        terminalBarrier,
+        terminalWorkBudgetMs: Math.max(100, terminalDrainTimeoutMs - 250),
+      });
+      apiOn("agent_end", agentEnd, { timeoutMs: 30_000 });
       logger.info?.(
-        "[styx] registered before_prompt_build hook (pi-embedded salient delivery)",
+        "[styx] registered before_prompt_build + agent_end hooks",
       );
     } else {
       logger.warn?.(
-        "[styx] api.on отсутствует — before_prompt_build hook не зарегистрирован (несовместимая версия openclaw)",
+        "[styx] api.on отсутствует — typed hooks не зарегистрированы (несовместимая версия openclaw)",
       );
     }
   },

@@ -7,6 +7,92 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-core 1.1.0 / styx-hermes 1.1.0] — 2026-09-01
+
+Причинно непрерывное affect-состояние вместо эмоциональной style-инструкции.
+OpenClaw plugin обновлён до `0.2.0`.
+
+### Добавлено
+
+- Миграция `0008_emotional_evidence.sql`: immutable `emotional_events`,
+  append-only lifecycle причин с same-agent FK и lease, lineage переходов,
+  aggregate/transition confidence и provenance снимков memories/baseline.
+- Idempotent `POST /affect/observe_turn` и расширенный `GET /agent_state`.
+- Hermes `post_llm_call` и OpenClaw terminal `agent_end`: bounded завершённый
+  user/assistant/tool turn наблюдается до diary ingest. Следующий OpenClaw
+  pre-prompt ограниченно ждёт pending terminal transition.
+- Recall возвращает bounded structured affect evidence памяти; free-form
+  причина, posture и style-команды туда не входят.
+
+### Изменено
+
+- Stimulus собеседника отделён от reaction агента. Состояние меняется только
+  из наблюдаемого завершённого когнитивного акта; batch peer VAD сохраняется
+  как evidence и не назначается агенту напрямую.
+- `<styx-self-state>` теперь содержит controlled cause classes/coordinates и
+  взвешенную cognitive policy внимания, проверки, ветвления, неоднозначности
+  и завершения. Названия эмоций, `Тебе сейчас X` и причинная проза удалены из
+  активного prompt.
+- Reaffirmation продлевает выбранную evidence-причину без повторной delta;
+  revision меняет силу и cognitive posture продолжающейся причины через
+  `new_support - old_support`; controlled `cause_subject` различает причины
+  одного класса без свободной прозы. Resolution/supersession/expiry
+  оформляются append-only и прекращают
+  support. Decay делит интервал по моменту lease expiry.
+- `emotional_state.confidence` означает достоверность всей проекции;
+  `transition_confidence` — только нового наблюдения. Unknown mass
+  консервативно снижает aggregate confidence.
+- Baseline считается по времени, сериализован per agent, монотонен при
+  нескольких workers и учитывает интервалы неизвестной уверенности.
+- Batch-derived memory (short и routed tail) наследует affect исходного окна,
+  а не состояние worker во время выполнения.
+
+### Исправлено
+
+- OpenClaw больше не считает промежуточный `afterTurn` tool-loop завершённым
+  актом. Same-run callbacks single-flight; serialized per-scope tail сохраняет
+  порядок поздних commits после prompt timeout; affect выполняется до bounded
+  attachment phase под общим deadline. Durable dialogue idempotency
+  сохраняется после restart через PostgreSQL partial UNIQUE key.
+- Hermes передаёт physical-turn idempotency key и в `/affect/observe_turn`, и
+  в `/sync_turn`; повтор с changed content/split остаётся одной diary-парой.
+- Gatekeeper MERGE переносит affective provenance вместе с победившим
+  содержимым и инвалидирует stale hot-entry; batch evidence датируется
+  исходным окном, а reducer хранит все active и только bounded inactive tail.
+- Shared psycopg reads self-state/agent-state используют тот же mutex и
+  завершают read transaction до release; observer не держит transaction во
+  время model call.
+- Hermes affect timeout увеличен до 20 s: больше core observer deadline 8 s
+  и меньше host hook deadline 30 s. Source/tool preprocessing ограничивается
+  до обхода больших структур.
+- Free-form audit cause проходит deterministic secret/PII redaction и никогда
+  не возвращается в доверенный model context.
+
+### Совместимость и откат
+
+- `styx-core` и `styx-hermes` 1.1.0 обновляются совместно. Миграция additive;
+  legacy rows сохраняют NULL provenance.
+- `STYX_AFFECTIVE_TRANSITION_ENABLED=0` отключает causal observer и позволяет
+  временно вернуть legacy peer-only sentiment path.
+- OpenClaw требует `>=2026.5.3` и
+  `plugins.entries.styx.hooks.allowConversationAccess=true`.
+
+### Гейты
+
+- Объединённый affect/storage/memory/API набор в Docker PostgreSQL:
+  **287 passed / 0 failed** на пересобранном current-workspace image.
+- Docker full `styx-hermes`: **219 passed / 0 failed** на пересобранном image;
+  host checkout: **213 passed / 6 container-only skipped**.
+- OpenClaw `npm test`: TypeScript build, version/SDK и terminal-hook contract —
+  green.
+- Full core на пересобранном current-workspace image:
+  **1529 passed / 10 skipped**; оставшиеся 52 LLM/embedding теста не прошли
+  из-за недоступного из контейнера Ollama. Все целевые affect/storage/API
+  проверки прошли отдельно; cleanup deadlock в повторном прогоне не возник.
+- Current external SGLang revision-case не запустился: endpoint не принимал
+  соединение. Strict schema/revision semantics покрыты deterministic tests;
+  этот infra-gate не замаскирован как успешный.
+
 ## [styx-hermes 1.0.12] — 2026-09-01
 
 Compat-доводка под **Hermes Agent v0.21.0 (тег `v2026.8.31`)**. `styx-core`

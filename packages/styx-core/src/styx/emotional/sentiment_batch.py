@@ -2,16 +2,12 @@
 
 Tightly coupled с dialogue_batch_consolidation handler'ом: тот же
 LLM-вызов, который генерирует summary окна, возвращает интегральный
-VAD peer-части окна. Handler усредняет VAD по chunk'ам и применяет к
-emotional_state с ``source='sentiment:batch'`` и K_BATCH=0.4.
+VAD peer-части окна. Causal emotion wave сохраняет этот сигнал как
+``emotional_events`` evidence, но не применяет его к состоянию агента.
 
-K_BATCH > K_HOT (0.15) потому что batch — реальное усреднение тона
-(не одна реплика); заслуживает больше веса в эмоциональной проекции
-агента. ~2.7× от K_HOT, port memorybox 26b §9a.
-
-Apply ПЕРВЫМ в транзакции handler'а (до INSERT memory) — чтобы
-emotional snapshot новой memory читался уже с свежей дельтой
-(memorybox `dialogue-sentiment-v1.md` §6 «вариант 1»).
+``K_BATCH`` и scaler сохранены как legacy Python ABI для старых callers,
+но production handler их больше не использует: чужой тон не является
+готовой реакцией агента.
 """
 
 from __future__ import annotations

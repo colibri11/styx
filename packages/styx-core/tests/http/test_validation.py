@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from styx.http import registry
+
 
 def test_initialize_requires_agent_id(client_no_auth):
     resp = client_no_auth.post("/agent/initialize", json={})
@@ -37,6 +39,28 @@ def test_sync_turn_404_when_agent_not_initialized(client_no_auth):
         },
     )
     assert resp.status_code == 404
+
+
+def test_sync_turn_forwards_stable_physical_idempotency_key(client_no_auth):
+    calls = []
+
+    class Core:
+        def sync_turn(self, **kwargs):
+            calls.append(kwargs)
+
+    registry.register("agent-a", core=Core())
+    response = client_no_auth.post(
+        "/sync_turn",
+        json={
+            "agent_id": "agent-a",
+            "session_id": "session-a",
+            "user_content": "changed user",
+            "assistant_content": "changed answer",
+            "idempotency_key": "hermes:session-a:turn-9",
+        },
+    )
+    assert response.status_code == 200
+    assert calls[0]["idempotency_key"] == "hermes:session-a:turn-9"
 
 
 def test_context_build_404_when_agent_not_initialized(client_no_auth):

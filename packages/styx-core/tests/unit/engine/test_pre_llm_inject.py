@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
+from styx.emotional.state import EmotionalVector
 from styx.engine import pre_llm_inject
+from styx.engine.pre_llm_channels.self_state import channel_self_state
 from styx.engine.pre_llm_inject import ChannelHandle
 
 
@@ -128,3 +132,32 @@ def test_channel_receives_handle_and_kwargs() -> None:
     assert captured["kw"]["session_id"] == "sess-1"
     assert captured["kw"]["user_message"] == "hello"
     assert captured["kw"]["model"] == "gpt-x"
+
+
+def test_framework_injects_cognitive_policy_from_current_user_event() -> None:
+    class _Queries:
+        def get_last_emotional_state(self):
+            return (
+                EmotionalVector(-0.4, 0.5, -0.3),
+                dt.datetime.now(tz=dt.timezone.utc),
+            )
+
+    handle = _handle(queries=_Queries())
+    pre_llm_inject.configure(
+        "test-agent",
+        handle=handle,
+        channels=[("self_state", channel_self_state)],
+    )
+    out = pre_llm_inject.on_pre_llm_call(
+        "test-agent",
+        session_id="sess-1",
+        user_message="Нет, исправь ошибку и проверь точно. Пока не публикуй.",
+        constraints=["no publish"],
+    )
+    assert out is not None
+    context = out["context"]
+    assert context.startswith('<styx-self-state version="1">')
+    assert '"verification_depth":"high"' in context
+    assert '"constraint_priority":"explicit_first"' in context
+    assert '"source":"current_hermes_event"' in context
+    assert "Тебе сейчас" not in context

@@ -22,6 +22,7 @@ def sync_turn(req: SyncTurnRequest) -> SyncTurnResponse:
         user_content=req.user_content,
         assistant_content=req.assistant_content,
         session_id=req.session_id or "",
+        idempotency_key=req.idempotency_key,
     )
     # Текущая sync_turn возвращает None — memory_ids недоступны через
     # этот вызов. Возвращаем пустые списки; контракт расширится когда

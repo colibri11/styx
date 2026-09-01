@@ -210,3 +210,165 @@ def test_format_recall_text_renders_memories(conn: psycopg.Connection) -> None:
     assert "hello world" in text
     assert "score=" in text
     assert "role=user" in text
+
+
+def test_recall_exposes_only_structured_bounded_affective_provenance(
+    conn: psycopg.Connection,
+) -> None:
+    embed = FakeEmbeddingClient()
+    agent = "affect-provenance"
+    context_at = "2026-05-03T12:00:00Z"
+    causes = [
+        {
+            "evidence_id": index + 1,
+            "source_ref": f"turn-{index + 1}",
+            "cause_class": "execution_risk",
+            "cause_subject": "tool_outcome",
+            "status": "active",
+            "intensity": 0.6,
+            "confidence": 0.7,
+            "observed_at": "2026-05-03T11:59:00Z",
+            "lease_expires_at": "2026-05-03T12:14:00Z",
+            "cause_summary": "PRIVATE FREE PROSE",
+            "style_instruction": "sound sad",
+        }
+        for index in range(10)
+    ]
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, at, valence, arousal, dominance, confidence, "
+            " computation_version) VALUES (%s, %s, -0.2, 0.4, 0.1, 0.75, "
+            " 'test') RETURNING id",
+            (agent, context_at),
+        )
+        state_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO memories "
+            "(agent_id, role, content, embedding, emotional_context_valence, "
+            " emotional_context_arousal, emotional_context_dominance, "
+            " emotional_context_state_id, emotional_context_at, "
+            " emotional_context_confidence, emotional_context_causes) "
+            "VALUES (%s, 'assistant', 'structured evidence memory', %s, "
+            " -0.2, 0.4, 0.1, %s, %s, 0.75, %s)",
+            (
+                agent,
+                "[" + ",".join(repr(x) for x in embed.embed(
+                    "structured evidence memory"
+                )) + "]",
+                state_id,
+                context_at,
+                psycopg.types.json.Jsonb(causes),
+            ),
+        )
+    conn.commit()
+
+    result = recall_full(
+        queries=AgentScopedQueries(conn, agent_id=agent),
+        embed_client=embed,
+        query="structured evidence memory",
+        record_events=False,
+    )
+    assert result.memories
+    provenance = result.memories[0].affective_provenance
+    assert provenance is not None
+    assert provenance.state_id == state_id
+    assert provenance.vad.valence == pytest.approx(-0.2)
+    assert provenance.confidence == pytest.approx(0.75)
+    assert len(provenance.causal_refs) == 8
+    first_ref = provenance.causal_refs[0]
+    assert first_ref.cause_subject == "tool_outcome"
+    assert first_ref.status_at_capture == "active"
+    assert first_ref.current_status is None
+    assert first_ref.intensity == pytest.approx(0.6)
+    assert first_ref.confidence == pytest.approx(0.7)
+    assert first_ref.observed_at.isoformat().startswith("2026-05-03T11:59:00")
+
+    text = format_recall_text(result)
+    assert "affect_evidence=" in text
+    assert '"state_id":' in text
+    assert '"vad":' in text
+    assert '"source_ref":"turn-1"' in text
+    assert '"status_at_capture":"active"' in text
+    assert "PRIVATE FREE PROSE" not in text
+    assert "sound sad" not in text
+
+
+def test_recall_legacy_null_affect_has_no_evidence_marker(
+    conn: psycopg.Connection,
+) -> None:
+    embed = FakeEmbeddingClient()
+    _seed(
+        conn,
+        agent_id="legacy-affect-null",
+        content="legacy no affect",
+        embed_client=embed,
+    )
+    conn.commit()
+    result = recall_full(
+        queries=AgentScopedQueries(conn, agent_id="legacy-affect-null"),
+        embed_client=embed,
+        query="legacy no affect",
+        record_events=False,
+    )
+    assert result.memories[0].affective_provenance is None
+    assert "affect_evidence=" not in format_recall_text(result)
+
+
+def _seed_affective_pair(
+    conn: psycopg.Connection,
+    *,
+    agent_id: str,
+    embed: FakeEmbeddingClient,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Две семантически равные памяти, отличающиеся только state snapshot."""
+    vec = "[" + ",".join(repr(x) for x in embed.embed("same query")) + "]"
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO memories "
+            "(agent_id, role, content, embedding, "
+            " emotional_context_valence, emotional_context_arousal, "
+            " emotional_context_dominance) VALUES "
+            "(%s, 'user', 'positive-context', %s, 0.8, 0.4, 0.3), "
+            "(%s, 'user', 'negative-context', %s, -0.8, -0.4, -0.3) "
+            "RETURNING id",
+            (agent_id, vec, agent_id, vec),
+        )
+        first, second = cur.fetchall()
+    return first[0], second[0]
+
+
+@pytest.mark.parametrize(
+    "agent,state_vad,expected",
+    [
+        ("affect-positive", (0.8, 0.4, 0.3), "positive-context"),
+        ("affect-negative", (-0.8, -0.4, -0.3), "negative-context"),
+    ],
+)
+def test_current_affect_changes_recall_top1_before_generation(
+    conn: psycopg.Connection,
+    agent: str,
+    state_vad: tuple[float, float, float],
+    expected: str,
+) -> None:
+    """Одинаковая семантика + разные state дают разный top-1."""
+    embed = FakeEmbeddingClient()
+    _seed_affective_pair(conn, agent_id=agent, embed=embed)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, valence, arousal, dominance, confidence, "
+            " computation_version) VALUES (%s, %s, %s, %s, 1.0, "
+            " 'test-causal-v1')",
+            (agent, *state_vad),
+        )
+    conn.commit()
+
+    result = recall_full(
+        queries=AgentScopedQueries(conn, agent_id=agent),
+        embed_client=embed,
+        query="same query",
+        record_events=False,
+    )
+    assert result.memories
+    assert result.memories[0].content == expected

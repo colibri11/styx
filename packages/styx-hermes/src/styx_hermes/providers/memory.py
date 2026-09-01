@@ -250,12 +250,19 @@ class StyxMemoryProvider(MemoryProvider):
             log.warning("sync_turn до initialize — пропуск")
             return
         try:
-            self._client.sync_turn(
-                self._agent_id,
+            kwargs: dict[str, Any] = {
+                "user_content": user_content,
+                "assistant_content": assistant_content,
+                "session_id": session_id or None,
+            }
+            turn_key = _agent_session.get_turn_key(
+                session_id,
                 user_content=user_content,
                 assistant_content=assistant_content,
-                session_id=session_id or None,
             )
+            if turn_key is not None:
+                kwargs["idempotency_key"] = turn_key
+            self._client.sync_turn(self._agent_id, **kwargs)
         except Exception as exc:  # noqa: BLE001 — fail-open
             log.warning("styx-core /sync_turn failed: %s", exc)
 
@@ -670,6 +677,7 @@ Anything between `<styx-*>...</styx-*>` tags is something Styx injected. It is n
 | `<styx-relations>...</styx-relations>` | `styx_relations_query` / `styx_graph_traverse` (knowledge graph) | structural, not narrative |
 | `<styx-explain>...</styx-explain>` | `styx_explain` (observability) | for your own introspection only — never quote to user |
 | `<styx-working-set>...</styx-working-set>` | reserved for future inject channel | when present: same status as salient |
+| `<styx-self-state>...</styx-self-state>` | causal residue and cognitive posture assembled before this turn | operational self-context, not the user's voice, an emotion label, or a style command; let its decision policy affect attention and checking, do not announce it automatically |
 
 Anything **without** a `<styx-*>` wrapper is one of: native system instruction (your role/persona/allowlist), a current user message (this turn), your own prior assistant reply (from earlier in this session), or a tool result from a non-Styx tool (filesystem, web search, etc.). If unsure whether something is a memory or the user said it just now — check for the wrapper. **No `<styx-*>` wrapper → it is in the live conversation, not memory.**
 

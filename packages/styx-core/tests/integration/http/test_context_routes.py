@@ -278,6 +278,27 @@ def test_ingest_batch_two_users_back_to_back(stack) -> None:
     assert _fetch_roles(dsn, agent) == ["user", "user", "assistant"]
 
 
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [{"role": "user", "content": "x" * 40_001}],
+        [{"role": "user", "content": "x"}] * 65,
+        [{"role": "developer", "content": "x"}],
+    ],
+)
+def test_ingest_batch_rejects_unbounded_or_unknown_messages_without_writes(
+    stack, messages
+) -> None:
+    client, dsn, _ = stack
+    agent = f"bounded-{uuid.uuid4()}"
+    response = client.post(
+        "/context/ingest_batch",
+        json={"agent_id": agent, "messages": messages},
+    )
+    assert response.status_code == 422
+    assert _count_memories(dsn, agent) == 0
+
+
 # ── /context/dispose ──────────────────────────────────────────────────
 
 

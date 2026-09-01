@@ -19,6 +19,9 @@ from styx.providers.memory import StyxMemoryCore
 @pytest.fixture
 def provider_env(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> str:
     monkeypatch.setenv("STYX_DATABASE_URL", migrated_db)
+    # Явный rollback-mode: production default использует completed-turn
+    # observer и не зеркалит peer sentiment напрямую в state.
+    monkeypatch.setenv("STYX_AFFECTIVE_TRANSITION_ENABLED", "0")
     return migrated_db
 
 
@@ -159,6 +162,7 @@ def test_sentiment_disabled_via_config(
     """STYX_SENTIMENT_ENABLED=0 — provider не создаёт sentiment client."""
     monkeypatch.setenv("STYX_DATABASE_URL", migrated_db)
     monkeypatch.setenv("STYX_SENTIMENT_ENABLED", "0")
+    monkeypatch.setenv("STYX_AFFECTIVE_TRANSITION_ENABLED", "0")
     embed = FakeEmbeddingClient(dim=768)
     monkeypatch.setattr(
         "styx.providers.memory.make_embedding_client", lambda **_: embed

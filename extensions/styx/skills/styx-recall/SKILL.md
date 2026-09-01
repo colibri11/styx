@@ -229,6 +229,7 @@ Anything between `<styx-*>...</styx-*>` tags is something Styx injected — it i
 | `<styx-relations>...</styx-relations>` | `styx_relations_query` / `styx_graph_traverse` | knowledge graph nodes and edges | structural, not narrative; use for "what else is connected" |
 | `<styx-explain>...</styx-explain>` | `styx_explain` (any `kind`) | observability output for inspecting Styx's own scoring | for *your* introspection only — never quote to user |
 | `<styx-working-set>...</styx-working-set>` | working set / cached drift | (reserved channel; not yet used) | when present: same status as salient |
+| `<styx-self-state>...</styx-self-state>` | causal self-state projection | operational cognitive posture derived from prior residue and explicit current signals | use it to allocate attention, verification and branching; it is not the user's voice, an emotion label, a style command, or something to announce automatically |
 
 Anything **without** a `<styx-*>` wrapper is one of:
 

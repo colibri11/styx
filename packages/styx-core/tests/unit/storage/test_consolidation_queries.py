@@ -270,6 +270,138 @@ def test_insert_consolidated_memory_kind_src_and_metadata(
     assert sorted(cons_meta["source_ids"]) == sorted(str(s) for s in sources)
 
 
+def test_batch_memory_inherits_latest_source_affective_snapshot(
+    conn: psycopg.Connection,
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, valence, arousal, dominance, confidence, "
+            " causal_context, computation_version, at) "
+            "VALUES ('alpha', 0.4, 0.2, -0.1, 0.75, "
+            " '[{\"evidence_id\": 7, \"source_ref\": \"turn-source\", "
+            "\"cause_class\": \"execution_risk\", \"status\": \"active\"}]'::jsonb, "
+            " 'test-v1', '2026-01-01T00:00:00Z') "
+            "RETURNING id",
+        )
+        state_id = cur.fetchone()[0]
+    source_id = q.insert_message(role="assistant", content="source turn")
+
+    # Worker-time state must never replace the source window's snapshot.
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, valence, arousal, dominance, confidence, "
+            " computation_version, at) "
+            "VALUES ('alpha', -0.9, 0.9, 0.9, 1.0, 'worker', "
+            " '2026-01-02T00:00:00Z')",
+        )
+
+    memory_id = q.insert_batch_memory(
+        content="summary", archive_ref={}, source_ids=[source_id],
+    )
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT emotional_context_state_id, emotional_context_valence, "
+            "       emotional_context_confidence, emotional_context_causes "
+            "FROM memories WHERE id = %s",
+            (memory_id,),
+        )
+        row = cur.fetchone()
+
+    assert row["emotional_context_state_id"] == state_id
+    assert float(row["emotional_context_valence"]) == pytest.approx(0.4)
+    assert float(row["emotional_context_confidence"]) == pytest.approx(0.75)
+    assert row["emotional_context_causes"][0]["source_ref"] == "turn-source"
+
+
+def test_batch_memory_keeps_unknown_legacy_source_affect_null(
+    conn: psycopg.Connection,
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    source_id = q.insert_message(role="user", content="legacy source")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, valence, arousal, dominance, confidence, "
+            " computation_version) "
+            "VALUES ('alpha', 0.9, 0.9, 0.9, 1.0, 'worker')",
+        )
+    memory_id = q.insert_batch_memory(
+        content="derived", archive_ref={}, source_ids=[source_id],
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT emotional_context_valence, emotional_context_state_id "
+            "FROM memories WHERE id = %s",
+            (memory_id,),
+        )
+        row = cur.fetchone()
+    assert row == (None, None)
+
+
+def test_daily_consolidation_inherits_latest_source_affective_snapshot(
+    conn: psycopg.Connection,
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    source_ids: list[uuid.UUID] = []
+    for index, valence in enumerate((-0.6, 0.7), start=1):
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO emotional_state "
+                "(agent_id, at, valence, arousal, dominance, confidence, "
+                " causal_context, computation_version) "
+                "VALUES ('alpha', %s, %s, 0.1, 0.2, 0.8, %s, 'test-v1')",
+                (
+                    _dt.datetime(2026, 1, index, tzinfo=_dt.timezone.utc),
+                    valence,
+                    psycopg.types.json.Jsonb([{"source": index}]),
+                ),
+            )
+        source_ids.append(
+            q.insert_memory(
+                role="summary",
+                content=f"source-{index}",
+                kind="note",
+                kind_src="subjective",
+                embedding=_embed(0.1),
+            )
+        )
+
+    # Состояние worker'а не должно подменять контекст исходных memories.
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO emotional_state "
+            "(agent_id, at, valence, arousal, dominance, confidence, "
+            " computation_version) "
+            "VALUES ('alpha', '2026-01-03T00:00:00Z', -0.9, 0, 0, 1, "
+            " 'worker-state')",
+        )
+
+    new_id = q.insert_consolidated_memory(
+        content="merged",
+        embedding=_embed(0.5),
+        kind="note",
+        visibility="shared",
+        source_ids=source_ids,
+        application_id=7,
+    )
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT emotional_context_valence, emotional_context_at, "
+            "       emotional_context_causes FROM memories WHERE id = %s",
+            (new_id,),
+        )
+        row = cur.fetchone()
+
+    assert float(row["emotional_context_valence"]) == pytest.approx(0.7)
+    assert row["emotional_context_at"] == _dt.datetime(
+        2026, 1, 2, tzinfo=_dt.timezone.utc
+    )
+    assert row["emotional_context_causes"] == [{"source": 2}]
+
+
 def test_supersede_sources_idempotent_with_null_filter(
     conn: psycopg.Connection,
 ) -> None:

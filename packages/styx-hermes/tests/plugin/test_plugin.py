@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from styx_hermes import memory_plugin, plugin
+from styx_hermes import _agent_session, memory_plugin, plugin
 from styx_hermes.setup_cli import cmd_setup, main as cli_main
 from styx_hermes.engine import transport as transport_mod
 from styx_hermes.providers.memory import StyxMemoryProvider
@@ -80,9 +80,10 @@ def test_plugin_register_transport_and_hook_no_engine() -> None:
     inst = get_transport("chat_completions")
     assert isinstance(inst, transport_mod.StyxOpenAITransport)
 
-    # Волна 15: pre_llm_call hook зарегистрирован.
+    # Turn hooks: pre-LLM context + finalized post-LLM observation.
     hook_names = {name for name, _cb in ctx.hooks}
     assert "pre_llm_call" in hook_names
+    assert "post_llm_call" in hook_names
 
 
 def test_plugin_register_does_not_mention_register_memory_provider() -> None:
@@ -146,6 +147,25 @@ def test_initialize_configures_transport_agent_id(
         assert kwargs["prompt_cache_key"].startswith("pck_")
     finally:
         p.shutdown()
+
+
+def test_memory_provider_forwards_finalized_physical_turn_key() -> None:
+    calls = []
+
+    class Client:
+        def sync_turn(self, agent_id, **kwargs):
+            calls.append((agent_id, kwargs))
+
+    _agent_session.remember_turn_key(
+        "session-a", "hermes:session-a:turn-9",
+        user_content="user", assistant_content="assistant",
+    )
+    provider = StyxMemoryProvider()
+    provider._client = Client()
+    provider._agent_id = "agent-a"
+    provider.sync_turn("user", "assistant", session_id="session-a")
+
+    assert calls[0][1]["idempotency_key"] == "hermes:session-a:turn-9"
 
 
 # -- CLI setup ------------------------------------------------------------

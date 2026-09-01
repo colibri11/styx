@@ -13,6 +13,35 @@
 
 ## 0. Breaking changes при апгрейде
 
+**styx-core/styx-hermes 1.1.0 — causal affect continuity.** До обновления
+Hermes необходимо обновить оба пакета совместно: новый Hermes hook вызывает
+additive endpoint `/affect/observe_turn`, а core выполняет миграцию `0008`
+для `emotional_events` и provenance-колонок.
+
+- Новый default path анализирует finalized user/assistant/tool turn, отделяет
+  peer stimulus от реакции агента и пишет idempotent causal transition.
+- `self_state` больше не инжектит фразу `Тебе сейчас X`; теперь это
+  `<styx-self-state>` с cognitive posture без style/voice инструкции.
+- `STYX_AFFECTIVE_TRANSITION_ENABLED=0` отключает новый путь. Только в этом
+  режиме `STYX_SENTIMENT_ENABLED` возвращает старый peer-only rollback path.
+- `STYX_AFFECTIVE_TRANSITION_TIMEOUT_S` (default `8.0`) ограничивает один
+  fail-open model-call. Ошибка не роняет завершённый host turn.
+- После deploy проверьте `/healthz`, один реальный ход и `/agent_state`:
+  `instant_evidence.event_id`, `confidence` и `causal_components` должны быть
+  заполнены. Затем убедитесь, что новые dialogue memories ссылаются на тот же
+  `emotional_context_state_id`.
+- Для OpenClaw требуется версия не ниже `2026.5.3` и явный trusted-hook
+  permission `plugins.entries.styx.hooks.allowConversationAccess=true`.
+  Без него host блокирует `agent_end`, поэтому finalized affect/dialogue
+  capture не выполняется. Docker bootstrap выставляет permission сам.
+
+Миграция additive и не объявляет старые rows достоверным evidence: legacy
+provenance остаётся `NULL`. Откат к старым бинарникам безопасен на уровне
+схемы — они игнорируют новые таблицу/колонки — но старый runtime снова будет
+использовать прежнюю семантику sentiment.
+
+### Историческое изменение 1.0.7
+
 **styx-core 1.0.7 (волна 35, ADR § 58, 2026-07-01) — переименование
 pre-LLM emotional-канала.** Если на этом деплое (например, действующий
 Hermes-профиль) когда-либо выставлялись любые из этих ENV —
@@ -22,10 +51,9 @@ Hermes-профиль) когда-либо выставлялись любые �
 - `STYX_PEER_VAD_MIN_NORM`
 - `STYX_PEER_VAD_TTL_S`
 
-Канал `channel_peer_vad` (говорил о собеседнике: *«Peer прозвучал:
-X»*) полностью заменён на `channel_self_state` (говорит от лица агента:
-*«Тебе сейчас X»*, источник — накопленное состояние, не сырой VAD
-peer-реплики). Это не deprecated-алиас — старые имена не работают ни
+Канал `channel_peer_vad` был полностью заменён на `channel_self_state`.
+В 1.1.0 его собственная семантика дополнительно изменена: вместо описательной
+эмоциональной фразы он передаёт cognitive posture. Это не deprecated-алиас — старые имена не работают ни
 как fallback, ни как no-op-предупреждение, они просто ничего не
 конфигурируют. Эквиваленты для миграции конфига:
 

@@ -30,7 +30,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from styx.storage.queries import MemoryHit
+from styx.storage.queries import MemoryAffectiveProvenance, MemoryHit
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ class HotEntry:
     created_at: Any
     embedding: list[float]
     evicted_at: float
+    affective_provenance: MemoryAffectiveProvenance | None = None
 
 
 @dataclass
@@ -89,6 +90,14 @@ def get_state(agent_id: str) -> HotState | None:
     return _STATES.get(agent_id)
 
 
+def invalidate(agent_id: str, memory_id: uuid.UUID) -> None:
+    """Drop a stale cached projection after merge/delete writes."""
+    with _LOCK:
+        state = _STATES.get(agent_id)
+        if state is not None:
+            state.entries.pop(memory_id, None)
+
+
 def put_many(agent_id: str, hits: list[MemoryHit]) -> None:
     """Скопировать hits в hot. Refresh ``evicted_at`` для уже хранящихся id.
 
@@ -113,6 +122,7 @@ def put_many(agent_id: str, hits: list[MemoryHit]) -> None:
             metadata=hit.metadata,
             created_at=hit.created_at,
             embedding=list(hit.embedding),
+            affective_provenance=hit.affective_provenance,
             evicted_at=now,
         )
     _enforce_lru(s)
@@ -252,6 +262,7 @@ def _to_hit(entry: HotEntry, cosine: float) -> MemoryHit:
         score=cosine,
         match_score=cosine,
         embedding=list(entry.embedding),
+        affective_provenance=entry.affective_provenance,
     )
 
 

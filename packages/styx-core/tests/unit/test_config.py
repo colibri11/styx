@@ -67,3 +67,16 @@ def test_load_accepts_default_split_part_chars(
     monkeypatch.delenv("STYX_MESSAGE_SPLIT_PART_CHARS", raising=False)
     cfg = config.load()
     assert cfg.message_split_part_chars == 2000
+
+
+def test_load_reads_causal_affect_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STYX_DATABASE_URL", "postgresql://u:p@h:5432/styx")
+    monkeypatch.setenv("STYX_AFFECTIVE_TRANSITION_ENABLED", "false")
+    monkeypatch.setenv("STYX_AFFECTIVE_TRANSITION_TIMEOUT_S", "3.25")
+
+    cfg = config.load()
+
+    assert cfg.affective_transition_enabled is False
+    assert cfg.affective_transition_timeout_s == pytest.approx(3.25)

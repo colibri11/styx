@@ -16,6 +16,11 @@ import pytest
 
 from styx.engine import working_set_persistence as wsp
 from styx.engine.hot_tier import HotEntry
+from styx.emotional.state import EmotionalVector
+from styx.storage.queries import (
+    MemoryAffectiveCauseRef,
+    MemoryAffectiveProvenance,
+)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -40,6 +45,7 @@ def _hot_entry(
     evicted_at: float | None = None,
     agent_id: str = "agent-a",
     content: str = "content",
+    affective_provenance: MemoryAffectiveProvenance | None = None,
 ) -> HotEntry:
     return HotEntry(
         id=uuid.uuid4(),
@@ -52,6 +58,7 @@ def _hot_entry(
         created_at=_dt.datetime(2026, 5, 3, 12, 0, tzinfo=_dt.timezone.utc),
         embedding=embedding if embedding is not None else [0.1, 0.2, 0.3],
         evicted_at=evicted_at if evicted_at is not None else time.monotonic(),
+        affective_provenance=affective_provenance,
     )
 
 
@@ -123,6 +130,42 @@ def test_deserialize_roundtrip_focus_and_hot() -> None:
     assert snap.focus.epoch_id == focus[2]
     assert snap.hot is not None
     assert {e.id for e in snap.hot} == {e.id for e in hot}
+
+
+def test_affective_provenance_roundtrips_and_legacy_payload_stays_valid() -> None:
+    provenance = MemoryAffectiveProvenance(
+        state_id=17,
+        context_at=_dt.datetime(2026, 5, 3, 11, 59, tzinfo=_dt.timezone.utc),
+        vad=EmotionalVector(-0.2, 0.4, 0.1),
+        confidence=0.75,
+        causal_refs=(MemoryAffectiveCauseRef(
+            evidence_id=9,
+            source_ref="turn-9",
+            cause_class="execution_risk",
+            cause_subject="tool_outcome",
+            status_at_capture="active",
+            current_status="active",
+            current_active=True,
+            intensity=0.6,
+            confidence=0.75,
+            observed_at=None,
+            lease_expires_at=None,
+        ),),
+    )
+    payload = wsp.serialize(
+        None,
+        [_hot_entry(affective_provenance=provenance)],
+        embedding_dim=3,
+    )
+    snap = wsp.deserialize(payload, embedding_dim=3)
+    assert snap is not None and snap.hot is not None
+    assert snap.hot[0].affective_provenance == provenance
+
+    # Pre-extension payloads simply restore without affect coordinates.
+    del payload["hot"][0]["affective_provenance"]
+    legacy = wsp.deserialize(payload, embedding_dim=3)
+    assert legacy is not None and legacy.hot is not None
+    assert legacy.hot[0].affective_provenance is None
 
 
 def test_deserialize_drop_hot_skips_hot_section() -> None:

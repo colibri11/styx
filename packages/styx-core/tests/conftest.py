@@ -23,6 +23,8 @@ _STYX_DROP_STMTS = [
     "DROP TABLE IF EXISTS memory_reinterpretations CASCADE",
     "DROP TABLE IF EXISTS emotional_baseline CASCADE",
     "DROP TABLE IF EXISTS emotional_state CASCADE",
+    "DROP TABLE IF EXISTS emotional_cause_status CASCADE",
+    "DROP TABLE IF EXISTS emotional_events CASCADE",
     "DROP TABLE IF EXISTS sweep_runs CASCADE",
     "DROP TABLE IF EXISTS consolidation_state CASCADE",
     "DROP TABLE IF EXISTS llm_tasks CASCADE",

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -167,6 +168,19 @@ def context_ingest_batch(req: ContextIngestBatchRequest) -> ContextIngestBatchRe
 
     pending_user: str | None = None
     ingested = 0
+    pair_index = 0
+
+    def _pair_key() -> str | None:
+        nonlocal pair_index
+        if req.idempotency_key is None:
+            pair_index += 1
+            return None
+        digest = hashlib.sha256(
+            f"{req.idempotency_key}:{pair_index}".encode("utf-8")
+        ).hexdigest()
+        key = f"context:{digest}"
+        pair_index += 1
+        return key
 
     for msg in req.messages:
         role = msg.role
@@ -180,6 +194,7 @@ def context_ingest_batch(req: ContextIngestBatchRequest) -> ContextIngestBatchRe
                     user_content=pending_user,
                     assistant_content="",
                     session_id=target_session,
+                    idempotency_key=_pair_key(),
                 )
                 ingested += 1
             pending_user = content
@@ -190,6 +205,7 @@ def context_ingest_batch(req: ContextIngestBatchRequest) -> ContextIngestBatchRe
                 user_content=pending_user,
                 assistant_content=content,
                 session_id=target_session,
+                idempotency_key=_pair_key(),
             )
             ingested += 2 if content else 1
             pending_user = None
@@ -198,6 +214,7 @@ def context_ingest_batch(req: ContextIngestBatchRequest) -> ContextIngestBatchRe
                 user_content="",
                 assistant_content=content,
                 session_id=target_session,
+                idempotency_key=_pair_key(),
             )
             if content:
                 ingested += 1
@@ -207,6 +224,7 @@ def context_ingest_batch(req: ContextIngestBatchRequest) -> ContextIngestBatchRe
             user_content=pending_user,
             assistant_content="",
             session_id=target_session,
+            idempotency_key=_pair_key(),
         )
         ingested += 1
 

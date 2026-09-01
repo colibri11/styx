@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -36,7 +37,24 @@ from styx.emotional.sentiment import (
     make_sentiment_client,
     scale_hot_vad_delta,
 )
-from styx.emotional.state import append_emotional_state
+from styx.emotional.state import (
+    ACTIVE_CAUSE_LEASE_MINUTES,
+    EmotionalVector,
+    append_emotional_event,
+    append_emotional_state,
+    append_emotional_transition,
+    read_active_cause_lifecycle,
+    revise_active_cause_lifecycle,
+    read_emotional_event_by_idempotency_key,
+    read_last_state_record,
+    update_active_cause_lifecycle,
+)
+from styx.emotional.transition import (
+    TransitionObserver,
+    canonical_turn_hash,
+    make_transition_observer,
+    redact_cause_summary,
+)
 from styx.providers.recall_tracker import RecallTracker
 from styx.storage.queries import AgentScopedQueries
 from styx.storage.recall import format_recall_text, recall_full
@@ -47,6 +65,120 @@ from styx.storage.recall_config import (
 )
 
 log = logging.getLogger(__name__)
+
+_CAUSAL_CONTEXT_SOFT_LIMIT = 8
+
+
+def _lock_affective_line(conn: psycopg.Connection, agent_id: str) -> None:
+    """Hold the same transaction lock as the emotional-state reducer."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"styx:emotional_state:{agent_id}",),
+        )
+
+
+def _bounded_causal_context(
+    items: list[dict[str, Any]], *, limit: int = _CAUSAL_CONTEXT_SOFT_LIMIT
+) -> list[dict[str, Any]]:
+    """Keep every active cause and only the newest bounded inactive tail."""
+    valid = [dict(item) for item in items if isinstance(item, dict)]
+    active = [item for item in valid if item.get("cause_active") is True]
+    inactive = [item for item in valid if item.get("cause_active") is not True]
+    return [*active, *inactive[-max(0, limit):]]
+
+
+def _observer_prior_context(
+    previous: Any,
+    active_lifecycle: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build hard-bounded sanitized coordinates, never cause prose/refs."""
+    if previous is None:
+        return {}
+    causes = []
+    allowed_posture = {
+        "attention": {
+            "preserve_direction", "verify_correspondence",
+            "surface_ambiguity", "explore_connections",
+        },
+        "verification_depth": {"normal", "high"},
+        "branch_budget": {"narrow", "balanced", "broad"},
+        "closure_policy": {"normal", "resist_premature_closure"},
+    }
+    authoritative_ids = set(active_lifecycle or {})
+    raw = [
+        item for item in previous.causal_context
+        if isinstance(item, dict)
+        and isinstance(item.get("evidence_id"), int)
+        and not isinstance(item.get("evidence_id"), bool)
+        and (
+            active_lifecycle is None
+            or int(item["evidence_id"]) in authoritative_ids
+        )
+    ]
+    def _rank(item: dict[str, Any]) -> tuple[float, str, int]:
+        intensity = item.get("intensity")
+        confidence = item.get("confidence")
+        weight = (
+            float(intensity) * float(confidence)
+            if isinstance(intensity, (int, float)) and not isinstance(intensity, bool)
+            and isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+            else 0.0
+        )
+        observed = item.get("observed_at")
+        return weight, observed if isinstance(observed, str) else "", int(item["evidence_id"])
+
+    raw.sort(key=_rank, reverse=True)
+    for item in raw[:_CAUSAL_CONTEXT_SOFT_LIMIT]:
+        posture = item.get("cognitive_posture")
+        safe_posture = None
+        if isinstance(posture, dict) and all(
+            posture.get(key) in values
+            for key, values in allowed_posture.items()
+        ):
+            safe_posture = {key: posture[key] for key in allowed_posture}
+        causes.append({
+            "evidence_id": int(item["evidence_id"]),
+            "cause_class": item.get("cause_class")
+            if item.get("cause_class") in {
+                "semantic_alignment", "task_uncertainty",
+                "constraint_pressure", "execution_risk",
+                "conflicting_signals", "goal_progress", "discovery",
+                "interpersonal_tension", "resolution", "unknown",
+            } else "unknown",
+            "cause_subject": item.get("cause_subject")
+            if item.get("cause_subject") in {
+                "response_correctness", "task_completion",
+                "constraint_compliance", "tool_outcome",
+                "relationship_alignment", "uncertainty_resolution",
+                "external_event", "unknown",
+            } else "unknown",
+            "status": "active",
+            "cause_active": True,
+            "intensity": item.get("intensity")
+            if isinstance(item.get("intensity"), (int, float))
+            and not isinstance(item.get("intensity"), bool) else None,
+            "confidence": item.get("confidence")
+            if isinstance(item.get("confidence"), (int, float))
+            and not isinstance(item.get("confidence"), bool) else None,
+            "observed_at": item.get("observed_at")
+            if isinstance(item.get("observed_at"), str) else None,
+            "lease_expires_at": item.get("lease_expires_at")
+            if isinstance(item.get("lease_expires_at"), str) else None,
+            "cognitive_posture": safe_posture,
+        })
+    return {
+        "state_id": previous.id,
+        "observed_at": previous.at.isoformat(),
+        "coordinates": {
+            "valence": previous.vector.valence,
+            "arousal": previous.vector.arousal,
+            "dominance": previous.vector.dominance,
+        },
+        "confidence": previous.confidence,
+        "causes": causes,
+        "omitted_cause_count": max(0, len(raw) - len(causes)),
+    }
 
 
 class StyxMemoryCore:
@@ -64,6 +196,7 @@ class StyxMemoryCore:
         self._queries: AgentScopedQueries | None = None
         self._embedding: EmbeddingClient | None = None
         self._sentiment: SentimentClient | None = None
+        self._transition_observer: TransitionObserver | None = None
         self._recall_tracker: RecallTracker = RecallTracker()
         self._session_id: uuid.UUID | None = None
         self._write_lock = threading.Lock()
@@ -148,7 +281,19 @@ class StyxMemoryCore:
 
         # Sentiment hot-path (волна 7d). Может быть выключен через
         # STYX_SENTIMENT_ENABLED=0 для тестов / debug'а.
-        if self._config.sentiment_enabled:
+        if self._config.affective_transition_enabled:
+            self._transition_observer = make_transition_observer(
+                base_url=self._config.llm_url,
+                model=self._config.llm_model,
+                timeout_s=self._config.affective_transition_timeout_s,
+            )
+        else:
+            self._transition_observer = None
+
+        # Legacy peer-only path оставлен как explicit rollback toggle. При
+        # включённом causal observer не делаем второй LLM-call и не зеркалим
+        # тон пользователя непосредственно в состояние агента.
+        if self._config.sentiment_enabled and not self._config.affective_transition_enabled:
             self._sentiment = make_sentiment_client(
                 base_url=self._config.llm_url,
                 model=self._config.llm_model,
@@ -234,6 +379,7 @@ class StyxMemoryCore:
             from styx.engine.pre_llm_channels.self_state import channel_self_state
             handle = pre_llm_inject.ChannelHandle(
                 queries=self._queries,
+                write_lock=self._write_lock,
                 self_state_enabled=self._config.self_state_enabled,
                 self_state_min_norm=self._config.self_state_min_norm,
                 self_state_max_age_s=self._config.self_state_max_age_s,
@@ -341,6 +487,7 @@ class StyxMemoryCore:
                     self._queries = None
                     self._embedding = None
                     self._sentiment = None
+                    self._transition_observer = None
 
     # -- system prompt + recall ------------------------------------------
 
@@ -355,6 +502,298 @@ class StyxMemoryCore:
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         return None
 
+    def observe_affective_turn(
+        self,
+        *,
+        idempotency_key: str,
+        turn_id: str,
+        session_id: str | None = None,
+        user_message: str = "",
+        assistant_response: str = "",
+        conversation_history: list[dict[str, Any]] | None = None,
+        tool_events: list[dict[str, Any]] | None = None,
+        task_id: str | None = None,
+        model: str | None = None,
+        platform: str | None = None,
+        extra: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Зафиксировать осадок завершённого когнитивного акта.
+
+        Peer stimulus и reaction агента разделены. Состояние изменяется
+        только после анализа полного turn (включая фактический ответ), а
+        idempotency key не позволяет retry применить переход повторно.
+        Fail-open: ошибка наблюдателя не ломает завершение Hermes turn.
+        """
+        del task_id, extra
+        if self._conn is None or self._queries is None:
+            return {"accepted": False, "duplicate": False, "reason": "not_initialized"}
+        observer = self._transition_observer
+        if observer is None:
+            return {
+                "accepted": False,
+                "duplicate": False,
+                "reason": "affective_transition_disabled",
+            }
+
+        # Retries are common at host boundaries. Snapshot the shared psycopg
+        # connection only under its mutex and close the read transaction before
+        # the potentially slow model call. The later INSERT remains the sole
+        # authoritative dedup barrier; concurrent first attempts may both run
+        # observation, but can never apply the transition twice.
+        prior_context: dict[str, Any] = {}
+        with self._write_lock:
+            if self._conn is None:
+                return {"accepted": False, "duplicate": False, "reason": "shutdown"}
+            try:
+                existing = read_emotional_event_by_idempotency_key(
+                    self._conn, self._agent_id, idempotency_key
+                )
+                previous = read_last_state_record(self._conn, self._agent_id)
+                active_lifecycle = read_active_cause_lifecycle(
+                    self._conn, self._agent_id
+                )
+                prior_context = _observer_prior_context(
+                    previous, active_lifecycle
+                )
+                self._conn.commit()
+            except Exception as exc:  # noqa: BLE001 - preflight is fail-open
+                self._conn.rollback()
+                log.warning("affective duplicate preflight failed: %s", exc)
+                existing = None
+        if existing is not None:
+            observer.metrics.bump("duplicates")
+            return {"accepted": True, "duplicate": True, "reason": None}
+
+        assessment = observer.observe(
+            user_message=user_message,
+            assistant_response=assistant_response,
+            prior_context=prior_context,
+            conversation_history=conversation_history,
+            tool_events=tool_events,
+        )
+        if assessment is None:
+            return {"accepted": False, "duplicate": False, "reason": "observation_failed"}
+
+        turn_hash = canonical_turn_hash(
+            session_id=session_id,
+            user_message=user_message,
+            assistant_response=assistant_response,
+        )
+        with self._write_lock:
+            if self._conn is None:
+                return {"accepted": False, "duplicate": False, "reason": "shutdown"}
+            try:
+                with self._guarded_write("observe_affective_turn"):
+                    # Serialize lineage validation with every reducer that can
+                    # advance this agent, including other daemon processes.
+                    _lock_affective_line(self._conn, self._agent_id)
+                    latest = read_last_state_record(self._conn, self._agent_id)
+                    existing_causes = (
+                        _bounded_causal_context(list(latest.causal_context))
+                        if latest is not None else []
+                    )
+                    active_lifecycle = read_active_cause_lifecycle(
+                        self._conn, self._agent_id
+                    )
+                    updated_ids = set(assessment.updates_event_ids)
+                    reaffirmed_ids = set(assessment.reaffirms_event_ids)
+                    revised_ids = set(assessment.revises_event_ids)
+                    referenced_ids = updated_ids | reaffirmed_ids | revised_ids
+                    if not referenced_ids <= set(active_lifecycle):
+                        self._conn.rollback()
+                        log.warning(
+                            "affective lineage rejected: evidence ids do not "
+                            "identify active unexpired causes of this agent"
+                        )
+                        return {
+                            "accepted": False,
+                            "duplicate": False,
+                            "reason": "invalid_cause_lineage",
+                        }
+
+                    written = append_emotional_event(
+                        self._conn,
+                        self._agent_id,
+                        source_kind="completed_turn",
+                        source_ref=turn_id,
+                        idempotency_key=idempotency_key,
+                        signal=assessment.stimulus,
+                        intensity=assessment.intensity,
+                        confidence=assessment.confidence,
+                        cause_summary=redact_cause_summary(
+                            assessment.cause_summary
+                        )[:280],
+                        # Reaffirmation is evidence about an existing cause,
+                        # not a second active cause with the same support.
+                        cause_status=(
+                            "unknown" if (reaffirmed_ids or revised_ids)
+                            else assessment.cause_status
+                        ),
+                        metadata={
+                            "turn_hash": turn_hash,
+                            "session_present": bool(session_id),
+                            "model": model,
+                            "platform": platform,
+                            "reaction_vad": [
+                                assessment.reaction.valence,
+                                assessment.reaction.arousal,
+                                assessment.reaction.dominance,
+                            ],
+                            "cause_class": assessment.cause_class,
+                            "cause_subject": assessment.cause_subject,
+                            "cognitive_posture": assessment.posture.as_dict(),
+                            "updates_event_ids": list(
+                                assessment.updates_event_ids
+                            ),
+                            "reaffirms_event_ids": list(
+                                assessment.reaffirms_event_ids
+                            ),
+                            "revises_event_ids": list(assessment.revises_event_ids),
+                        },
+                    )
+                    if written.duplicate:
+                        self._conn.commit()
+                        observer.metrics.bump("duplicates")
+                        return {"accepted": True, "duplicate": True, "reason": None}
+
+                    revised_by_id: dict[int, dict[str, Any]] = {}
+                    if updated_ids:
+                        closed = update_active_cause_lifecycle(
+                            self._conn,
+                            self._agent_id,
+                            assessment.updates_event_ids,
+                            status=assessment.cause_status,
+                            status_source_event_id=written.event.id,
+                            at=written.event.observed_at,
+                        )
+                        revised_by_id.update({
+                            int(item["evidence_id"]): item for item in closed
+                        })
+                    if reaffirmed_ids:
+                        reaffirmed = update_active_cause_lifecycle(
+                            self._conn,
+                            self._agent_id,
+                            assessment.reaffirms_event_ids,
+                            status="active",
+                            status_source_event_id=written.event.id,
+                            at=written.event.observed_at,
+                        )
+                        revised_by_id.update({
+                            int(item["evidence_id"]): item
+                            for item in reaffirmed
+                        })
+                    revision_delta: EmotionalVector | None = None
+                    if revised_ids:
+                        revised_id = assessment.revises_event_ids[0]
+                        revised_context, old_support = revise_active_cause_lifecycle(
+                            self._conn,
+                            self._agent_id,
+                            revised_id,
+                            support=assessment.weighted_delta,
+                            confidence=assessment.confidence,
+                            intensity=assessment.intensity,
+                            status_source_event_id=written.event.id,
+                            at=written.event.observed_at,
+                            context_updates={
+                                "cause_class": assessment.cause_class,
+                                "cause_subject": assessment.cause_subject,
+                                "cognitive_posture": assessment.posture.as_dict(),
+                                "observed_at": written.event.observed_at.isoformat(),
+                                "revises_event_ids": [revised_id],
+                            },
+                        )
+                        revised_by_id[revised_id] = revised_context
+                        revision_delta = EmotionalVector(
+                            assessment.weighted_delta.valence - old_support.valence,
+                            assessment.weighted_delta.arousal - old_support.arousal,
+                            assessment.weighted_delta.dominance - old_support.dominance,
+                        )
+
+                    if revised_by_id:
+                        revised_causes: list[dict[str, Any]] = []
+                        for item in existing_causes:
+                            evidence_id = item.get("evidence_id")
+                            revised_causes.append(
+                                dict(revised_by_id[evidence_id])
+                                if evidence_id in revised_by_id else dict(item)
+                            )
+                        existing_causes = revised_causes
+                    contribution = {
+                        "evidence_id": written.event.id,
+                        "source_ref": turn_id,
+                        "cause_class": assessment.cause_class,
+                        "cause_subject": assessment.cause_subject,
+                        "status": assessment.cause_status,
+                        "cause_active": assessment.cause_status == "active",
+                        "intensity": assessment.intensity,
+                        "confidence": assessment.confidence,
+                        "observed_at": written.event.observed_at.isoformat(),
+                        "lease_expires_at": (
+                            written.event.observed_at + dt.timedelta(
+                                minutes=ACTIVE_CAUSE_LEASE_MINUTES
+                            )
+                        ).isoformat()
+                        if assessment.cause_status == "active" else None,
+                        "reaction_vad": [
+                            assessment.reaction.valence,
+                            assessment.reaction.arousal,
+                            assessment.reaction.dominance,
+                        ],
+                        "weighted_delta": [
+                            assessment.weighted_delta.valence,
+                            assessment.weighted_delta.arousal,
+                            assessment.weighted_delta.dominance,
+                        ],
+                        "cognitive_posture": assessment.posture.as_dict(),
+                        "updates_event_ids": list(assessment.updates_event_ids),
+                        "reaffirms_event_ids": list(
+                            assessment.reaffirms_event_ids
+                        ),
+                        "revises_event_ids": list(assessment.revises_event_ids),
+                    }
+                    causal_context = _bounded_causal_context(
+                        existing_causes + (
+                            [] if (reaffirmed_ids or revised_ids) else [contribution]
+                        )
+                    )
+                    applied_delta = (
+                        EmotionalVector(0.0, 0.0, 0.0)
+                        if reaffirmed_ids else assessment.weighted_delta
+                    )
+                    if revision_delta is not None:
+                        applied_delta = revision_delta
+                    append_emotional_transition(
+                        self._conn,
+                        self._agent_id,
+                        applied_delta,
+                        source="turn_transition",
+                        event_id=written.event.id,
+                        intensity=assessment.intensity,
+                        confidence=assessment.confidence,
+                        causal_context=causal_context,
+                        computation_version="causal-turn-v1",
+                        metadata={
+                            "turn_hash": turn_hash,
+                            "cause_class": assessment.cause_class,
+                            "cause_subject": assessment.cause_subject,
+                            "posture": assessment.posture.as_dict(),
+                            "updates_event_ids": list(
+                                assessment.updates_event_ids
+                            ),
+                            "reaffirms_event_ids": list(
+                                assessment.reaffirms_event_ids
+                            ),
+                            "revises_event_ids": list(assessment.revises_event_ids),
+                        },
+                    )
+                    self._conn.commit()
+            except Exception as exc:  # noqa: BLE001 - host hook fail-open
+                log.warning("observe_affective_turn failed: %s", exc)
+                return {"accepted": False, "duplicate": False, "reason": "write_failed"}
+
+        observer.metrics.bump("applied")
+        return {"accepted": True, "duplicate": False, "reason": None}
+
     # -- write path ------------------------------------------------------
 
     def _insert_message_parts(
@@ -363,6 +802,7 @@ class StyxMemoryCore:
         role: str,
         content: str,
         session_id: uuid.UUID | None,
+        idempotency_key: str | None = None,
     ) -> list[tuple[uuid.UUID, str]]:
         """Вставить реплику дневника, разрезав её при необходимости.
 
@@ -389,28 +829,48 @@ class StyxMemoryCore:
         )
         parts = split_message(content, part_chars=part_chars)
 
+        def _metadata(part: int, total: int) -> dict[str, Any]:
+            metadata: dict[str, Any] = {}
+            if idempotency_key is not None:
+                metadata.update({
+                    "styx_sync_turn_key": idempotency_key,
+                    "styx_sync_turn_role": role,
+                    "styx_sync_turn_part": part,
+                })
+            if total > 1:
+                metadata.update({
+                    "msg_group": group_id,
+                    "part": part,
+                    "parts": total,
+                })
+            return metadata
+
+        group_id = (
+            str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"styx-sync:{self._agent_id}:{idempotency_key}:{role}",
+            ))
+            if idempotency_key is not None else str(uuid.uuid4())
+        )
+
         if len(parts) <= 1:
-            # Короткая реплика — один ряд без group-metadata.
+            # Без idempotency key короткая реплика сохраняет legacy metadata={}.
             mid = self._queries.insert_message(
                 role=role,
                 content=content,
                 session_id=session_id,
+                metadata=_metadata(0, 1),
             )
             return [(mid, content)]
 
         # Длинная реплика — группа рядов. Один turn-reply = одна группа.
-        group_id = str(uuid.uuid4())
         out: list[tuple[uuid.UUID, str]] = []
         for idx, part_text in enumerate(parts):
             mid = self._queries.insert_message(
                 role=role,
                 content=part_text,
                 session_id=session_id,
-                metadata={
-                    "msg_group": group_id,
-                    "part": idx,
-                    "parts": len(parts),
-                },
+                metadata=_metadata(idx, len(parts)),
             )
             out.append((mid, part_text))
         log.info(
@@ -426,10 +886,18 @@ class StyxMemoryCore:
         assistant_content: str,
         *,
         session_id: str = "",
+        idempotency_key: str | None = None,
     ) -> None:
         if self._queries is None:
             log.warning("sync_turn до initialize — пропуск")
             return
+
+        if idempotency_key is not None:
+            idempotency_key = idempotency_key.strip()
+            if not idempotency_key or len(idempotency_key) > 512:
+                raise ValueError(
+                    "sync_turn idempotency_key must contain 1..512 characters"
+                )
 
         target_session = _coerce_session_id(session_id) if session_id else self._session_id
         inserted_ids: list[tuple[uuid.UUID, str]] = []
@@ -442,6 +910,26 @@ class StyxMemoryCore:
             if self._queries is None:
                 log.warning("sync_turn: queries обнулены во время ожидания lock — пропуск")
                 return
+            if idempotency_key is not None:
+                # Serialize the durable key across daemon processes, then
+                # treat any committed row as proof that this pair's atomic
+                # insert transaction already completed. This also prevents a
+                # changed retry from appending extra split parts.
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"styx:sync_turn:{self._agent_id}:{idempotency_key}",),
+                    )
+                existing = self._queries.find_sync_turn_message_parts(
+                    idempotency_key
+                )
+                if existing:
+                    self._conn.commit()  # type: ignore[union-attr]
+                    log.info(
+                        "sync_turn duplicate skipped for durable key (%d rows)",
+                        len(existing),
+                    )
+                    return
             # Defect-fix 2 / волна 34 (rollback-guard): первый блок
             # insert+commit обёрнут в _guarded_write. Если запись упадёт
             # (например, ContentTooLongError из insert_message при дефекте
@@ -464,6 +952,7 @@ class StyxMemoryCore:
                             role="user",
                             content=user_content,
                             session_id=target_session,
+                            idempotency_key=idempotency_key,
                         )
                     )
                 if assistant_content:
@@ -472,6 +961,7 @@ class StyxMemoryCore:
                             role="assistant",
                             content=assistant_content,
                             session_id=target_session,
+                            idempotency_key=idempotency_key,
                         )
                     )
                 self._conn.commit()  # type: ignore[union-attr]
@@ -830,6 +1320,10 @@ class StyxMemoryCore:
                     new_content=content, new_embedding=vec,
                 )
                 self._conn.commit()
+                from styx.engine import hot_tier
+
+                hot_tier.invalidate(self._agent_id, decision.existing_id)
+                hot_tier.invalidate(self._agent_id, mid)
                 return MemoryStoreOutcome(
                     action="merge",
                     existing_id=str(decision.existing_id),

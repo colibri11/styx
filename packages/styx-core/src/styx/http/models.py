@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import datetime as _dt
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -90,6 +90,9 @@ class SyncTurnRequest(BaseModel):
     assistant_content: str = ""
     tool_calls: list[dict[str, Any]] | None = None
     ts: _dt.datetime | None = None
+    idempotency_key: str | None = Field(
+        default=None, min_length=1, max_length=512
+    )
 
 
 class SyncTurnResponse(BaseModel):
@@ -108,12 +111,41 @@ class RecallRequest(BaseModel):
     session_id: str | None = None
 
 
+class RecallAffectiveVAD(BaseModel):
+    valence: float
+    arousal: float
+    dominance: float
+
+
+class RecallAffectiveCauseRef(BaseModel):
+    evidence_id: int | None = None
+    source_ref: str | None = Field(default=None, max_length=256)
+    cause_class: str = Field(max_length=64)
+    cause_subject: str = Field(default="unknown", max_length=64)
+    status_at_capture: str = Field(max_length=16)
+    current_status: str | None = Field(default=None, max_length=16)
+    current_active: bool | None = None
+    intensity: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_at: _dt.datetime | None = None
+    lease_expires_at: _dt.datetime | None = None
+
+
+class RecallAffectiveProvenance(BaseModel):
+    state_id: int | None = None
+    context_at: _dt.datetime | None = None
+    vad: RecallAffectiveVAD
+    confidence: float | None = None
+    causal_refs: list[RecallAffectiveCauseRef] = Field(default_factory=list)
+
+
 class RecallMemory(BaseModel):
     id: str
     content: str
     score: float
     role: str
     created_at: _dt.datetime | None = None
+    affective_provenance: RecallAffectiveProvenance | None = None
 
 
 class RecallResponse(_LlmWrappableResponse):
@@ -156,6 +188,63 @@ class PreLlmInjectResponse(BaseModel):
     context: str | None = None
 
 
+# ── affect turn observation ──────────────────────────────────────────────
+
+
+class AffectTurnHistoryMessage(BaseModel):
+    """Bounded model-visible history item from a completed host turn."""
+
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(max_length=4_000)
+    name: str | None = Field(default=None, max_length=256)
+
+
+class AffectToolEvent(BaseModel):
+    """Bounded tool call/result evidence extracted by the host adapter."""
+
+    kind: Literal["call", "result"]
+    tool_call_id: str = Field(default="", max_length=256)
+    name: str = Field(default="", max_length=256)
+    content: str = Field(default="", max_length=4_000)
+
+
+_AffectExtraKey = Annotated[str, Field(min_length=1, max_length=64)]
+_AffectExtraValue = Annotated[str, Field(max_length=1_000)]
+
+
+class AffectObserveTurnRequest(BaseModel):
+    """Finalized cognitive-act envelope from a host adapter.
+
+    ``idempotency_key`` is mandatory even while the evaluator is not wired:
+    the eventual durable writer can safely accept retries without changing
+    this additive HTTP contract. History and tool evidence are deliberately
+    bounded at the schema boundary as defense in depth.
+    """
+
+    agent_id: str = Field(min_length=1, max_length=256)
+    idempotency_key: str = Field(min_length=1, max_length=512)
+    turn_id: str = Field(min_length=1, max_length=256)
+    session_id: str | None = Field(default=None, max_length=256)
+    user_message: str = Field(default="", max_length=20_000)
+    assistant_response: str = Field(default="", max_length=40_000)
+    conversation_history: list[AffectTurnHistoryMessage] = Field(
+        default_factory=list, max_length=24
+    )
+    tool_events: list[AffectToolEvent] = Field(default_factory=list, max_length=32)
+    task_id: str | None = Field(default=None, max_length=256)
+    model: str | None = Field(default=None, max_length=512)
+    platform: str | None = Field(default=None, max_length=64)
+    extra: dict[_AffectExtraKey, _AffectExtraValue] = Field(
+        default_factory=dict, max_length=16
+    )
+
+
+class AffectObserveTurnResponse(BaseModel):
+    accepted: bool
+    duplicate: bool
+    reason: str | None = None
+
+
 # ── agent state ───────────────────────────────────────────────────────────
 
 
@@ -165,11 +254,28 @@ class VAD(BaseModel):
     dominance: float
 
 
+class AffectiveStateEvidence(BaseModel):
+    state_id: int
+    at: _dt.datetime
+    source: str | None = None
+    parent_state_id: int | None = None
+    event_id: int | None = None
+    delta: VAD | None = None
+    intensity: float | None = None
+    transition_confidence: float | None = None
+    confidence: float | None = None
+    causal_components: list[RecallAffectiveCauseRef] = Field(
+        default_factory=list, max_length=8
+    )
+    computation_version: str | None = None
+
+
 class AgentStateResponse(BaseModel):
     agent_id: str
     instant: VAD | None = None
     baseline: VAD | None = None
     mood: str | None = None
+    instant_evidence: AffectiveStateEvidence | None = None
 
 
 # ── memory_store (волна 17) ───────────────────────────────────────────────
@@ -807,8 +913,8 @@ class ContextMessage(BaseModel):
     core хранит только role+content в memories.
     """
 
-    role: str
-    content: str = ""
+    role: Literal["user", "assistant", "system", "tool"]
+    content: str = Field(default="", max_length=40_000)
 
     model_config = {"extra": "ignore"}
 
@@ -865,7 +971,10 @@ class ContextIngestBatchRequest(BaseModel):
 
     agent_id: str
     session_id: str | None = None
-    messages: list[ContextMessage] = Field(default_factory=list)
+    messages: list[ContextMessage] = Field(default_factory=list, max_length=64)
+    idempotency_key: str | None = Field(
+        default=None, min_length=1, max_length=512
+    )
 
 
 class ContextIngestBatchResponse(BaseModel):

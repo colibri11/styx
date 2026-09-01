@@ -40,6 +40,10 @@ import {
   parseAgentIdFromSessionKey,
 } from "../agent-id-shared.js";
 import { fmtErr, type StyxClient, type StyxLogger } from "../client.js";
+import {
+  TerminalTurnBarrier,
+  terminalScopeKey,
+} from "./terminal-barrier.js";
 
 export type BeforePromptBuildHookEvent = {
   prompt?: string;
@@ -78,6 +82,8 @@ export type BeforePromptBuildHookParams = {
   client: StyxClient;
   logger: StyxLogger;
   resolveAgentId: (openclawAgentId: string) => Promise<string>;
+  terminalBarrier: TerminalTurnBarrier;
+  terminalDrainTimeoutMs: number;
 };
 
 /**
@@ -123,7 +129,13 @@ function deriveOpenclawAgentIdFromHookCtx(
 export function createBeforePromptBuildHook(
   params: BeforePromptBuildHookParams,
 ): BeforePromptBuildHookHandler {
-  const { client, logger, resolveAgentId } = params;
+  const {
+    client,
+    logger,
+    resolveAgentId,
+    terminalBarrier,
+    terminalDrainTimeoutMs,
+  } = params;
   const bootstrapped = new Set<string>();
 
   return async function beforePromptBuild(event, ctx) {
@@ -132,6 +144,19 @@ export function createBeforePromptBuildHook(
       // Anonymous поток — нет привязанного Styx-агента. Passthrough,
       // ничего не добавляем.
       return undefined;
+    }
+
+    // Establish the causal hand-off before fetching the next prompt state.
+    // Timeout is deliberately fail-open: a slow observer cannot wedge the
+    // host, but the warning explains why this turn may see stale residue.
+    const drain = await terminalBarrier.drain(
+      terminalScopeKey(openclawAgentId, ctx.sessionId, ctx.sessionKey),
+      terminalDrainTimeoutMs,
+    );
+    if (!drain.completed) {
+      logger.warn?.(
+        `[styx] before_prompt_build timed out after ${terminalDrainTimeoutMs}ms waiting for ${drain.pending} previous agent_end task(s); assembling fail-open`,
+      );
     }
 
     let agentId: string;

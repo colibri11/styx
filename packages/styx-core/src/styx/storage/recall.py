@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -26,6 +27,46 @@ if TYPE_CHECKING:
     from styx.turn_state import RecallSnapshot
 
 log = logging.getLogger(__name__)
+
+
+def _current_scoring_affect(
+    queries: AgentScopedQueries,
+) -> ScoringEmotionalBaseline | None:
+    """Актуальный causal residue для emotional recall.
+
+    Legacy scoring API исторически называет аргумент ``baseline``. Для
+    выбора памяти нужен не медленный средний фон сам по себе, а состояние,
+    в котором начинается текущий когнитивный акт. Уверенность нового
+    transition определяет, насколько instant отклоняет fallback baseline.
+    Legacy state без confidence не выдаём за достоверное evidence.
+    """
+    from styx.emotional.baseline import read_baseline_for_scoring
+    from styx.emotional.state import read_last_state_record
+
+    baseline = read_baseline_for_scoring(queries.conn, queries.agent_id)
+    try:
+        state = read_last_state_record(queries.conn, queries.agent_id)
+    except Exception as exc:  # noqa: BLE001 - recall must remain fail-open
+        log.warning("current affect unavailable for recall: %s", exc)
+        state = None
+    if state is None or state.confidence is None:
+        if baseline is None:
+            return None
+        return ScoringEmotionalBaseline(
+            valence=baseline.valence,
+            arousal=baseline.arousal,
+            dominance=baseline.dominance,
+        )
+
+    confidence = max(0.0, min(1.0, state.confidence))
+    base_v = baseline.valence if baseline is not None else 0.0
+    base_a = baseline.arousal if baseline is not None else 0.0
+    base_d = baseline.dominance if baseline is not None else 0.0
+    return ScoringEmotionalBaseline(
+        valence=base_v + confidence * (state.vector.valence - base_v),
+        arousal=base_a + confidence * (state.vector.arousal - base_a),
+        dominance=base_d + confidence * (state.vector.dominance - base_d),
+    )
 
 
 @dataclass(frozen=True)
@@ -73,21 +114,9 @@ def recall_full(
             log.warning("recall_full: embed query упал: %s", exc)
             return RecallResult(memories=[], queried_count=0, internal_duplicates_removed=0)
 
-    # Прочитать baseline для emotional_resonance фактора. Лениво: импорт
-    # внутри функции потому что emotional/ — отдельный package, не должен
-    # импортироваться при чистой работе с storage без эмоциональной части.
-    from styx.emotional.baseline import read_baseline_for_scoring
-
-    baseline_obj = read_baseline_for_scoring(queries.conn, queries.agent_id)
-    scoring_baseline = (
-        ScoringEmotionalBaseline(
-            valence=baseline_obj.valence,
-            arousal=baseline_obj.arousal,
-            dominance=baseline_obj.dominance,
-        )
-        if baseline_obj is not None
-        else None
-    )
+    # Causal instant residue меняет выбор памяти до генерации. Медленный
+    # baseline остаётся fallback и опорой при низкой confidence.
+    scoring_baseline = _current_scoring_affect(queries)
 
     # Волна 11: hot supplement. Items, недавно прошедшие через recall,
     # доплываются как extra candidates до filter+dedup+slice. БД-версия
@@ -174,7 +203,52 @@ def format_recall_text(result: RecallResult) -> str:
         return "<no memories matched>"
     parts: list[str] = []
     for hit in result.memories:
+        coordinates = ""
+        provenance = hit.affective_provenance
+        if provenance is not None:
+            context_at = provenance.context_at
+            if hasattr(context_at, "isoformat"):
+                context_at = context_at.isoformat()
+            evidence = {
+                "state_id": provenance.state_id,
+                "context_at": context_at,
+                "vad": {
+                    "valence": round(provenance.vad.valence, 6),
+                    "arousal": round(provenance.vad.arousal, 6),
+                    "dominance": round(provenance.vad.dominance, 6),
+                },
+                "confidence": (
+                    round(provenance.confidence, 6)
+                    if provenance.confidence is not None else None
+                ),
+                "causal_refs": [
+                    {
+                        "evidence_id": ref.evidence_id,
+                        "source_ref": ref.source_ref,
+                        "cause_class": ref.cause_class,
+                        "cause_subject": ref.cause_subject,
+                        "status_at_capture": ref.status_at_capture,
+                        "intensity": ref.intensity,
+                        "confidence": ref.confidence,
+                        "observed_at": (
+                            ref.observed_at.isoformat()
+                            if hasattr(ref.observed_at, "isoformat") else None
+                        ),
+                        "lease_expires_at": (
+                            ref.lease_expires_at.isoformat()
+                            if hasattr(ref.lease_expires_at, "isoformat") else None
+                        ),
+                    }
+                    for ref in provenance.causal_refs
+                ],
+            }
+            coordinates = " affect_evidence=" + json.dumps(
+                evidence,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         parts.append(
-            f"[score={hit.score:.3f} role={hit.role}] {hit.content}"
+            f"[score={hit.score:.3f} role={hit.role}{coordinates}] "
+            f"{hit.content}"
         )
     return "\n\n".join(parts)

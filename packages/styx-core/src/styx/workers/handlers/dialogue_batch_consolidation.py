@@ -8,8 +8,8 @@ qwen3:4b-local'у с промптом, который требует:
   piggyback).
 
 INSERT новых memories с ``kind_src='dialogue_batch_consolidation'``
-+ append emotional_state с ``source='sentiment:batch'`` (если VAD
-вернулся) — атомарно в одной транзакции. State в
++ append peer-signal evidence (если VAD вернулся) — атомарно в одной
+транзакции. Batch больше не зеркалит peer VAD в состояние агента. State в
 ``consolidation_state`` обновляется тем же commit'ом.
 
 Волна 35 (D7): user-промпт дополнительно включает демаркированный блок
@@ -33,18 +33,14 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from styx.emotional.sentiment_batch import (
-    K_BATCH,
-    SentimentBatchMetrics,
-    average_vads,
-    scale_batch_vad_delta,
-)
+from styx.emotional.sentiment_batch import SentimentBatchMetrics, average_vads
 from styx.embedding import EmbeddingError
 from styx.emotional.state import (
     EMOTIONAL_AXIS_MAX,
     EMOTIONAL_AXIS_MIN,
     EmotionalVector,
-    append_emotional_state,
+    append_emotional_event,
+    max_abs,
 )
 from styx.engine.auto_link import AutoLinkConfig, auto_link_after_store
 from styx.engine.selective_gatekeeper import (
@@ -585,27 +581,36 @@ def create_dialogue_batch_handler(
         if avg_vad is None:
             metrics.record_skip_no_vad()
 
-        # Atomic: VAD apply (если есть) → INSERT memories → state update.
-        # Все три внутри одной транзакции; runtime коммитит после
-        # возврата HandlerResult.
+        # Atomic: peer evidence capture (если есть) → INSERT memories →
+        # consolidation state update. Все три внутри одной транзакции;
+        # runtime коммитит после возврата HandlerResult.
         latest_row = rows[-1]
+        source_memory_ids = [row["id"] for row in rows]
         created_ids: list[str] = []
         skip_reasons: list[str] = []
 
         if avg_vad is not None and batch_sentiment_enabled:
-            append_emotional_state(
-                ctx.conn, agent_id,
-                scale_batch_vad_delta(avg_vad),
-                source="sentiment:batch",
+            window_from = (
+                payload.window_from.isoformat() if payload.window_from else "begin"
+            )
+            window_to = payload.window_to.isoformat()
+            append_emotional_event(
+                ctx.conn,
+                agent_id,
+                source_kind="peer_signal:batch",
+                occurred_at=payload.window_to,
+                source_ref=f"{window_from}:{window_to}",
+                idempotency_key=f"dialogue-batch:{window_from}:{window_to}",
+                signal=avg_vad,
+                intensity=max_abs(avg_vad),
+                confidence=None,
+                cause_status="unknown",
                 metadata={
-                    "window_from": (
-                        payload.window_from.isoformat()
-                        if payload.window_from else None
-                    ),
-                    "window_to": payload.window_to.isoformat(),
+                    "window_from": window_from,
+                    "window_to": window_to,
                     "chunks": len(chunks),
                     "vad_samples": len(vads),
-                    "k_batch": K_BATCH,
+                    "role": "peer_observation",
                 },
             )
             metrics.record_applied()
@@ -640,6 +645,7 @@ def create_dialogue_batch_handler(
                             {"dialogue_batch_archive_ref": o.archive_ref}
                             if o.archive_ref else None
                         ),
+                        tail_emotional_source_ids=source_memory_ids,
                     )
                 except (EmbeddingError, ValueError) as exc:
                     log.warning(
@@ -674,6 +680,7 @@ def create_dialogue_batch_handler(
             mid = queries.insert_batch_memory(
                 content=content,
                 archive_ref=o.archive_ref or {},
+                source_ids=source_memory_ids,
             )
 
             # Sync embed (волна 17) — приводим writer к согласованной

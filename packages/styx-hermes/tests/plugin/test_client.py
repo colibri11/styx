@@ -88,6 +88,7 @@ def test_sync_turn_payload(client_no_token: StyxCoreClient) -> None:
             user_content="hi",
             assistant_content="hello",
             session_id="sid-x",
+            idempotency_key="hermes:sid-x:turn-1",
         )
         args, kwargs = mock_post.call_args
         body = kwargs["json"]
@@ -95,6 +96,7 @@ def test_sync_turn_payload(client_no_token: StyxCoreClient) -> None:
         assert body["user_content"] == "hi"
         assert body["assistant_content"] == "hello"
         assert body["session_id"] == "sid-x"
+        assert body["idempotency_key"] == "hermes:sid-x:turn-1"
 
 
 def test_recall_long_timeout(client_no_token: StyxCoreClient) -> None:
@@ -117,6 +119,45 @@ def test_pre_llm_inject_returns_context_or_none(client_no_token: StyxCoreClient)
         mock_post.return_value = _mock_response(200, {"context": None})
         out2 = client_no_token.pre_llm_inject("agent-a")
         assert out2["context"] is None
+
+
+def test_observe_affective_turn_payload(client_no_token: StyxCoreClient) -> None:
+    with patch.object(client_no_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(
+            200, {"accepted": False, "duplicate": False}
+        )
+        out = client_no_token.observe_affective_turn(
+            "agent-a",
+            idempotency_key="hermes:sid:turn-1",
+            turn_id="turn-1",
+            session_id="sid",
+            user_message="current user",
+            assistant_response="final answer",
+            conversation_history=[{"role": "user", "content": "prior"}],
+            tool_events=[
+                {
+                    "kind": "result",
+                    "tool_call_id": "call-1",
+                    "name": "read_file",
+                    "content": "ok",
+                }
+            ],
+            task_id="task-1",
+            model="model-x",
+            platform="cli",
+        )
+
+        assert out == {"accepted": False, "duplicate": False}
+        args, kwargs = mock_post.call_args
+        assert args[0] == "http://daemon.local:8788/affect/observe_turn"
+        body = kwargs["json"]
+        assert kwargs["timeout"] == client_no_token._affect_timeout
+        assert client_no_token._timeout < client_no_token._affect_timeout < 30.0
+        assert body["agent_id"] == "agent-a"
+        assert body["idempotency_key"] == "hermes:sid:turn-1"
+        assert body["turn_id"] == "turn-1"
+        assert body["conversation_history"][0]["content"] == "prior"
+        assert body["tool_events"][0]["tool_call_id"] == "call-1"
 
 
 def test_5xx_raises(client_no_token: StyxCoreClient) -> None:

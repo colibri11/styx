@@ -13,7 +13,9 @@ process-level константа от Hermes. AgentScopedQueries инкапсу�
 from __future__ import annotations
 
 import math
+import re
 import uuid
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -25,7 +27,12 @@ if TYPE_CHECKING:
 import psycopg
 from psycopg.rows import dict_row
 
-from ..emotional.state import EmotionalVector, read_last_state
+from ..emotional.state import (
+    EmotionalStateRecord,
+    EmotionalVector,
+    read_last_state,
+    read_last_state_record,
+)
 from .recall_config import DEFAULT_RECALL_CONFIG, FullRecallConfig
 from .scoring import (
     BuildFactorExprsOptions,
@@ -66,6 +73,172 @@ class StoredMessage:
 
 
 @dataclass(frozen=True)
+class MemoryAffectiveCauseRef:
+    """Bounded causal coordinate attached to a memory snapshot.
+
+    Deliberately excludes ``cause_summary``, posture and other prose: recall
+    may expose evidence coordinates, but must not turn stored affect into a
+    style instruction.
+    """
+
+    evidence_id: int | None
+    source_ref: str | None
+    cause_class: str
+    cause_subject: str
+    status_at_capture: str
+    current_status: str | None
+    current_active: bool | None
+    intensity: float | None
+    confidence: float | None
+    observed_at: Any
+    lease_expires_at: Any
+
+
+@dataclass(frozen=True)
+class MemoryAffectiveProvenance:
+    """Affect evidence that was current when the memory entered the line."""
+
+    state_id: int | None
+    context_at: Any
+    vad: EmotionalVector
+    confidence: float | None
+    causal_refs: tuple[MemoryAffectiveCauseRef, ...]
+
+
+_AFFECTIVE_CAUSE_CLASSES = frozenset({
+    "semantic_alignment",
+    "task_uncertainty",
+    "constraint_pressure",
+    "execution_risk",
+    "conflicting_signals",
+    "goal_progress",
+    "discovery",
+    "interpersonal_tension",
+    "resolution",
+    "unknown",
+})
+_AFFECTIVE_CAUSE_STATUSES = frozenset({
+    "active", "resolved", "superseded", "expired", "unknown",
+})
+_AFFECTIVE_CAUSE_SUBJECTS = frozenset({
+    "response_correctness", "task_completion", "constraint_compliance",
+    "tool_outcome", "relationship_alignment", "uncertainty_resolution",
+    "external_event", "unknown",
+})
+_MAX_MEMORY_CAUSAL_REFS = 8
+_CAUSAL_SOURCE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
+
+
+def _memory_affective_provenance(
+    row: dict[str, Any],
+) -> MemoryAffectiveProvenance | None:
+    """Build a safe recall projection from a memory's stored snapshot.
+
+    Migration-era rows may have VAD without lineage, and older rows may have
+    no affect columns at all.  Both remain readable.  Arbitrary legacy JSON is
+    filtered down to controlled identifiers and enums before it can reach an
+    LLM-facing recall result.
+    """
+    if row.get("emotional_context_valence") is None:
+        return None
+
+    refs: list[MemoryAffectiveCauseRef] = []
+    raw_causes = row.get("emotional_context_causes")
+    if isinstance(raw_causes, list):
+        for raw in raw_causes:
+            if not isinstance(raw, dict):
+                continue
+            raw_evidence_id = raw.get("evidence_id", raw.get("event_id"))
+            evidence_id = (
+                int(raw_evidence_id)
+                if isinstance(raw_evidence_id, int)
+                and not isinstance(raw_evidence_id, bool)
+                and raw_evidence_id > 0
+                else None
+            )
+            raw_source_ref = raw.get("source_ref")
+            source_ref = (
+                raw_source_ref
+                if isinstance(raw_source_ref, str)
+                and _CAUSAL_SOURCE_REF_RE.fullmatch(raw_source_ref)
+                else None
+            )
+            if evidence_id is None and source_ref is None:
+                continue
+            raw_class = raw.get("cause_class")
+            cause_class = (
+                str(raw_class)
+                if raw_class in _AFFECTIVE_CAUSE_CLASSES
+                else "unknown"
+            )
+            raw_status = raw.get("status", raw.get("cause_status"))
+            status = (
+                str(raw_status)
+                if raw_status in _AFFECTIVE_CAUSE_STATUSES
+                else "unknown"
+            )
+            raw_subject = raw.get("cause_subject")
+            subject = (
+                str(raw_subject)
+                if raw_subject in _AFFECTIVE_CAUSE_SUBJECTS else "unknown"
+            )
+            def _unit(value: Any) -> float | None:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+                parsed = float(value)
+                return parsed if 0.0 <= parsed <= 1.0 else None
+            def _timestamp(value: Any) -> dt.datetime | None:
+                if isinstance(value, dt.datetime):
+                    return value
+                if not isinstance(value, str) or len(value) > 64:
+                    return None
+                try:
+                    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+                return parsed
+            refs.append(MemoryAffectiveCauseRef(
+                evidence_id=evidence_id,
+                source_ref=source_ref,
+                cause_class=cause_class,
+                cause_subject=subject,
+                status_at_capture=status,
+                current_status=None,
+                current_active=None,
+                intensity=_unit(raw.get("intensity")),
+                confidence=_unit(raw.get("confidence")),
+                observed_at=_timestamp(raw.get("observed_at")),
+                lease_expires_at=_timestamp(raw.get("lease_expires_at")),
+            ))
+            if len(refs) >= _MAX_MEMORY_CAUSAL_REFS:
+                break
+
+    state_id_raw = row.get("emotional_context_state_id")
+    state_id = (
+        int(state_id_raw)
+        if isinstance(state_id_raw, int)
+        and not isinstance(state_id_raw, bool)
+        and state_id_raw > 0
+        else None
+    )
+    confidence_raw = row.get("emotional_context_confidence")
+    confidence = (
+        float(confidence_raw) if confidence_raw is not None else None
+    )
+    return MemoryAffectiveProvenance(
+        state_id=state_id,
+        context_at=row.get("emotional_context_at"),
+        vad=EmotionalVector(
+            valence=float(row["emotional_context_valence"]),
+            arousal=float(row["emotional_context_arousal"]),
+            dominance=float(row["emotional_context_dominance"]),
+        ),
+        confidence=confidence,
+        causal_refs=tuple(refs),
+    )
+
+
+@dataclass(frozen=True)
 class MemoryHit:
     """Результат vector/hybrid search'а — одна memory с её scoring-полями.
 
@@ -88,6 +261,7 @@ class MemoryHit:
     embedding: list[float] | None = field(default=None)
     recall_event_id: int | None = field(default=None)
     kind_src: str | None = field(default=None)
+    affective_provenance: MemoryAffectiveProvenance | None = field(default=None)
 
 
 @dataclass(frozen=True)
@@ -193,6 +367,81 @@ class AgentScopedQueries:
         scope."""
         return self._conn
 
+    def _current_emotional_context(self) -> EmotionalStateRecord | None:
+        """Снимок текущего residue для memory-at-creation provenance.
+
+        Снимок берётся в той же транзакции, что INSERT памяти. Это не
+        переоценка содержимого и не инструкция по стилю: фиксируется фон,
+        внутри которого семантическая точка вошла в линию агента.
+        """
+        return read_last_state_record(self._conn, self._agent_id)
+
+    def _latest_source_emotional_context(
+        self, source_ids: list[uuid.UUID]
+    ) -> dict[str, Any] | None:
+        """Последний причинный снимок среди исходных memories.
+
+        Производная память наследует контекст исходного когнитивного акта,
+        а не случайное состояние фонового worker'а в момент консолидации.
+        Неизвестный legacy-контекст остаётся неизвестным.
+        """
+        if not source_ids:
+            return None
+        sql = (
+            "SELECT emotional_context_valence AS valence, "
+            "       emotional_context_arousal AS arousal, "
+            "       emotional_context_dominance AS dominance, "
+            "       emotional_context_state_id AS state_id, "
+            "       emotional_context_at AS context_at, "
+            "       emotional_context_confidence AS confidence, "
+            "       emotional_context_causes AS causes "
+            "  FROM memories "
+            " WHERE agent_id = %s AND id = ANY(%s) "
+            "   AND emotional_context_valence IS NOT NULL "
+            " ORDER BY created_at DESC, seq DESC LIMIT 1"
+        )
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (self._agent_id, source_ids))
+            row = cur.fetchone()
+        return None if row is None else dict(row)
+
+    def _emotional_context_values(
+        self,
+        source_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[Any, Any, Any, Any, Any, Any, Any] | None:
+        """Normalize current or source-inherited affect to INSERT values.
+
+        ``source_ids is None`` means an ordinary synchronous write and uses
+        current state.  Passing a list, including an empty list, means a
+        derived write: only source-row provenance is allowed, so an unknown
+        legacy window remains NULL instead of acquiring worker-time state.
+        """
+        if source_ids is None:
+            current = self._current_emotional_context()
+            if current is None:
+                return None
+            return (
+                current.vector.valence,
+                current.vector.arousal,
+                current.vector.dominance,
+                current.id,
+                current.at,
+                current.confidence,
+                list(current.causal_context),
+            )
+        inherited = self._latest_source_emotional_context(source_ids)
+        if inherited is None:
+            return None
+        return (
+            inherited["valence"],
+            inherited["arousal"],
+            inherited["dominance"],
+            inherited["state_id"],
+            inherited["context_at"],
+            inherited["confidence"],
+            inherited["causes"],
+        )
+
     # -- sessions ---------------------------------------------------------
 
     def upsert_session(self, session_id: uuid.UUID | str) -> None:
@@ -258,21 +507,72 @@ class AgentScopedQueries:
             )
         sid = _as_uuid(session_id) if session_id is not None else None
         meta = metadata or {}
+        affect = self._current_emotional_context()
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO memories "
-                "(agent_id, session_id, role, content, embedding, metadata) "
-                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "(agent_id, session_id, role, content, embedding, metadata, "
+                " emotional_context_valence, emotional_context_arousal, "
+                " emotional_context_dominance, emotional_context_state_id, "
+                " emotional_context_at, emotional_context_confidence, "
+                " emotional_context_causes) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING "
                 "RETURNING id",
-                (self._agent_id, sid, role, content, _vector_literal(embedding), psycopg.types.json.Jsonb(meta)),
+                (
+                    self._agent_id, sid, role, content,
+                    _vector_literal(embedding), psycopg.types.json.Jsonb(meta),
+                    affect.vector.valence if affect is not None else None,
+                    affect.vector.arousal if affect is not None else None,
+                    affect.vector.dominance if affect is not None else None,
+                    affect.id if affect is not None else None,
+                    affect.at if affect is not None else None,
+                    affect.confidence if affect is not None else None,
+                    psycopg.types.json.Jsonb(list(affect.causal_context))
+                    if affect is not None else None,
+                ),
             )
             row = cur.fetchone()
+            if row is None and meta.get("styx_sync_turn_key") is not None:
+                cur.execute(
+                    "SELECT id FROM memories "
+                    "WHERE agent_id = %s "
+                    "  AND metadata ->> 'styx_sync_turn_key' = %s "
+                    "  AND metadata ->> 'styx_sync_turn_role' = %s "
+                    "  AND metadata ->> 'styx_sync_turn_part' = %s "
+                    "LIMIT 1",
+                    (
+                        self._agent_id,
+                        str(meta["styx_sync_turn_key"]),
+                        str(meta.get("styx_sync_turn_role", role)),
+                        str(meta.get("styx_sync_turn_part", 0)),
+                    ),
+                )
+                row = cur.fetchone()
         # Не делаем commit — вызывающий код управляет транзакционной границей.
         if row is None:
             raise RuntimeError(
                 "INSERT INTO memories не вернул id — возможно constraint violation"
             )
         return row[0]
+
+    def find_sync_turn_message_parts(
+        self, idempotency_key: str
+    ) -> list[tuple[uuid.UUID, str]]:
+        """Existing atomic pair for a durable terminal-turn key.
+
+        A non-empty result means the pair transaction committed previously;
+        callers must reuse these rows instead of inserting a changed retry.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, content FROM memories "
+                "WHERE agent_id = %s "
+                "  AND metadata ->> 'styx_sync_turn_key' = %s "
+                "ORDER BY role, (metadata ->> 'styx_sync_turn_part')::int, seq",
+                (self._agent_id, idempotency_key),
+            )
+            return [(row[0], str(row[1])) for row in cur.fetchall()]
 
     def lookup_embeddings_by_content(
         self, contents: list[str]
@@ -526,6 +826,13 @@ class AgentScopedQueries:
                 m.content,
                 m.metadata,
                 m.created_at,
+                m.emotional_context_valence,
+                m.emotional_context_arousal,
+                m.emotional_context_dominance,
+                m.emotional_context_state_id,
+                m.emotional_context_at,
+                m.emotional_context_confidence,
+                m.emotional_context_causes,
                 ({factors.score_expr}) AS score,
                 ({factors.base_match_expr}) AS match_score,
                 {embedding_select} AS embedding
@@ -572,6 +879,7 @@ class AgentScopedQueries:
                 score=float(r["score"]),
                 match_score=float(r["match_score"]),
                 embedding=_parse_vector(r["embedding"]) if include_embedding else None,
+                affective_provenance=_memory_affective_provenance(r),
             )
             for r in rows
         ]
@@ -701,6 +1009,7 @@ class AgentScopedQueries:
         metadata: dict[str, Any] | None = None,
         importance_provisional: float | None = None,
         archive_ref: dict[str, Any] | None = None,
+        emotional_source_ids: list[uuid.UUID] | None = None,
     ) -> uuid.UUID:
         """INSERT subjective memory с явными ``kind`` / ``kind_src``.
 
@@ -733,6 +1042,7 @@ class AgentScopedQueries:
             )
         sid = _as_uuid(session_id) if session_id is not None else None
         meta = metadata or {}
+        affect = self._emotional_context_values(emotional_source_ids)
         cols = [
             "agent_id", "session_id", "role", "kind", "kind_src",
             "content", "embedding", "metadata",
@@ -742,6 +1052,21 @@ class AgentScopedQueries:
             content, _vector_literal(embedding),
             psycopg.types.json.Jsonb(meta),
         ]
+        if affect is not None:
+            cols.extend([
+                "emotional_context_valence",
+                "emotional_context_arousal",
+                "emotional_context_dominance",
+                "emotional_context_state_id",
+                "emotional_context_at",
+                "emotional_context_confidence",
+                "emotional_context_causes",
+            ])
+            params.extend([
+                *affect[:6],
+                psycopg.types.json.Jsonb(affect[6])
+                if affect[6] is not None else None,
+            ])
         if importance_provisional is not None:
             cols.append("importance_provisional")
             params.append(float(importance_provisional))
@@ -853,13 +1178,22 @@ class AgentScopedQueries:
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "UPDATE memories "
-                "   SET content = %s, embedding = %s, updated_at = now() "
-                " WHERE id = %s AND agent_id = %s "
-                "   AND length(%s) > length(content)",
+                "UPDATE memories AS existing "
+                "   SET content = %s, embedding = %s, updated_at = now(), "
+                "       emotional_context_valence = incoming.emotional_context_valence, "
+                "       emotional_context_arousal = incoming.emotional_context_arousal, "
+                "       emotional_context_dominance = incoming.emotional_context_dominance, "
+                "       emotional_context_state_id = incoming.emotional_context_state_id, "
+                "       emotional_context_at = incoming.emotional_context_at, "
+                "       emotional_context_confidence = incoming.emotional_context_confidence, "
+                "       emotional_context_causes = incoming.emotional_context_causes "
+                "  FROM memories AS incoming "
+                " WHERE existing.id = %s AND existing.agent_id = %s "
+                "   AND incoming.id = %s AND incoming.agent_id = existing.agent_id "
+                "   AND length(%s) > length(existing.content)",
                 (
                     new_content, _vector_literal(new_embedding),
-                    existing_id, self._agent_id, new_content,
+                    existing_id, self._agent_id, new_id, new_content,
                 ),
             )
             cur.execute(
@@ -1581,14 +1915,18 @@ class AgentScopedQueries:
         Тонкая делегация в ``styx.emotional.state.read_last_state`` — не
         дублирует SQL/decay-логику. В отличие от удалённого волны-15
         ``get_latest_hot_sentiment`` (raw VAD последней peer-реплики) —
-        отдаёт уже демпфированную позицию линии агента (предыдущее
-        состояние + decay + K_HOT-интеграция peer-резонанса, см.
-        ``append_emotional_state``/``apply_instant_decay``). Используется
-        каналом self_state для pre_llm_call inject'а.
+        отдаёт уже демпфированную позицию линии агента. В causal path это
+        реакция завершённых turn'ов + поддержка active causes + decay;
+        legacy K_HOT peer-resonance возможен только при explicit rollback.
+        Используется каналом self_state для pre_llm_call inject'а.
 
         Возвращает ``(vector, at)`` либо ``None``, если истории ещё нет.
         """
         return read_last_state(self._conn, self._agent_id)
+
+    def get_last_emotional_state_record(self) -> EmotionalStateRecord | None:
+        """Rich state read для причинного pre-LLM канала и observability."""
+        return read_last_state_record(self._conn, self._agent_id)
 
     # ── Волна 14: queries для batch consolidation ───────────────────
 
@@ -1700,6 +2038,7 @@ class AgentScopedQueries:
         *,
         content: str,
         archive_ref: dict,
+        source_ids: list[uuid.UUID],
     ) -> uuid.UUID:
         """INSERT batch consolidation memory. kind='episode',
         kind_src='dialogue_batch_consolidation'.
@@ -1711,17 +2050,37 @@ class AgentScopedQueries:
         # role='summary' — batch consolidation = produced summary окна
         # диалога. Совпадает с CHECK constraint (memories_role_check
         # из миграции 0001) и семантически точнее чем user/assistant.
+        affect = self._emotional_context_values(source_ids)
         sql = (
             "INSERT INTO memories ("
             "  agent_id, role, kind, kind_src, content, "
-            "  importance_provisional, archive_ref, embedding"
+            "  importance_provisional, archive_ref, embedding, "
+            "  emotional_context_valence, emotional_context_arousal, "
+            "  emotional_context_dominance, emotional_context_state_id, "
+            "  emotional_context_at, emotional_context_confidence, "
+            "  emotional_context_causes"
             ") VALUES ("
             "  %s, 'summary', 'episode', 'dialogue_batch_consolidation', "
-            "  %s, 0.5, %s, NULL"
+            "  %s, 0.5, %s, NULL, %s, %s, %s, %s, %s, %s, %s"
             ") RETURNING id"
         )
         with self._conn.cursor() as cur:
-            cur.execute(sql, (self._agent_id, content, Jsonb(archive_ref)))
+            cur.execute(
+                sql,
+                (
+                    self._agent_id,
+                    content,
+                    Jsonb(archive_ref),
+                    affect[0] if affect is not None else None,
+                    affect[1] if affect is not None else None,
+                    affect[2] if affect is not None else None,
+                    affect[3] if affect is not None else None,
+                    affect[4] if affect is not None else None,
+                    affect[5] if affect is not None else None,
+                    Jsonb(affect[6])
+                    if affect is not None and affect[6] is not None else None,
+                ),
+            )
             return cur.fetchone()[0]
 
     # -- Reinterpret (волна 22) ------------------------------------------
@@ -2007,12 +2366,17 @@ class AgentScopedQueries:
                 "llm_task_application_id": application_id,
             }
         }
+        affect = self._latest_source_emotional_context(source_ids)
         sql = (
             "INSERT INTO memories "
             "(agent_id, visibility, kind, kind_src, content, metadata, "
-            " embedding, importance_provisional, role) "
+            " embedding, importance_provisional, role, "
+            " emotional_context_valence, emotional_context_arousal, "
+            " emotional_context_dominance, emotional_context_state_id, "
+            " emotional_context_at, emotional_context_confidence, "
+            " emotional_context_causes) "
             "VALUES (%s, %s, %s, 'dialogue_consolidation_daily', "
-            "        %s, %s, %s, 0.7, 'summary') "
+            "        %s, %s, %s, 0.7, 'summary', %s, %s, %s, %s, %s, %s, %s) "
             "RETURNING id"
         )
         with self._conn.cursor() as cur:
@@ -2025,6 +2389,15 @@ class AgentScopedQueries:
                     content,
                     Jsonb(metadata),
                     _vector_literal(embedding),
+                    affect["valence"] if affect is not None else None,
+                    affect["arousal"] if affect is not None else None,
+                    affect["dominance"] if affect is not None else None,
+                    affect["state_id"] if affect is not None else None,
+                    affect["context_at"] if affect is not None else None,
+                    affect["confidence"] if affect is not None else None,
+                    Jsonb(affect["causes"])
+                    if affect is not None and affect["causes"] is not None
+                    else None,
                 ),
             )
             return cur.fetchone()[0]

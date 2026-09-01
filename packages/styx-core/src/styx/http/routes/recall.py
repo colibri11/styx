@@ -11,8 +11,16 @@ from styx import turn_state
 from styx.http import registry
 from styx.http._wrap import populate_llm_text, should_wrap_for_llm
 from styx.http.auth import require_auth
-from styx.http.models import RecallMemory, RecallRequest, RecallResponse
+from styx.http.models import (
+    RecallAffectiveCauseRef,
+    RecallAffectiveProvenance,
+    RecallAffectiveVAD,
+    RecallMemory,
+    RecallRequest,
+    RecallResponse,
+)
 from styx.storage.recall import recall_full
+from styx.emotional.state import read_cause_lifecycle_statuses
 
 router = APIRouter()
 
@@ -62,6 +70,16 @@ def recall(
                 session_id=req.session_id,
                 snapshot=snapshot,
             )
+            evidence_ids = {
+                ref.evidence_id
+                for hit in result.memories
+                if hit.affective_provenance is not None
+                for ref in hit.affective_provenance.causal_refs
+                if ref.evidence_id is not None
+            }
+            lifecycle = read_cause_lifecycle_statuses(
+                core._conn, req.agent_id, evidence_ids
+            )
             core._conn.commit()  # type: ignore[union-attr]
 
     # Treker recall_event_ids для последующего classifier'а (волна 7c).
@@ -83,6 +101,44 @@ def recall(
                 score=float(m.score),
                 role=m.role,
                 created_at=m.created_at,
+                affective_provenance=(
+                    RecallAffectiveProvenance(
+                        state_id=m.affective_provenance.state_id,
+                        context_at=m.affective_provenance.context_at,
+                        vad=RecallAffectiveVAD(
+                            valence=m.affective_provenance.vad.valence,
+                            arousal=m.affective_provenance.vad.arousal,
+                            dominance=m.affective_provenance.vad.dominance,
+                        ),
+                        confidence=m.affective_provenance.confidence,
+                        causal_refs=[
+                            RecallAffectiveCauseRef(
+                                evidence_id=ref.evidence_id,
+                                source_ref=ref.source_ref,
+                                cause_class=ref.cause_class,
+                                cause_subject=ref.cause_subject,
+                                status_at_capture=ref.status_at_capture,
+                                current_status=(
+                                    lifecycle.get(ref.evidence_id, {}).get("status")
+                                    if ref.evidence_id is not None
+                                    else None
+                                ),
+                                current_active=(
+                                    lifecycle.get(ref.evidence_id, {}).get("active")
+                                    if ref.evidence_id is not None
+                                    else None
+                                ),
+                                intensity=ref.intensity,
+                                confidence=ref.confidence,
+                                observed_at=ref.observed_at,
+                                lease_expires_at=ref.lease_expires_at,
+                            )
+                            for ref in m.affective_provenance.causal_refs
+                        ],
+                    )
+                    if m.affective_provenance is not None
+                    else None
+                ),
             )
             for m in result.memories
         ],
