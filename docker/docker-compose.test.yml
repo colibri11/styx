@@ -20,14 +20,17 @@
 #   docker compose -f docker/docker-compose.test.yml --env-file .env up -d --wait
 #
 # Интеграционные тесты — Python (styx-core, styx-hermes plugin):
-#   docker compose -f docker/docker-compose.test.yml exec -T \
+#   docker compose -f docker/docker-compose.test.yml --env-file .env exec -T \
 #       -e STYX_TEST_DATABASE_URL=postgresql://postgres:test@postgres:5432/styx \
 #       hermes-styx /opt/hermes/.venv/bin/pytest /opt/styx-core/tests \
 #       --ignore=/opt/styx-core/tests/benchmarks -q
-#       # Ожидание: 1200 passed, 3 skipped (~160s; skip'ы — fail-open LLM)
-#   docker compose -f docker/docker-compose.test.yml exec -T \
-#       hermes-styx /opt/hermes/.venv/bin/pytest /opt/styx-hermes/tests/plugin -q
-#       # Ожидание: ~70 passed (тот же набор что host'овый)
+#   docker compose -f docker/docker-compose.test.yml --env-file .env exec -T \
+#       -e STYX_TEST_DATABASE_URL=postgresql://postgres:test@postgres:5432/styx \
+#       -e STYX_DAEMON_URL=http://styx-daemon:8788 \
+#       -e STYX_HTTP_TOKEN=test-token-do-not-use-in-prod \
+#       -e HERMES_HOME=/opt/data -e STYX_ALLOW_HERMES_HOME=1 \
+#       hermes-styx /opt/hermes/.venv/bin/pytest /opt/styx-hermes/tests -q
+#       # Hermes v2026.8.31 baseline: 205 passed, 0 failed.
 #
 # Интеграционные тесты — TS (styx OpenClaw plugin, появится в волне 26+):
 #   docker compose -f docker/docker-compose.test.yml exec openclaw-cli \
@@ -37,11 +40,12 @@
 #   curl -fsS http://127.0.0.1:8788/healthz   # styx-daemon
 #   curl -fsS http://127.0.0.1:18789/healthz  # openclaw-gateway
 #
-# Тёрдаун (с volume'ами):
-#   docker compose -f docker/docker-compose.test.yml down -v
+# Штатный тёрдаун (named volume'ы сохраняются):
+#   docker compose -f docker/docker-compose.test.yml down
+# Полная очистка с `-v` — только отдельной явной операцией.
 #
 # Базовый образ hermes-styx по умолчанию — официальный s6-overlay
-# nousresearch/hermes-agent:v2026.7.7.2 (тянется pull'ом автоматически).
+# nousresearch/hermes-agent:v2026.8.31 (тянется pull'ом автоматически).
 # Override через env HERMES_IMAGE ОБЯЗАН быть s6-overlay образом (gateway
 # поднимает s6-супервизор; см. Dockerfile.styx-hermes). Orphan-модель
 # (волна 33): чистый контейнер оставляет Styx обнаружимым (bundled shim),
@@ -158,7 +162,7 @@ services:
         # Официальный s6-overlay образ (как на проде). Override через env
         # HERMES_IMAGE обязан быть тоже s6-overlay образом (gateway под s6;
         # см. Dockerfile.styx-hermes).
-        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.7.7.2}
+        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.8.31}
     image: hermes-agent-styx-test
     container_name: styx-test-hermes
     depends_on:

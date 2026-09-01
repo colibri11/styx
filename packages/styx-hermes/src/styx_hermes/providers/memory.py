@@ -182,36 +182,27 @@ class StyxMemoryProvider(MemoryProvider):
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         """Задумано как защита salient при сжатии context (волна 29 Phase D).
 
-        **Известный upstream-gap Hermes, подтверждён 2026-07-01 (ADR § 60),
-        актуально и на v0.16.0, и на v0.17.0.** По контракту MemoryProvider
-        ABC — Hermes зовёт этот hook перед тем как context_compressor
-        отбросит старые messages, и должен включить возвращённый текст в
-        финальное compression summary. По факту — единственный call site
-        (`agent/conversation_compression.py`) вызывает hook и **выбрасывает
-        возвращаемое значение**, никуда его не передавая; сам
-        `context_compressor.py` вообще не упоминает `on_pre_compress`.
-        Hook честно зовётся, `prefetch()` внутри честно делает HTTP
-        round-trip к daemon'у — но результат до summary не доезжает ни в
-        одной версии Hermes.
+        В Hermes v0.21.0 upstream-gap из ADR § 60 закрыт: возвращённый текст
+        санитизируется и передаётся штатному compressor как ``memory_context``.
+        Styx остаётся на legacy checkpoint API v1: этот hook делает recall
+        уже сохранённой памяти, но НЕ гарантирует durable checkpoint всего
+        отбрасываемого transcript. Поэтому нельзя объявлять
+        ``pre_compress_checkpoint_api_version = 2``; при явном Hermes
+        ``compression.checkpoint_required: true`` сжатие закономерно будет
+        заблокировано как не имеющее требуемой гарантии.
 
-        Сергей подтвердил (2026-07-01): оставить реализацию как есть, не
-        убирать вызов `prefetch()` — несмотря на то что Hermes сейчас его
-        не использует. Не критично: непрерывность памяти Styx не опирается
-        на этот механизм — `prefetch()` перезапрашивает актуальную память с
-        нуля на КАЖДОМ ходу независимо от истории/summary Hermes (см. ADR
-        § 56, Locus — память подмешивается как часть геометрии входа, не
-        хранится "внутри" сжимаемой истории). Цена — периодический (не
-        на каждый ход, только когда срабатывает компрессия Hermes) лишний
-        HTTP round-trip без видимого эффекта.
+        Непрерывность памяти Styx всё равно не зависит только от summary:
+        `prefetch()` заново получает актуальную память на каждом содержательном
+        ходе (см. ADR § 56). Hook добавляет вторую защиту именно на границе
+        компрессии, не превращая Styx в context engine.
 
         Реализация (не меняется): извлекаем последний user/assistant turn
         в messages как focus topic → переиспользуем prefetch() механизм →
         возвращаем его result (уже обёрнутый в `<styx-salient>`) с
-        короткой preamble — на случай если Hermes когда-нибудь довяжет
-        этот hook до своего summary-промпта.
+        короткой preamble для штатного ``memory_context`` summary-промпта.
 
         Fail-open: пустой text → "" (compressor получит default summary
-        без provider contribution, если вообще что-то с ним делает).
+        без provider contribution).
         """
         if not messages:
             return ""
@@ -274,15 +265,12 @@ class StyxMemoryProvider(MemoryProvider):
         if self._tool_schemas:
             return list(self._tool_schemas)
         # Hermes строит routing-индекс _tool_to_provider в
-        # MemoryManager.add_provider() (memory_manager.py:374, индекс
-        # :409-426), который вызывается ДО initialize_all()
-        # (agent_init.py:1364 vs :1410, Hermes v0.18.2/v2026.7.7.2 — было
-        # :1165/:1211 на v0.17.0/v2026.6.19). Наши daemon-схемы наполняются
+        # MemoryManager.add_provider(), который вызывается ДО initialize_all().
+        # Наши daemon-схемы наполняются
         # только в initialize_all(); вернуть [] здесь = индекс построится
         # пустым и любой styx_* вызов упадёт в "Unknown tool" (хотя схема
         # к этому моменту уже доходит до модели через инъекцию тулов ПОСЛЕ
-        # init — agent_init.py:1420 зовёт
-        # memory_manager.inject_memory_provider_tools(agent), которая внутри
+        # init — agent_init зовёт inject_memory_provider_tools(agent), которая внутри
         # берёт agent._memory_manager.get_all_tool_schemas(); в v0.16.0 это
         # был инлайн-цикл на agent_init.py:1176, в v0.17.0 вынесен в отдельную
         # функцию с доп. гейтом memory_provider_tools_enabled(agent.enabled_toolsets)

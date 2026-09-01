@@ -18,9 +18,11 @@ Discovery-тесты ниже сами дог-фудят attach на актив�
 config в teardown — config шарится между тестами в контейнере.
 
 Запуск:
-    docker compose -f docker/docker-compose.test.yml up -d
-    docker compose -f docker/docker-compose.test.yml exec hermes-styx \\
-        /opt/hermes/.venv/bin/pytest /opt/styx/tests/integration -v
+    docker compose -f docker/docker-compose.test.yml --env-file .env up -d --wait \\
+        postgres styx-daemon hermes-styx
+    docker compose -f docker/docker-compose.test.yml --env-file .env exec -T \\
+        hermes-styx /opt/hermes/.venv/bin/pytest \\
+        /opt/styx-hermes/tests/integration -v
 """
 
 from __future__ import annotations
@@ -226,9 +228,9 @@ def test_real_provider_lifecycle_writes_to_postgres() -> None:
 def test_initialize_sync_to_transport_global() -> None:
     """После initialize provider'а — transport знает agent_id.
 
-    Инвариант: prompt_cache_key = agent_identity синхронизирован через
-    ``styx_hermes._agent_session`` из MemoryProvider.initialize до первого
-    Transport.build_kwargs.
+    Инвариант: agent_identity синхронизирован через
+    ``styx_hermes._agent_session`` до первого Transport.build_kwargs и
+    используется Hermes как логический cache scope, а не физический session id.
     """
     from plugins.memory import load_memory_provider
     from styx_hermes import _agent_session
@@ -247,9 +249,46 @@ def test_initialize_sync_to_transport_global() -> None:
     try:
         tr = StyxOpenAITransport()
         kwargs = tr.build_kwargs(
-            "gpt-x", [{"role": "user", "content": "x"}]
+            "gpt-x",
+            [
+                {"role": "system", "content": "stable"},
+                {"role": "user", "content": "x"},
+            ],
+            supports_prompt_cache_key=True,
         )
-        assert kwargs["prompt_cache_key"] == "cache-key-check"
+        assert kwargs["prompt_cache_key"].startswith("pck_")
     finally:
         provider.shutdown()
         _agent_session.clear_session()
+
+
+def test_real_plugin_manager_invokes_pre_llm_hook() -> None:
+    """Latest PluginManager исполняет Styx hook через timeout-worker."""
+    from hermes_cli.plugins import PluginManager
+    from styx_hermes import _agent_session
+
+    class _HookClient:
+        def pre_llm_inject(self, agent_id, **kwargs):
+            assert agent_id == "hook-agent"
+            assert kwargs["session_id"] == "physical-session"
+            return {"context": "hook-context"}
+
+    with _attached_active_config():
+        pm = PluginManager()
+        pm.discover_and_load(force=True)
+        _agent_session.set_session("hook-agent", _HookClient())
+        try:
+            results = pm.invoke_hook(
+                "pre_llm_call",
+                session_id="physical-session",
+                user_message="meaningful request",
+                conversation_history=[],
+                is_first_turn=True,
+                model="test-model",
+                platform="cli",
+                sender_id="test-sender",
+            )
+        finally:
+            _agent_session.clear_session()
+
+    assert {"context": "hook-context"} in results

@@ -75,11 +75,18 @@ def test_no_cache_key_when_unconfigured() -> None:
     assert "prompt_cache_key" not in kwargs
 
 
-def test_cache_key_from_session_agent_id() -> None:
+def test_agent_id_is_scope_and_respects_endpoint_capability() -> None:
     _set_agent("alpha")
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs("gpt-x", _msgs(("user", "hi")))
-    assert kwargs["prompt_cache_key"] == "alpha"
+    assert "prompt_cache_key" not in kwargs
+
+    capable = tr.build_kwargs(
+        "gpt-x",
+        _msgs(("system", "stable"), ("user", "hi")),
+        supports_prompt_cache_key=True,
+    )
+    assert capable["prompt_cache_key"].startswith("pck_")
 
 
 def test_explicit_prompt_cache_key_overrides_agent_id() -> None:
@@ -123,13 +130,23 @@ def test_per_agent_override_used_when_no_per_call() -> None:
     assert kwargs["prompt_cache_key"] == "custom-key"
 
 
-def test_session_id_fallback_when_no_session() -> None:
-    """Без active session — fallback на params.session_id."""
+def test_session_id_fallback_obeys_endpoint_capability() -> None:
+    """Без active session физический id остаётся upstream cache scope."""
+    from agent.transports.chat_completions import ChatCompletionsTransport
+
     tr = t.StyxOpenAITransport()
     kwargs = tr.build_kwargs(
         "gpt-x", _msgs(("user", "hi")), session_id="sess-123"
     )
-    assert kwargs["prompt_cache_key"] == "sess-123"
+    assert "prompt_cache_key" not in kwargs
+
+    params = {"session_id": "sess-123", "supports_prompt_cache_key": True}
+    messages = _msgs(("system", "stable"), ("user", "hi"))
+    kwargs = tr.build_kwargs("gpt-x", messages, **params)
+    base = ChatCompletionsTransport().build_kwargs(
+        "gpt-x", messages, **params
+    )
+    assert kwargs["prompt_cache_key"] == base["prompt_cache_key"]
 
 
 # -- super-class behaviour preserved --------------------------------------
@@ -233,12 +250,19 @@ def test_set_session_replaces_state() -> None:
     """
     _set_agent("alpha")
     tr = t.StyxOpenAITransport()
-    k1 = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
-    assert k1 == "alpha"
+    k1 = tr.build_kwargs(
+        "gpt-x",
+        _msgs(("system", "stable"), ("user", "x")),
+        supports_prompt_cache_key=True,
+    )["prompt_cache_key"]
     # Повторный set_session заменяет — это намеренное поведение.
     _set_agent("beta")
-    k2 = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
-    assert k2 == "beta"
+    k2 = tr.build_kwargs(
+        "gpt-x",
+        _msgs(("system", "stable"), ("user", "x")),
+        supports_prompt_cache_key=True,
+    )["prompt_cache_key"]
+    assert k1 != k2
 
 
 # -- #10: wire-log не пишет slice_hex на INFO по умолчанию ---------------
@@ -280,19 +304,157 @@ def test_wire_log_emits_slice_hex_with_env_flag(
 def test_cache_key_stable_across_turns_for_same_agent() -> None:
     _set_agent("alpha")
     tr = t.StyxOpenAITransport()
-    k1 = tr.build_kwargs("gpt-x", _msgs(("user", "turn1")))["prompt_cache_key"]
-    k2 = tr.build_kwargs("gpt-x", _msgs(("user", "turn2")))["prompt_cache_key"]
-    assert k1 == k2 == "alpha"
+    first = _msgs(("system", "stable"), ("user", "turn1"))
+    second = _msgs(("system", "stable"), ("user", "turn2"))
+    k1 = tr.build_kwargs(
+        "gpt-x", first, supports_prompt_cache_key=True
+    )["prompt_cache_key"]
+    k2 = tr.build_kwargs(
+        "gpt-x", second, supports_prompt_cache_key=True
+    )["prompt_cache_key"]
+    assert k1 == k2
+    assert k1.startswith("pck_")
 
 
 def test_cache_key_unique_per_agent() -> None:
     """Два разных агента дают разные cache_key (сброс session между ними)."""
     tr = t.StyxOpenAITransport()
     _set_agent("alpha")
-    k_a = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
+    k_a = tr.build_kwargs(
+        "gpt-x",
+        _msgs(("system", "stable"), ("user", "x")),
+        supports_prompt_cache_key=True,
+    )["prompt_cache_key"]
     # Сбрасываем session перед вторым агентом (в реальности — отдельный процесс).
     _agent_session.clear_session()
     core_t.reset_all()
     _set_agent("beta")
-    k_b = tr.build_kwargs("gpt-x", _msgs(("user", "x")))["prompt_cache_key"]
+    k_b = tr.build_kwargs(
+        "gpt-x",
+        _msgs(("system", "stable"), ("user", "x")),
+        supports_prompt_cache_key=True,
+    )["prompt_cache_key"]
     assert k_a != k_b
+
+
+def test_native_request_override_is_not_clobbered_by_agent_scope() -> None:
+    _set_agent("alpha")
+    kwargs = t.StyxOpenAITransport().build_kwargs(
+        "gpt-x",
+        _msgs(("user", "x")),
+        request_overrides={"prompt_cache_key": "native-explicit"},
+    )
+    assert kwargs["prompt_cache_key"] == "native-explicit"
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        (
+            {
+                "prompt_cache_key": "per-call",
+                "request_overrides": {
+                    "prompt_cache_key": "native-top",
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "per-call",
+        ),
+        (
+            {
+                "request_overrides": {
+                    "prompt_cache_key": "native-top",
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "native-top",
+        ),
+        (
+            {
+                "request_overrides": {
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "native-nested",
+        ),
+    ],
+)
+def test_cache_key_precedence_has_one_chat_wire_location(
+    params: dict, expected: str
+) -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="per-agent")
+
+    kwargs = t.StyxOpenAITransport().build_kwargs(
+        "gpt-x", _msgs(("user", "x")), **params
+    )
+
+    assert kwargs["prompt_cache_key"] == expected
+    assert kwargs["extra_body"] == {"keep": True}
+
+
+def test_per_agent_override_equal_to_agent_id_stays_exact_for_chat() -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="alpha")
+
+    kwargs = t.StyxOpenAITransport().build_kwargs(
+        "gpt-x", _msgs(("user", "x"))
+    )
+
+    # Exact override bypasses endpoint capability gating/content hashing.
+    assert kwargs["prompt_cache_key"] == "alpha"
+
+
+@pytest.mark.parametrize(
+    "explicit_params",
+    [
+        {"prompt_cache_key": "per-call"},
+        {"request_overrides": {"prompt_cache_key": "native-top"}},
+        {
+            "request_overrides": {
+                "extra_body": {"prompt_cache_key": "native-nested"}
+            }
+        },
+    ],
+)
+def test_active_agent_scope_is_set_even_with_explicit_key(
+    explicit_params: dict,
+) -> None:
+    _set_agent("alpha")
+    prepared = t._prepare_cache_params(explicit_params)
+    assert prepared["cache_scope_id"] == "alpha"
+
+
+def test_explicit_caller_cache_scope_is_not_replaced() -> None:
+    _set_agent("alpha")
+    prepared = t._prepare_cache_params(
+        {"cache_scope_id": "lineage", "prompt_cache_key": "exact"}
+    )
+    assert prepared["cache_scope_id"] == "lineage"
+
+
+def test_active_agent_scope_is_set_with_per_agent_exact_key() -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="per-agent")
+    prepared = t._prepare_cache_params({})
+    assert prepared["cache_scope_id"] == "alpha"
+    assert prepared["request_overrides"]["prompt_cache_key"] == "per-agent"
+
+
+def test_long_agent_scope_produces_bounded_cache_key() -> None:
+    _set_agent("agent-" + "x" * 200)
+    kwargs = t.StyxOpenAITransport().build_kwargs(
+        "gpt-x",
+        _msgs(("system", "stable"), ("user", "x")),
+        supports_prompt_cache_key=True,
+    )
+    assert len(kwargs["prompt_cache_key"]) <= 64

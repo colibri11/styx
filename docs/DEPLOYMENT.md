@@ -476,6 +476,7 @@ gateway run`. Поэтому:
   только по HTTP).
 - **`HERMES_IMAGE` — s6-overlay образ** (нужно для маршрутизации gateway-CMD
   через `main-wrapper.sh`).
-- **`command` обёртки в проде — дефолт образа `["gateway","run"]`**. В
-  test-стеке — `["sleep","infinity"]` (контейнер живёт для
+- **Production Compose обязан задать `command: ["gateway","run"]`**:
+  официальный образ v2026.8.31 не задаёт Docker CMD. В test-стеке команда —
+  `["sleep","infinity"]` (контейнер живёт для
   `docker compose exec ... pytest` / `docker exec ... styx-hermes-setup`).

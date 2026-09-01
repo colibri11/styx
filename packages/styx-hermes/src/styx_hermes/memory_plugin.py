@@ -4,9 +4,8 @@ Hermes ищет memory provider'ов в ``$HERMES_HOME/plugins/<name>/`` чер�
 эвристику: если в ``__init__.py`` плагина встречается строка
 ``register_memory_provider`` или ``MemoryProvider``, плагин считается
 memory provider'ом и попадает в memory discovery (см.
-``hermes_cli/plugins.py:1592-1612`` (маркер ``:1604``, discovery-skip
-``:1398``; Hermes v0.18.2/v2026.7.7.2 — было ``:1549-1571`` на
-v0.18.0/v2026.7.1) и ``plugins/memory/__init__.py``).
+``hermes_cli/plugins.py:985-1000``; Hermes v0.21.0/v2026.8.31) и
+``plugins/memory/__init__.py``).
 
 memory discovery вызывает ``register(ctx)`` плагина, передавая
 ``_ProviderCollector`` — упрощённый ctx с единственным методом

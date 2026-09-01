@@ -90,13 +90,21 @@ def test_hermes_default_preserved_when_unconfigured() -> None:
 
 
 def test_agent_id_overrides_hermes_default() -> None:
-    """С active session Styx переопределяет per-session на per-agent."""
+    """С active session Styx задаёт per-agent logical cache scope."""
+    from agent.transports.codex import ResponsesApiTransport
+
     _set_agent("alpha")
     tr = t.StyxCodexTransport()
     kwargs = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "hi")), session_id="hermes-sess-1"
     )
-    assert kwargs["prompt_cache_key"] == "alpha"
+    base = ResponsesApiTransport().build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "hi")),
+        session_id="hermes-sess-1",
+        cache_scope_id="alpha",
+    )
+    assert kwargs["prompt_cache_key"] == base["prompt_cache_key"]
 
 
 def test_explicit_module_override_beats_agent_id() -> None:
@@ -157,12 +165,14 @@ def test_xai_responses_omits_cache_key_with_active_session() -> None:
         is_xai_responses=True,
     )
     assert "prompt_cache_key" not in kwargs
+    assert kwargs["extra_body"]["prompt_cache_key"].startswith("pck_")
+    assert kwargs["extra_headers"]["x-grok-conv-id"] == "alpha"
 
 
 def test_plain_codex_keeps_agent_id_cache_key_with_active_session() -> None:
-    """Регрессия: без github/xai флагов prompt_cache_key == agent_id.
+    """Регрессия: без github/xai флагов используется agent-scoped key.
 
-    Обычный codex/openai путь — поведение не меняется, gate пропускает.
+    Обычный codex/openai путь делегирует content-addressing Hermes.
     """
     _set_agent("alpha")
     tr = t.StyxCodexTransport()
@@ -171,15 +181,14 @@ def test_plain_codex_keeps_agent_id_cache_key_with_active_session() -> None:
         _msgs(("user", "hi")),
         session_id="hermes-sess-1",
     )
-    assert kwargs["prompt_cache_key"] == "alpha"
+    assert kwargs["prompt_cache_key"].startswith("pck_")
 
 
 # -- codex_backend extra_headers -----------------------------------------
 
 
 def test_codex_backend_headers_synced_to_override() -> None:
-    """На is_codex_backend Hermes пишет session_id/x-client-request-id в
-    extra_headers — Styx должен синхронизировать их с нашим cache_key.
+    """Codex physical session и logical cache routing не смешиваются.
     """
     _set_agent("alpha")
     tr = t.StyxCodexTransport()
@@ -190,8 +199,8 @@ def test_codex_backend_headers_synced_to_override() -> None:
         is_codex_backend=True,
     )
     headers = kwargs["extra_headers"]
-    assert headers["session_id"] == "alpha"
-    assert headers["x-client-request-id"] == "alpha"
+    assert headers["session_id"] == "hermes-sess-1"
+    assert headers["x-client-request-id"] == kwargs["prompt_cache_key"]
 
 
 def test_codex_backend_headers_untouched_without_override() -> None:
@@ -324,7 +333,208 @@ def test_cache_key_stable_across_turns_for_same_agent() -> None:
     k2 = tr.build_kwargs(
         "gpt-5.5", _msgs(("user", "t2")), session_id="s-2"
     )["prompt_cache_key"]
-    assert k1 == k2 == "alpha"
+    assert k1 == k2
+    assert k1.startswith("pck_")
+
+
+def test_native_request_override_is_not_clobbered_by_agent_scope() -> None:
+    _set_agent("alpha")
+    kwargs = t.StyxCodexTransport().build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "x")),
+        session_id="physical",
+        is_codex_backend=True,
+        request_overrides={"prompt_cache_key": "native-explicit"},
+    )
+    assert kwargs["prompt_cache_key"] == "native-explicit"
+    assert kwargs["extra_headers"]["session_id"] == "physical"
+    assert kwargs["extra_headers"]["x-client-request-id"] == "native-explicit"
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        (
+            {
+                "prompt_cache_key": "per-call",
+                "request_overrides": {
+                    "prompt_cache_key": "native-top",
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "per-call",
+        ),
+        (
+            {
+                "request_overrides": {
+                    "prompt_cache_key": "native-top",
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "native-top",
+        ),
+        (
+            {
+                "request_overrides": {
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "native-nested",
+        ),
+    ],
+)
+def test_cache_key_precedence_has_one_codex_wire_location_and_header(
+    params: dict, expected: str
+) -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="per-agent")
+
+    kwargs = t.StyxCodexTransport().build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "x")),
+        session_id="physical",
+        is_codex_backend=True,
+        **params,
+    )
+
+    assert kwargs["prompt_cache_key"] == expected
+    assert kwargs["extra_body"] == {"keep": True}
+    assert kwargs["extra_headers"]["session_id"] == "physical"
+    assert kwargs["extra_headers"]["x-client-request-id"] == expected
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        (
+            {
+                "prompt_cache_key": "per-call",
+                "request_overrides": {
+                    "prompt_cache_key": "native-top",
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "per-call",
+        ),
+        (
+            {
+                "request_overrides": {
+                    "prompt_cache_key": "native-top",
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "native-top",
+        ),
+        (
+            {
+                "request_overrides": {
+                    "extra_body": {
+                        "prompt_cache_key": "native-nested",
+                        "keep": True,
+                    },
+                },
+            },
+            "native-nested",
+        ),
+    ],
+)
+def test_cache_key_precedence_has_one_xai_wire_location(
+    params: dict, expected: str
+) -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="per-agent")
+
+    kwargs = t.StyxCodexTransport().build_kwargs(
+        "grok-4.6",
+        _msgs(("user", "x")),
+        session_id="physical",
+        is_xai_responses=True,
+        **params,
+    )
+
+    assert "prompt_cache_key" not in kwargs
+    assert kwargs["extra_body"] == {
+        "keep": True,
+        "prompt_cache_key": expected,
+    }
+    assert kwargs["extra_headers"]["x-grok-conv-id"] == "alpha"
+
+
+def test_xai_explicit_scope_wins_agent_scope_with_exact_key() -> None:
+    _set_agent("alpha")
+    kwargs = t.StyxCodexTransport().build_kwargs(
+        "grok-4.6",
+        _msgs(("user", "x")),
+        session_id="physical",
+        cache_scope_id="lineage",
+        prompt_cache_key="exact",
+        is_xai_responses=True,
+    )
+    assert kwargs["extra_body"]["prompt_cache_key"] == "exact"
+    assert kwargs["extra_headers"]["x-grok-conv-id"] == "lineage"
+
+
+def test_per_agent_override_uses_only_xai_nested_location() -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="per-agent")
+    kwargs = t.StyxCodexTransport().build_kwargs(
+        "grok-4.6",
+        _msgs(("user", "x")),
+        session_id="physical",
+        is_xai_responses=True,
+    )
+    assert "prompt_cache_key" not in kwargs
+    assert kwargs["extra_body"]["prompt_cache_key"] == "per-agent"
+    assert kwargs["extra_headers"]["x-grok-conv-id"] == "alpha"
+
+
+def test_per_agent_override_equal_to_agent_id_stays_exact_for_codex_and_xai() -> None:
+    _set_agent("alpha")
+    core_t.configure("alpha", prompt_cache_key="alpha")
+    transport = t.StyxCodexTransport()
+
+    codex = transport.build_kwargs(
+        "gpt-5.5",
+        _msgs(("user", "x")),
+        session_id="physical",
+        is_codex_backend=True,
+    )
+    assert codex["prompt_cache_key"] == "alpha"
+    assert codex["extra_headers"]["session_id"] == "physical"
+    assert codex["extra_headers"]["x-client-request-id"] == "alpha"
+
+    xai = transport.build_kwargs(
+        "grok-4.6",
+        _msgs(("user", "x")),
+        session_id="physical",
+        is_xai_responses=True,
+    )
+    assert "prompt_cache_key" not in xai
+    assert xai["extra_body"]["prompt_cache_key"] == "alpha"
+    assert xai["extra_headers"]["x-grok-conv-id"] == "alpha"
+
+
+def test_long_agent_scope_produces_bounded_cache_key() -> None:
+    _set_agent("agent-" + "x" * 200)
+    kwargs = t.StyxCodexTransport().build_kwargs(
+        "gpt-5.5", _msgs(("user", "x")), session_id="physical"
+    )
+    assert len(kwargs["prompt_cache_key"]) <= 64
 
 
 def test_cache_key_unique_per_agent() -> None:

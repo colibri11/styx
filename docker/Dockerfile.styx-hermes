@@ -2,7 +2,7 @@
 #
 # Базовый образ — официальный s6-overlay nousresearch/hermes-agent.
 # В нём gateway НЕ бинарь на PATH: его поднимает s6-супервизор, а docker
-# CMD `["gateway","run"]` маршрутизируется main-wrapper.sh в
+# Production Compose CMD `["gateway","run"]` маршрутизируется main-wrapper.sh в
 # `s6-setuidgid hermes hermes gateway run`.
 # См. .design/context/decisions.md § 15 + § 48 + § 51.
 #
@@ -26,16 +26,17 @@
 #     контейнера. Выполняется командой
 #       styx-hermes-setup --attach [--profile <name>]
 #     (через `docker exec`). Она патчит config.yaml целевого профиля
-#     (memory.provider/plugins.enabled/context.engine) + бэкап + печатает
+#     (`memory.provider`, `plugins.enabled`; legacy `context.engine: styx`
+#     только снимается) + бэкап + печатает
 #     required-рестарт. Авто-патча на старте больше НЕТ (прежний
 #     cont-init.d/30-styx-bootstrap ретайрен).
 #
 # Build:
 #   docker compose -f docker/docker-compose.test.yml build hermes-styx
 #   (HERMES_IMAGE передаётся из compose; для прода —
-#    --build-arg HERMES_IMAGE=nousresearch/hermes-agent:v2026.7.7.2)
+#    --build-arg HERMES_IMAGE=nousresearch/hermes-agent:v2026.8.31)
 
-ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.7.7.2
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.8.31
 FROM ${HERMES_IMAGE}
 
 USER root
@@ -81,9 +82,12 @@ RUN /usr/local/bin/uv pip install --no-deps -e /opt/styx-core && \
 # командой (см. шапку).
 COPY --chown=hermes:hermes packages/styx-hermes/src/styx_hermes/resources/plugins/styx-memory /opt/hermes/plugins/memory/styx-memory/
 
-# ENTRYPOINT наследуется от base: s6 `/init` → main-wrapper.sh, который
-# маршрутизирует docker CMD под `s6-setuidgid hermes`. CMD по умолчанию
-# в проде — `["gateway","run"]`; в test-стеке — `["sleep","infinity"]`
+# ENTRYPOINT наследуется от base: entrypoint-dispatch.sh (PID 1) → s6 `/init`
+# → main-wrapper.sh, который маршрутизирует docker CMD под
+# `s6-setuidgid hermes`. Не добавлять compose `init: true`: внешний PID 1
+# включает upstream fallback без s6-supervision. CMD по умолчанию
+# задаётся production Compose как `["gateway","run"]`; в test-стеке —
+# `["sleep","infinity"]`
 # (см. docker-compose.test.yml). Авто-attach при старте контейнера нет —
 # Styx остаётся сиротой до явной команды `styx-hermes-setup --attach`.
 USER root

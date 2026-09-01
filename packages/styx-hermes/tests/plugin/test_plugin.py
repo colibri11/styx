@@ -135,8 +135,15 @@ def test_initialize_configures_transport_agent_id(
     try:
         p.initialize(session_id=sid, agent_identity="alpha-agent")
         tr = transport_mod.StyxOpenAITransport()
-        kwargs = tr.build_kwargs("gpt-x", [{"role": "user", "content": "hi"}])
-        assert kwargs["prompt_cache_key"] == "alpha-agent"
+        kwargs = tr.build_kwargs(
+            "gpt-x",
+            [
+                {"role": "system", "content": "stable"},
+                {"role": "user", "content": "hi"},
+            ],
+            supports_prompt_cache_key=True,
+        )
+        assert kwargs["prompt_cache_key"].startswith("pck_")
     finally:
         p.shutdown()
 

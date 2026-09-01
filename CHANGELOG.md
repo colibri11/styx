@@ -7,6 +7,54 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [styx-hermes 1.0.12] — 2026-09-01
+
+Compat-доводка под **Hermes Agent v0.21.0 (тег `v2026.8.31`)**. `styx-core`
+без изменений (1.0.10).
+
+### Исправлено
+
+- **Prompt-cache transport contract Hermes 0.21.** Styx больше не перетирает
+  физический Codex `session_id` идентификатором агента и не добавляет сырой
+  `prompt_cache_key` на chat-completions endpoints без заявленной поддержки.
+  `agent_id` передаётся upstream как rotation-stable `cache_scope_id`; Hermes
+  сам строит content-addressed key, ограничивает его до wire-лимита и выбирает
+  правильное расположение для OpenAI/Codex/xAI/GitHub. Явные per-call и
+  per-agent overrides сохраняют прежний приоритет через штатный
+  `request_overrides`; конфликтующие native top/nested формы нормализуются в
+  одно provider-native wire-поле с порядком
+  `per-call → native top → native nested → per-agent`.
+- **Pre-compress memory handoff.** Зафиксирован закрытый upstream-gap:
+  `on_pre_compress()` теперь реально доходит до `memory_context` штатного
+  compressor. Styx намеренно остаётся на legacy checkpoint API v1 — recall
+  существующей памяти не выдаётся за durable checkpoint отбрасываемого
+  transcript.
+
+### Изменено
+
+- Docker pin обновлён на официальный s6-образ
+  `nousresearch/hermes-agent:v2026.8.31`; документация учитывает новый путь
+  `entrypoint-dispatch.sh → /init → main-wrapper.sh`. Compose не включает
+  внешний `init`, поэтому supervisor-path сохраняется.
+- Штатный teardown test-stack теперь документирован как `down` без `-v`;
+  named volume'ы не удаляются неявно.
+- Переякорены upstream-контракты plugin discovery, memory manager,
+  compression, prompt caching и transports. Динамический unload general
+  plugin в уже живом процессе по-прежнему требует restart: публичного
+  `ctx.register_transport` в Hermes нет, поэтому transport registry не входит
+  в новый lifecycle ledger PluginManager.
+
+### Гейты
+
+- Host `styx-hermes`: **198 passed / 7 skipped** против точного checkout
+  `v2026.8.31` (`29112bef…`).
+- Отдельные transport + MemoryManager compat regression tests: **70 passed**.
+- Docker build официального amd64 base digest `sha256:87af7c6…`:
+  `styx-hermes==1.0.12` установлен в Hermes venv.
+- Docker in-container full `styx-hermes`: **205 passed / 0 failed** с реальным
+  PostgreSQL; dispatcher запускает s6 как PID 1, attach сохраняет
+  `context.engine: compressor`.
+
 ## [styx-hermes 1.0.11] — 2026-07-18
 
 Compat-валидация под **Hermes Agent v0.18.2 (тег `v2026.7.7.2`)** (ADR § 65).
