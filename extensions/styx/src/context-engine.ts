@@ -69,6 +69,20 @@ import {
   MAX_USER_MESSAGE_CHARS,
 } from "./hooks/agent-end.js";
 
+const OPENCLAW_EXECUTION_PROVENANCE = {
+  schema_version: 1 as const,
+  provider_family: "other" as const,
+  runtime_family: "unknown" as const,
+  model_id: "unknown",
+  model_revision: null,
+  endpoint_id: "openclaw-default",
+  adapter: "styx-openclaw",
+  adapter_version: "0.6.0",
+  protocol: "unknown" as const,
+  sampling_hash: null,
+  toolset_hash: null,
+};
+
 export type ResolveAgentId = (openclawAgentId: string) => Promise<string>;
 
 export type StyxContextEngineParams = {
@@ -254,7 +268,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
     info: {
       id: "styx",
       name: "Styx",
-      version: "0.5.0",
+      version: "0.6.0",
       ownsCompaction,
       acceptedHostParams: ["sessionTarget", "runtimeSettings", "runtimeContext"],
       transcriptSemantics: {
@@ -329,6 +343,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
           token_budget: null,
           model: null,
           platform: "openclaw",
+          planned_execution_provenance: OPENCLAW_EXECUTION_PROVENANCE,
           extra: {},
         };
         const resp = await fetchCanonicalPreturn(client, request);
@@ -456,6 +471,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
         consequences: [],
         model: null,
         platform: "openclaw",
+        execution_provenance: OPENCLAW_EXECUTION_PROVENANCE,
         extra: {
           projection_scope: "accepted_durable_turn",
           logical_turn_id: bounded(admission["logicalTurnId"], 256),

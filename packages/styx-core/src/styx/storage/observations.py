@@ -63,6 +63,7 @@ class ObservationIngestResult:
     late: bool
     pending_count: int
     created_at: dt.datetime
+    ingest_seq: int
 
 
 def _canonical_json(value: Any) -> str:
@@ -244,7 +245,7 @@ def ingest_observation(
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id,payload_hash,correlation_status,action_act_id,late,created_at "
+            "SELECT id,payload_hash,correlation_status,action_act_id,late,created_at,ingest_seq "
             "FROM cognitive_consequences "
             "WHERE agent_id=%s AND source_id=%s AND observation_key=%s FOR UPDATE",
             (agent_id, source_id, observation_key),
@@ -271,6 +272,7 @@ def ingest_observation(
                 late=bool(existing["late"]),
                 pending_count=pending_count,
                 created_at=existing["created_at"],
+                ingest_seq=int(existing["ingest_seq"]),
             )
 
         cur.execute(
@@ -326,7 +328,7 @@ def ingest_observation(
             "declared_action_ordinal,declared_action_event_id,action_act_id,"
             "correlation_status,late) "
             "VALUES (%s,%s,NULL,NULL,%s,%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s,"
-            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING created_at",
+            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING created_at,ingest_seq",
             (
                 observation_id,
                 agent_id,
@@ -352,7 +354,9 @@ def ingest_observation(
                 late,
             ),
         )
-        created_at = cur.fetchone()["created_at"]
+        inserted = cur.fetchone()
+        created_at = inserted["created_at"]
+        ingest_seq = int(inserted["ingest_seq"])
     return ObservationIngestResult(
         observation_id=observation_id,
         duplicate=False,
@@ -362,6 +366,7 @@ def ingest_observation(
         late=late,
         pending_count=pending_before + 1,
         created_at=created_at,
+        ingest_seq=ingest_seq,
     )
 
 

@@ -395,6 +395,40 @@ Action reference agent-scoped и означает только совпаден�
 }
 ```
 
+### `POST /cognition/ready-events/claim`
+
+Host-owned bounded long poll. Request: `agent_id`, stable `consumer_id`,
+optional `after_generation`, `limit` (1..32), `wait_ms` (0..30000). Response
+содержит один `claim_token`, lease expiry и content-free events:
+`event_id`, monotonic `ready_generation`, reason, source/high-water generation,
+pending count и redelivery count. Пустой список — штатный timeout. Styx не
+делает model call и не считает событие намерением.
+
+### `POST /cognition/ready-events/resolve`
+
+Тот же consumer/token завершает claim с `presented|deferred|discarded`.
+`presented` требует `snapshot_token`, который действительно арендовал exact
+observation coordinate event-а. `deferred` освобождает claim после cooldown;
+`discarded` требует bounded `policy_reason`, не удаляет observation и допускает
+content-free redelivery. Expired или чужой claim получает `409`.
+
+### `POST /cognition/ready-events/signal`
+
+Authenticated operator-only content-free hint с идемпотентным
+`signal_generation`. Он проходит тот же ledger/backpressure и также не
+запускает модель.
+
+### Execution provenance v1
+
+`/cognition/preturn` принимает optional `planned_execution_provenance`, а
+terminal `/cognition/commit` — фактическую `execution_provenance`. Объект имеет
+строго поля `schema_version`, `provider_family`, `runtime_family`, `model_id`,
+`model_revision`, `endpoint_id`, `adapter`, `adapter_version`, `protocol`,
+`sampling_hash`, `toolset_hash`. `endpoint_id` — operator alias, не URL/IP;
+секреты, неизвестные поля и невалидные hashes отвергаются. Legacy
+`model/platform` детерминированно нормализуются. Provenance входит в strict
+commit idempotency, но не в line/root/carrier identity.
+
 ### `POST /cognition/preturn`
 
 Строит один атомарный fenced snapshot перед генерацией. Window mechanics,

@@ -14,6 +14,8 @@ import logging
 import math
 from typing import Any
 
+from styx_hermes.provenance import execution_provenance
+
 from styx_hermes import _agent_session
 from styx_hermes.engine.post_llm_hook import (
     MAX_HISTORY_CONTENT_CHARS,
@@ -126,6 +128,7 @@ def on_pre_llm_call(**hermes_kwargs: Any) -> dict[str, str] | None:
             query=user_text or None,
             model=_bounded_identifier(hermes_kwargs.get("model"), 512) or None,
             platform=_bounded_identifier(hermes_kwargs.get("platform"), 64) or None,
+            planned_execution_provenance=execution_provenance(hermes_kwargs),
             extra={
                 "current_event": _bounded_current_event(current_event),
             },

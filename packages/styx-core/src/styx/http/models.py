@@ -274,6 +274,7 @@ class CognitionPreturnRequest(BaseModel):
     token_budget: int | None = Field(default=None, ge=256, le=1_000_000)
     model: str | None = Field(default=None, max_length=512)
     platform: str | None = Field(default=None, max_length=64)
+    planned_execution_provenance: dict[str, Any] | None = None
     extra: dict[str, Any] = Field(
         default_factory=dict, max_length=16
     )
@@ -294,6 +295,14 @@ class CognitionPreturnRequest(BaseModel):
         elif current is not None and not isinstance(current, dict):
             raise ValueError("extra.current_event must be an object or JSON object string")
         return value
+
+    @field_validator("planned_execution_provenance")
+    @classmethod
+    def _planned_provenance(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        from styx.engine.execution_provenance import normalize_execution_provenance
+        return normalize_execution_provenance(value)
 
 
 class CognitionObservationActionRef(BaseModel):
@@ -370,6 +379,7 @@ class CognitionObserveResponse(BaseModel):
     late: bool
     pending_count: int = Field(ge=0)
     created_at: _dt.datetime
+    ready_generation: int | None = Field(default=None, ge=1)
 
 
 class CognitionWillProjection(BaseModel):
@@ -532,6 +542,7 @@ class CognitionCommitRequest(BaseModel):
     consequences: list[CognitionConsequence] = Field(default_factory=list, max_length=32)
     model: str | None = Field(default=None, max_length=512)
     platform: str | None = Field(default=None, max_length=64)
+    execution_provenance: dict[str, Any] | None = None
     extra: dict[str, Any] = Field(
         default_factory=dict, max_length=16
     )
@@ -541,6 +552,76 @@ class CognitionCommitRequest(BaseModel):
     def _bounded_extra(cls, value: dict[str, Any]) -> dict[str, Any]:
         validate_journal_json(value)
         return value
+
+    @field_validator("execution_provenance")
+    @classmethod
+    def _execution_provenance(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        from styx.engine.execution_provenance import normalize_execution_provenance
+        return normalize_execution_provenance(value)
+
+
+class CognitionReadyClaimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str = Field(min_length=1, max_length=256)
+    consumer_id: str = Field(min_length=1, max_length=128)
+    after_generation: int = Field(default=0, ge=0)
+    limit: int = Field(default=1, ge=1, le=32)
+    wait_ms: int = Field(default=0, ge=0, le=30_000)
+
+
+class CognitionReadyEvent(BaseModel):
+    event_id: str
+    ready_generation: int = Field(ge=1)
+    reason: Literal["observation_available", "observation_redeliverable", "operator_signal"]
+    source_generation: int = Field(ge=0)
+    observation_high_water: int | None = Field(default=None, ge=0)
+    pending_count: int = Field(ge=0)
+    created_at: _dt.datetime
+    redelivery_count: int = Field(ge=0)
+
+
+class CognitionReadyClaimResponse(BaseModel):
+    claim_token: str | None = None
+    lease_expires_at: _dt.datetime | None = None
+    events: list[CognitionReadyEvent] = Field(default_factory=list, max_length=32)
+
+
+class CognitionReadyResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str = Field(min_length=1, max_length=256)
+    consumer_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=64)
+    outcome: Literal["presented", "deferred", "discarded"]
+    snapshot_token: str | None = Field(default=None, max_length=128)
+    policy_reason: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _resolve_shape(self) -> "CognitionReadyResolveRequest":
+        if self.outcome == "presented" and not self.snapshot_token:
+            raise ValueError("presented outcome requires snapshot_token")
+        if self.outcome == "discarded" and not self.policy_reason:
+            raise ValueError("discarded outcome requires policy_reason")
+        return self
+
+
+class CognitionReadyResolveResponse(BaseModel):
+    resolved_count: int = Field(ge=0)
+    outcome: Literal["presented", "deferred", "discarded"]
+    redelivered: bool = False
+
+
+class CognitionReadySignalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str = Field(min_length=1, max_length=256)
+    signal_generation: int = Field(ge=0)
+
+
+class CognitionReadySignalResponse(BaseModel):
+    event_id: str
+    ready_generation: int = Field(ge=1)
+    duplicate: bool
 
 
 class CognitionCommitResponse(BaseModel):

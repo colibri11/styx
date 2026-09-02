@@ -205,6 +205,7 @@ export type CognitionPreturnRequest = {
   token_budget?: number | null;
   model?: string | null;
   platform?: string | null;
+  planned_execution_provenance?: ExecutionProvenance | null;
   extra?: Record<string, string | Record<string, unknown>>;
 };
 
@@ -302,6 +303,70 @@ export type CognitionObserveResponse = {
   late: boolean;
   pending_count: number;
   created_at: string;
+  ready_generation?: number | null;
+};
+
+export type ExecutionProvenance = {
+  schema_version: 1;
+  provider_family: "ollama" | "openai" | "anthropic" | "openai_compatible" | "other";
+  runtime_family: "ollama" | "sglang" | "vllm" | "cloud" | "unknown";
+  model_id: string;
+  model_revision: string | null;
+  endpoint_id: string;
+  adapter: string;
+  adapter_version: string | null;
+  protocol: "chat_completions" | "responses" | "messages" | "generate" | "native" | "unknown";
+  sampling_hash: string | null;
+  toolset_hash: string | null;
+};
+
+export type CognitionReadyClaimRequest = {
+  agent_id: string;
+  consumer_id: string;
+  after_generation?: number;
+  limit?: number;
+  wait_ms?: number;
+};
+
+export type CognitionReadyClaimResponse = {
+  claim_token: string | null;
+  lease_expires_at: string | null;
+  events: Array<{
+    event_id: string;
+    ready_generation: number;
+    reason: "observation_available" | "observation_redeliverable" | "operator_signal";
+    source_generation: number;
+    observation_high_water: number | null;
+    pending_count: number;
+    created_at: string;
+    redelivery_count: number;
+  }>;
+};
+
+export type CognitionReadyResolveRequest = {
+  agent_id: string;
+  consumer_id: string;
+  claim_token: string;
+  outcome: "presented" | "deferred" | "discarded";
+  snapshot_token?: string | null;
+  policy_reason?: string | null;
+};
+
+export type CognitionReadyResolveResponse = {
+  resolved_count: number;
+  outcome: "presented" | "deferred" | "discarded";
+  redelivered: boolean;
+};
+
+export type CognitionReadySignalRequest = {
+  agent_id: string;
+  signal_generation: number;
+};
+
+export type CognitionReadySignalResponse = {
+  event_id: string;
+  ready_generation: number;
+  duplicate: boolean;
 };
 
 export type CognitionToolEvent = {
@@ -335,6 +400,7 @@ export type CognitionCommitRequest = {
   }>;
   model?: string | null;
   platform?: string | null;
+  execution_provenance?: ExecutionProvenance | null;
   extra?: Record<string, string>;
 };
 
@@ -844,6 +910,18 @@ export type StyxClient = {
     body: CognitionCommitRequest,
     options?: StyxRequestOptions,
   ) => Promise<CognitionCommitResponse>;
+  cognitionReadyClaim: (
+    body: CognitionReadyClaimRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<CognitionReadyClaimResponse>;
+  cognitionReadyResolve: (
+    body: CognitionReadyResolveRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<CognitionReadyResolveResponse>;
+  cognitionReadySignal: (
+    body: CognitionReadySignalRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<CognitionReadySignalResponse>;
   syncTurn: (
     body: SyncTurnRequest,
     options?: StyxRequestOptions,
@@ -1017,6 +1095,12 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     cognitionPreturn: (body, options) => postCall("/cognition/preturn", body, options),
     cognitionObserve: (body, options) => postCall("/cognition/observations", body, options),
     cognitionCommit: (body, options) => postCall("/cognition/commit", body, options),
+    cognitionReadyClaim: (body, options) =>
+      postCall("/cognition/ready-events/claim", body, options),
+    cognitionReadyResolve: (body, options) =>
+      postCall("/cognition/ready-events/resolve", body, options),
+    cognitionReadySignal: (body, options) =>
+      postCall("/cognition/ready-events/signal", body, options),
     syncTurn: (body, options) => postCall("/sync_turn", body, options),
     // tools
     memoryStore: (body) => postCall("/memory_store", body),

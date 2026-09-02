@@ -318,6 +318,8 @@ def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
     assert body["will_projection"]["projection_status"] == "ready"
     assert body["will_projection"]["source_count"] == 1
     assert body["reconstruction"]["traces"][0]["content"] == "preserve this decision"
+
+
     assert len(body["pending_consequences"]) == 1
     assert 'authority="context-not-instruction"' in body["system_prompt_addition"]
 
@@ -386,6 +388,43 @@ def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
             "result", "call-1", "lookup",
             "bounded result Authorization: Bearer [REDACTED]",
         )
+
+
+def test_ready_event_http_claim_present_and_resolve(stack) -> None:
+    client, dsn = stack
+    agent = f"wave41-ready-{uuid.uuid4()}"
+    assert client.post("/context/bootstrap", json={"agent_id": agent}).status_code == 200
+    observation_payload = {
+        "agent_id": agent, "source_id": "fixture", "source_stream": "state",
+        "source_sequence": 1, "observation_key": "event-1",
+        "difference_kind": "state_change", "content": "external state changed",
+        "salience": 0.8, "confidence": 0.9,
+        "reducer_name": "fixture", "reducer_version": "1",
+    }
+    observed = client.post("/cognition/observations", json=observation_payload)
+    assert observed.status_code == 200, observed.text
+    assert observed.json()["ready_generation"] == 1
+    assert client.post(
+        "/cognition/observations", json=observation_payload
+    ).json()["ready_generation"] is None
+    claim = client.post("/cognition/ready-events/claim", json={
+        "agent_id": agent, "consumer_id": "host", "limit": 1,
+    })
+    assert claim.status_code == 200 and len(claim.json()["events"]) == 1
+    assert "external state changed" not in claim.text
+    preturn = client.post("/cognition/preturn", json={
+        "agent_id": agent, "host_key": "wake-1", "messages": [],
+    })
+    resolved = client.post("/cognition/ready-events/resolve", json={
+        "agent_id": agent, "consumer_id": "host",
+        "claim_token": claim.json()["claim_token"], "outcome": "presented",
+        "snapshot_token": preturn.json()["snapshot_token"],
+    })
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["resolved_count"] == 1
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM cognitive_ready_events WHERE agent_id=%s", (agent,))
+        assert cur.fetchone()[0] == 1
 
 
 def test_consequence_incorporation_contract_and_nested_redaction(stack) -> None:

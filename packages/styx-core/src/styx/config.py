@@ -53,6 +53,11 @@ class StyxConfig:
     cognition_pending_limit: int = 16
     cognition_observation_pending_cap: int = 1024
     cognition_snapshot_lease_s: float = 60.0
+    cognition_ready_event_cap: int = 1024
+    cognition_ready_global_cap: int = 100_000
+    cognition_ready_claim_lease_s: float = 30.0
+    cognition_ready_consumer_claim_cap: int = 8
+    cognition_ready_discard_cooldown_s: float = 30.0
     # Brief bounded barrier for parent-act residue visibility before the next
     # preturn assembles its causal envelope. Zero disables the wait.
     cognition_reduction_wait_s: float = 0.35
@@ -454,6 +459,11 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "cognition_pending_limit",
         "cognition_observation_pending_cap",
         "cognition_snapshot_lease_s",
+        "cognition_ready_event_cap",
+        "cognition_ready_global_cap",
+        "cognition_ready_claim_lease_s",
+        "cognition_ready_consumer_claim_cap",
+        "cognition_ready_discard_cooldown_s",
         "cognition_reduction_wait_s",
         "act_residue_retry_tick_s",
         "act_residue_max_attempts",
@@ -630,6 +640,21 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         ),
         cognition_snapshot_lease_s=max(
             1.0, min(3600.0, float(merged.get("cognition_snapshot_lease_s", 60.0)))
+        ),
+        cognition_ready_event_cap=max(
+            1, min(100_000, int(merged.get("cognition_ready_event_cap", 1024)))
+        ),
+        cognition_ready_global_cap=max(
+            1, min(1_000_000, int(merged.get("cognition_ready_global_cap", 100_000)))
+        ),
+        cognition_ready_claim_lease_s=max(
+            1.0, min(3600.0, float(merged.get("cognition_ready_claim_lease_s", 30.0)))
+        ),
+        cognition_ready_consumer_claim_cap=max(
+            1, min(128, int(merged.get("cognition_ready_consumer_claim_cap", 8)))
+        ),
+        cognition_ready_discard_cooldown_s=max(
+            0.0, min(3600.0, float(merged.get("cognition_ready_discard_cooldown_s", 30.0)))
         ),
         cognition_reduction_wait_s=max(
             0.0,
@@ -978,6 +1003,26 @@ def _read_env() -> dict[str, Any]:
         "cognition_snapshot_lease_s": (
             float(os.environ["STYX_COGNITION_SNAPSHOT_LEASE_S"])
             if os.environ.get("STYX_COGNITION_SNAPSHOT_LEASE_S") else None
+        ),
+        "cognition_ready_event_cap": (
+            int(os.environ["STYX_COGNITION_READY_EVENT_CAP"])
+            if os.environ.get("STYX_COGNITION_READY_EVENT_CAP") else None
+        ),
+        "cognition_ready_global_cap": (
+            int(os.environ["STYX_COGNITION_READY_GLOBAL_CAP"])
+            if os.environ.get("STYX_COGNITION_READY_GLOBAL_CAP") else None
+        ),
+        "cognition_ready_claim_lease_s": (
+            float(os.environ["STYX_COGNITION_READY_CLAIM_LEASE_S"])
+            if os.environ.get("STYX_COGNITION_READY_CLAIM_LEASE_S") else None
+        ),
+        "cognition_ready_consumer_claim_cap": (
+            int(os.environ["STYX_COGNITION_READY_CONSUMER_CLAIM_CAP"])
+            if os.environ.get("STYX_COGNITION_READY_CONSUMER_CLAIM_CAP") else None
+        ),
+        "cognition_ready_discard_cooldown_s": (
+            float(os.environ["STYX_COGNITION_READY_DISCARD_COOLDOWN_S"])
+            if os.environ.get("STYX_COGNITION_READY_DISCARD_COOLDOWN_S") else None
         ),
         "cognition_reduction_wait_s": (
             float(os.environ["STYX_COGNITION_REDUCTION_WAIT_S"])

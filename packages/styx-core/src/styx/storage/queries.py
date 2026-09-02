@@ -3005,7 +3005,7 @@ class AgentScopedQueries:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT line_provenance,line_status,causal_node_hash,"
-                "causal_node_kind,causal_payload_version,causal_operation_id "
+                "causal_node_kind,causal_payload_version,causal_operation_id,cognitive_act_id "
                 "FROM memories WHERE agent_id=%s AND id=%s",
                 (self._agent_id, memory_id),
             )
@@ -3013,6 +3013,36 @@ class AgentScopedQueries:
             if node is None:
                 return None
             operation = None
+            execution = None
+            if node["cognitive_act_id"] is not None:
+                cur.execute(
+                    "SELECT execution_provenance,execution_provenance_hash,"
+                    "execution_provenance_version,metadata FROM cognitive_acts "
+                    "WHERE agent_id=%s AND id=%s",
+                    (self._agent_id, node["cognitive_act_id"]),
+                )
+                execution = cur.fetchone()
+                if execution is not None and execution["execution_provenance"] is None:
+                    from styx.engine.execution_provenance import (
+                        execution_provenance_hash,
+                        normalize_execution_provenance,
+                    )
+                    legacy = execution["metadata"] if isinstance(execution["metadata"], dict) else {}
+                    normalized = normalize_execution_provenance(
+                        None,
+                        legacy_model=legacy.get("model"),
+                        legacy_platform=legacy.get("platform"),
+                    )
+                    execution = {
+                        "execution_provenance": normalized,
+                        "execution_provenance_hash": execution_provenance_hash(normalized),
+                        "execution_provenance_version": 1,
+                    }
+                elif execution is not None:
+                    execution = {
+                        key: value for key, value in execution.items()
+                        if key != "metadata"
+                    }
             if node["causal_operation_id"] is not None:
                 cur.execute(
                     "SELECT id,operation_kind,status,input_line_version,"
@@ -3059,6 +3089,7 @@ class AgentScopedQueries:
             "operation": serialise(operation),
             "edges": [serialise(edge) for edge in edges],
             "tombstone": serialise(tombstone),
+            "execution_provenance": serialise(execution),
         }
 
     def explain_decompose_rank(
@@ -3426,7 +3457,17 @@ class AgentScopedQueries:
             "total_storage_bytes": total_storage_bytes,
         }
         from styx.storage.causal_graph import causal_graph_stats
+        from styx.storage.ready_events import (
+            execution_provenance_stats,
+            ready_event_stats,
+        )
         agent_block["causal_graph"] = causal_graph_stats(
+            self._conn, self._agent_id
+        )
+        agent_block["ready_events"] = ready_event_stats(
+            self._conn, self._agent_id
+        )
+        agent_block["execution_provenance"] = execution_provenance_stats(
             self._conn, self._agent_id
         )
         global_block = {

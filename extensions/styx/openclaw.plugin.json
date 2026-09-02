@@ -2,7 +2,7 @@
   "id": "styx",
   "name": "Styx",
   "description": "Self-hosted memory/context subsystem with fenced cognitive-continuity envelopes, structural memory and knowledge graph over styx-core.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "kind": "context-engine",
   "activation": {
     "onStartup": true

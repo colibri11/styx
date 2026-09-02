@@ -15,6 +15,9 @@ import pytest
 DSN_ENV = "STYX_TEST_DATABASE_URL"
 
 _STYX_DROP_STMTS = [
+    # Host readiness ledger (wave 41) references cognitive snapshots.
+    "DROP TABLE IF EXISTS cognitive_ready_events CASCADE",
+    "DROP TABLE IF EXISTS ready_event_state CASCADE",
     # Act residue / causal carrier (wave 38) before its act/task parents.
     "DROP TABLE IF EXISTS cognitive_act_reductions CASCADE",
     "DROP TABLE IF EXISTS memory_tombstones CASCADE",

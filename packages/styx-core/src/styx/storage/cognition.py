@@ -548,6 +548,8 @@ def record_snapshot(
     host_key: str | None = None,
     request_hash: str | None = None,
     lease_seconds: float = 60.0,
+    planned_execution_provenance: dict[str, Any] | None = None,
+    planned_execution_provenance_hash: str | None = None,
 ) -> str:
     """Acquire a new physical snapshot.
 
@@ -559,11 +561,14 @@ def record_snapshot(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "INSERT INTO cognitive_snapshots"
-            "(token,agent_id,session_id,host_key,request_hash,line_version,lease_expires_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,clock_timestamp() + %s * interval '1 second')",
+            "(token,agent_id,session_id,host_key,request_hash,line_version,lease_expires_at,"
+            " planned_execution_provenance,planned_execution_provenance_hash) "
+            "VALUES (%s,%s,%s,%s,%s,%s,clock_timestamp() + %s * interval '1 second',%s,%s)",
             (
                 token, agent_id, session_id, host_key, request_hash,
                 line_version, bounded_lease,
+                Jsonb(planned_execution_provenance) if planned_execution_provenance else None,
+                planned_execution_provenance_hash,
             ),
         )
     return token
@@ -709,6 +714,7 @@ def _commit_request_fingerprint(
     actions: Sequence[dict[str, Any]],
     consequences: Sequence[dict[str, Any]],
     metadata: dict[str, Any],
+    execution_provenance: dict[str, Any] | None,
 ) -> tuple[str, dict[str, Any]]:
     """Hash only bounded caller coordinates, before dynamic resolution.
 
@@ -749,6 +755,7 @@ def _commit_request_fingerprint(
         "actions": _safe_items(actions),
         "consequences": _safe_items(consequences),
         "metadata": safe_metadata,
+        "execution_provenance": execution_provenance,
     }
     digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
     return digest, safe_metadata
@@ -771,6 +778,8 @@ def commit_cognitive_act(
     metadata: dict[str, Any],
     snapshot_policy: str = "explicit",
     parent_policy: str = "explicit",
+    execution_provenance: dict[str, Any] | None = None,
+    execution_provenance_hash: str | None = None,
 ) -> CommitResult:
     """Append one idempotent act and its ordered journals in the caller tx."""
     if snapshot_policy not in {"explicit", "latest_session"}:
@@ -791,6 +800,7 @@ def commit_cognitive_act(
         actions=actions,
         consequences=consequences,
         metadata=metadata,
+        execution_provenance=execution_provenance,
     )
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -903,8 +913,9 @@ def commit_cognitive_act(
             "INSERT INTO cognitive_acts "
             "(id,agent_id,host_key,session_id,declared_parent_key,parent_act_id,"
             " input_line_version,input_snapshot_token,status,channel_input,"
-            " channel_output,metadata,completed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp())",
+            " channel_output,metadata,execution_provenance,execution_provenance_hash,"
+            " execution_provenance_version,completed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp())",
             (
                 act_id, agent_id, host_key, session_id,
                 effective_parent_host_key, parent_id,
@@ -912,6 +923,9 @@ def commit_cognitive_act(
                 Jsonb(redact_journal_json(channel_input)),
                 Jsonb(redact_journal_json(channel_output)),
                 Jsonb(redact_journal_json(metadata)),
+                Jsonb(execution_provenance) if execution_provenance else None,
+                execution_provenance_hash,
+                1 if execution_provenance else None,
             ),
         )
         if effective_snapshot_token:

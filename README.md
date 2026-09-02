@@ -118,6 +118,8 @@ Hot/long различаются плотностью и latency, не приро
 ```
 user message
    │
+   ├── /cognition/ready-events/{claim,resolve,signal}
+   │                        └── content-free host wake hints; never a model call
    ├── /cognition/preturn ─ fenced snapshot
    │                        ├── bounded host messages / window mechanics
    │                        ├── whole-line causal carrier + coverage/status
@@ -131,7 +133,7 @@ user message
    ├── /cognition/observations ─ pre-reduced external differences
    │                             └── source-idempotent inbox + optional action correlation
    │
-   └── /cognition/commit ─ host_key-idempotent terminal saga
+   └── /cognition/commit ─ host_key-idempotent terminal saga + actual provenance
                             ├── declared parent lineage, not timestamp ancestry
                             ├── dialogue + ordered bounded/redacted tool journal
                             ├── explicit legacy consequence journal / external evidence
@@ -154,6 +156,11 @@ recoverable lease: если snapshot был брошен до commit, observatio
 этот endpoint не принимает. Ingest, presentation и consumption сами по себе
 не меняют subjective line — это может сделать только общий validated act
 reducer после участия observation в следующем cognitive act.
+Каждый новый observation также создаёт content-free readiness generation.
+Внешний supervisor может claim'ить её, применить собственные permissions,
+budget/rate policy и затем вызвать preturn с stable wake `host_key`; Styx сам
+не будит host и не вызывает модель. `presented` resolve принимается только для
+snapshot, который действительно показал observation этого event-а.
 Retry commit с тем же `host_key` и тем же bounded request возвращает
 существующий act; изменённый request под тем же ключом отклоняется с `409`.
 `parent_host_key` сохраняет заявленную ветвящуюся причинную линию даже при

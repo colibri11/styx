@@ -7,7 +7,50 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
-## [Unreleased — prepared: styx-core 1.5.0 / styx-hermes 1.5.0 / OpenClaw 0.5.0]
+## [Unreleased — prepared: styx-core 1.6.0 / styx-hermes 1.6.0 / OpenClaw 0.6.0]
+
+Подготовлено, но не опубликовано: host-owned event-driven continuity и
+model-independent execution provenance. Версии не означают наличие tag/release.
+
+### Добавлено
+
+- Migration `0013_ready_events_model_provenance.sql`: durable content-free
+  readiness generations, claim leases/redelivery и typed act provenance v1.
+- Authenticated claim/resolve/signal API и явные Hermes/OpenClaw client
+  primitives без фонового model loop внутри Styx.
+- Family-level readiness/provenance analytics и content-free act provenance в
+  causal lineage explain.
+
+### Изменено
+
+- Новый external observation атомарно создаёт одну readiness generation;
+  exact retry, preturn, commit, reducer и carrier rebuild не создают wakeup.
+- Terminal commit фиксирует actual provider/runtime/model adapter coordinates;
+  legacy `model/platform` нормализуются в тот же schema v1.
+- Provider/model provenance входит в strict commit fingerprint, но не входит в
+  causal root, carrier identity, observation order или memory eligibility.
+
+### Надёжность и безопасность
+
+- Claim — at-least-once: один active lease на event, expiry даёт redelivery,
+  `presented` требует exact snapshot/observation coverage, discard требует
+  controlled policy reason и не удаляет evidence.
+- Provenance rejects URLs/IP/credential-shaped identifiers, unknown keys,
+  неверные hashes и неподдерживаемые families. Endpoint хранится как alias.
+- Ollama и SGLang имеют разные runtime/protocol values; core не вызывает ни
+  модель, ни host wakeup по ready-event.
+
+### Проверка текущего checkpoint
+
+- Targeted PostgreSQL/HTTP/provenance gate: **54 passed**; migration/storage
+  gate: **18 passed**; Hermes/core pure boundary: **67 passed**.
+- Fresh Docker core на real PostgreSQL + Ollama `.32`: **1826 passed / 16
+  expected skipped / 0 failed**; полный Hermes: **232 passed / 0 failed**.
+  OpenClaw build/contract suite green; host runtime: **5 passed / 3 expected
+  skipped**.
+- Push/tag/release не выполнялись.
+
+## [Prepared checkpoint — styx-core 1.5.0 / styx-hermes 1.5.0 / OpenClaw 0.5.0]
 
 Подготовлено, но не опубликовано: versioned causal reduction, forgetting и
 nearest-retained rewiring. Версии не означают наличие tag или release.

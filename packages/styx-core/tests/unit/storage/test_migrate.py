@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "will_projections",
     "cognitive_act_reductions",
     "causal_operations", "memory_tombstones",
+    "cognitive_ready_events", "ready_event_state",
 }
 EXPECTED_INDEXES = {
     "sessions_agent_started_idx",
@@ -45,6 +46,8 @@ EXPECTED_INDEXES = {
     "memory_lineage_edge_key_uq", "memory_lineage_active_edge_uq",
     "memory_lineage_active_source_idx", "memory_lineage_active_target_idx",
     "memory_tombstones_operation_idx",
+    "cognitive_ready_events_claim_idx", "cognitive_ready_events_lease_idx",
+    "cognitive_acts_execution_provenance_idx",
 }
 
 
@@ -76,6 +79,7 @@ def test_migration_applies_to_empty_db(clean_db: str) -> None:
             "0010_act_residue_carrier.sql",
             "0011_durable_observations.sql",
             "0012_causal_rewiring.sql",
+            "0013_ready_events_model_provenance.sql",
     ]
 
     with psycopg.connect(clean_db) as conn:
@@ -98,6 +102,7 @@ def test_migration_is_idempotent(clean_db: str) -> None:
             "0010_act_residue_carrier.sql",
             "0011_durable_observations.sql",
             "0012_causal_rewiring.sql",
+            "0013_ready_events_model_provenance.sql",
     ]
     assert second == []
 

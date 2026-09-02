@@ -84,6 +84,11 @@
 | `STYX_COGNITION_RECALL_LIMIT` | `8` | Максимум live eligible subjective traces в reconstruction одного fenced preturn; clamp 1..8. |
 | `STYX_COGNITION_PENDING_LIMIT` | `16` | Совместимый верхний предел выдачи pending observations; clamp 1..16, effective hard cap snapshot/prompt — 4. |
 | `STYX_COGNITION_OBSERVATION_PENDING_CAP` | `1024` | Per-agent backpressure bound durable observation inbox; clamp 1..100000. При достижении cap ingest возвращает `429` и `Retry-After`, не удаляя старые observations. |
+| `STYX_COGNITION_READY_EVENT_CAP` | `1024` | Per-agent cap незавершённых readiness events; clamp 1..100000. |
+| `STYX_COGNITION_READY_GLOBAL_CAP` | `100000` | Daemon-wide cap незавершённых readiness events; clamp 1..1000000. |
+| `STYX_COGNITION_READY_CLAIM_LEASE_S` | `30` | Lease host claim; clamp 1..3600 секунд, после expiry event redeliverable. |
+| `STYX_COGNITION_READY_CONSUMER_CLAIM_CAP` | `8` | Максимум одновременно claimed events одного stable consumer; clamp 1..128. |
+| `STYX_COGNITION_READY_DISCARD_COOLDOWN_S` | `30` | Cooldown defer/discard redelivery; clamp 0..3600 секунд. |
 | `STYX_COGNITION_SNAPSHOT_LEASE_S` | `60.0` | Lease snapshot/presentation в секундах; clamp 1..3600. Same-act retry по `host_key` использует тот же snapshot. После abandoned preturn и expiry непризнанные consequences снова доступны для at-least-once delivery; commit ack идемпотентен. |
 | `STYX_COGNITION_REDUCTION_WAIT_S` | `0.35` | Bounded ожидание terminal reduction непосредственного predecessor перед preturn; clamp 0..5 s. По timeout запрос продолжается с явным `continuity_freshness`, stale не маскируется как current. `0` отключает ожидание. |
 | `STYX_ACT_RESIDUE_RETRY_TICK_S` | `30.0` | Интервал sweeper-а, который reconciles retryable/crashed act-residue outcomes; clamp 1..3600 s. |

@@ -216,6 +216,7 @@ class StyxCoreClient:
         token_budget: int | None = None,
         model: str | None = None,
         platform: str | None = None,
+        planned_execution_provenance: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build one fenced pre-cognitive envelope for a Hermes turn."""
@@ -231,6 +232,7 @@ class StyxCoreClient:
                 "token_budget": token_budget,
                 "model": model,
                 "platform": platform,
+                "planned_execution_provenance": planned_execution_provenance,
                 "extra": extra or {},
             },
             timeout=self._long_timeout,
@@ -252,6 +254,7 @@ class StyxCoreClient:
         consequences: list[dict[str, Any]] | None = None,
         model: str | None = None,
         platform: str | None = None,
+        execution_provenance: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Commit the finalized channel projection under stable host lineage."""
@@ -271,9 +274,62 @@ class StyxCoreClient:
                 "consequences": consequences or [],
                 "model": model,
                 "platform": platform,
+                "execution_provenance": execution_provenance,
                 "extra": extra or {},
             },
             timeout=self._affect_timeout,
+        )
+
+    def cognition_ready_claim(
+        self,
+        agent_id: str,
+        *,
+        consumer_id: str,
+        after_generation: int = 0,
+        limit: int = 1,
+        wait_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Claim content-free wake candidates; the caller owns scheduling policy."""
+        return self._post(
+            "/cognition/ready-events/claim",
+            {
+                "agent_id": agent_id,
+                "consumer_id": consumer_id,
+                "after_generation": after_generation,
+                "limit": limit,
+                "wait_ms": wait_ms,
+            },
+            timeout=max(self._long_timeout, wait_ms / 1000 + 5.0),
+        )
+
+    def cognition_ready_signal(
+        self, agent_id: str, *, signal_generation: int
+    ) -> dict[str, Any]:
+        return self._post(
+            "/cognition/ready-events/signal",
+            {"agent_id": agent_id, "signal_generation": signal_generation},
+        )
+
+    def cognition_ready_resolve(
+        self,
+        agent_id: str,
+        *,
+        consumer_id: str,
+        claim_token: str,
+        outcome: str,
+        snapshot_token: str | None = None,
+        policy_reason: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/cognition/ready-events/resolve",
+            {
+                "agent_id": agent_id,
+                "consumer_id": consumer_id,
+                "claim_token": claim_token,
+                "outcome": outcome,
+                "snapshot_token": snapshot_token,
+                "policy_reason": policy_reason,
+            },
         )
 
     def cognition_observe(

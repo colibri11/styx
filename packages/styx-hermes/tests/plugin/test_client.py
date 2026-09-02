@@ -269,6 +269,31 @@ def test_cognition_observe_is_explicit_and_uses_long_timeout(
         }
 
 
+def test_ready_event_claim_and_resolve_are_explicit_host_primitives(
+    client_no_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_no_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(200, {"events": [], "claim_token": None})
+        client_no_token.cognition_ready_claim(
+            "agent-a", consumer_id="supervisor", after_generation=7, wait_ms=500
+        )
+        args, kwargs = mock_post.call_args
+        assert args[0].endswith("/cognition/ready-events/claim")
+        assert kwargs["json"]["consumer_id"] == "supervisor"
+        assert kwargs["json"]["after_generation"] == 7
+
+        mock_post.return_value = _mock_response(
+            200, {"resolved_count": 1, "outcome": "deferred", "redelivered": False}
+        )
+        client_no_token.cognition_ready_resolve(
+            "agent-a", consumer_id="supervisor", claim_token="claim",
+            outcome="deferred",
+        )
+        args, kwargs = mock_post.call_args
+        assert args[0].endswith("/cognition/ready-events/resolve")
+        assert kwargs["json"]["outcome"] == "deferred"
+
+
 def test_5xx_raises(client_no_token: StyxCoreClient) -> None:
     with patch.object(client_no_token._session, "post") as mock_post:
         mock_post.return_value = _mock_response(503, {"detail": "down"})

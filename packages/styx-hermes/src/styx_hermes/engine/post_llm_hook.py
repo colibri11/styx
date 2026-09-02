@@ -16,6 +16,8 @@ import json
 import logging
 from typing import Any
 
+from styx_hermes.provenance import execution_provenance
+
 from styx_hermes import _agent_session
 
 log = logging.getLogger(__name__)
@@ -318,6 +320,7 @@ def on_post_llm_call(**hermes_kwargs: Any) -> None:
             consequences=[],
             model=_bounded_identifier(hermes_kwargs.get("model"), 512) or None,
             platform=_bounded_identifier(hermes_kwargs.get("platform"), 64) or None,
+            execution_provenance=execution_provenance(hermes_kwargs),
             extra={
                 **(
                     {"task_id": _bounded_identifier(

@@ -50,6 +50,13 @@ Migration `0011_durable_observations.sql` эволюционирует суще�
 - вводит authenticated `POST /cognition/observations`, queue age/count
   observability и per-agent backpressure.
 
+Migration `0013_ready_events_model_provenance.sql` добавляет host-neutral
+readiness ledger и typed execution provenance. Ready event — только сигнал о
+наличии внешнего различия, не намерение и не разрешение на model/tool call.
+Host явно claim/resolve'ит lease с stable consumer id; Styx не запускает
+background wake loop. `endpoint_id` в provenance — alias, URL/IP/credentials
+запрещены; provider/model не участвуют в causal identity.
+
 Migration `0012_causal_rewiring.sql` переводит validated subjective line на
 versioned causal DAG:
 

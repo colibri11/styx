@@ -3312,6 +3312,7 @@ class StyxMemoryCore:
         if self._conn is None or self._queries is None:
             raise RuntimeError("cognition_observe called before initialize")
         from styx.storage.observations import ingest_observation
+        from styx.storage.ready_events import create_observation_ready_event
 
         with self._write_lock:
             if self._conn is None:
@@ -3338,6 +3339,17 @@ class StyxMemoryCore:
                         if self._config else 1024
                     ),
                 )
+                ready = None
+                if not result.duplicate:
+                    ready = create_observation_ready_event(
+                        self._conn,
+                        self._agent_id,
+                        source_generation=result.ingest_seq,
+                        observation_high_water=result.ingest_seq,
+                        pending_count=result.pending_count,
+                        event_cap=(self._config.cognition_ready_event_cap if self._config else 1024),
+                        global_event_cap=(self._config.cognition_ready_global_cap if self._config else 100_000),
+                    )
                 self._conn.commit()
         return {
             "observation_id": str(result.observation_id),
@@ -3350,7 +3362,98 @@ class StyxMemoryCore:
             "late": result.late,
             "pending_count": result.pending_count,
             "created_at": result.created_at,
+            "ready_generation": (
+                int(ready["ready_generation"]) if ready is not None else None
+            ),
         }
+
+    def cognition_ready_claim(
+        self,
+        *,
+        consumer_id: str,
+        after_generation: int = 0,
+        limit: int = 1,
+        wait_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Long-poll a durable readiness ledger without invoking any model."""
+        from styx.storage.ready_events import claim_ready_events
+
+        deadline = time.monotonic() + max(0, min(int(wait_ms), 30_000)) / 1000
+        while True:
+            with self._write_lock:
+                if self._conn is None:
+                    raise RuntimeError("provider shut down during ready-event claim")
+                try:
+                    claim = claim_ready_events(
+                        self._conn, self._agent_id,
+                        consumer_id=consumer_id,
+                        after_generation=after_generation,
+                        limit=limit,
+                        lease_seconds=(self._config.cognition_ready_claim_lease_s if self._config else 30.0),
+                        outstanding_cap=(self._config.cognition_ready_consumer_claim_cap if self._config else 8),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+            if claim.events or time.monotonic() >= deadline:
+                return {
+                    "claim_token": str(claim.claim_token) if claim.claim_token else None,
+                    "lease_expires_at": claim.lease_expires_at,
+                    "events": list(claim.events),
+                }
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+    def cognition_ready_signal(self, *, signal_generation: int) -> dict[str, Any]:
+        """Append an authenticated, content-free operator wake hint."""
+        from styx.storage.ready_events import create_observation_ready_event
+
+        with self._write_lock:
+            if self._conn is None:
+                raise RuntimeError("provider shut down during ready-event signal")
+            with self._guarded_write("cognition_ready_signal"):
+                result = create_observation_ready_event(
+                    self._conn, self._agent_id,
+                    source_generation=signal_generation,
+                    observation_high_water=None,
+                    pending_count=0,
+                    reason="operator_signal",
+                    event_cap=(self._config.cognition_ready_event_cap if self._config else 1024),
+                    global_event_cap=(self._config.cognition_ready_global_cap if self._config else 100_000),
+                )
+                self._conn.commit()
+                return {
+                    "event_id": str(result["id"]),
+                    "ready_generation": int(result["ready_generation"]),
+                    "duplicate": bool(result["duplicate"]),
+                }
+
+    def cognition_ready_resolve(
+        self,
+        *,
+        consumer_id: str,
+        claim_token: str,
+        outcome: str,
+        snapshot_token: str | None = None,
+        policy_reason: str | None = None,
+    ) -> dict[str, Any]:
+        from styx.storage.ready_events import resolve_ready_events
+
+        with self._write_lock:
+            if self._conn is None:
+                raise RuntimeError("provider shut down during ready-event resolve")
+            with self._guarded_write("cognition_ready_resolve"):
+                result = resolve_ready_events(
+                    self._conn, self._agent_id,
+                    consumer_id=consumer_id, claim_token=claim_token,
+                    outcome=outcome, snapshot_token=snapshot_token,
+                    policy_reason=policy_reason,
+                    discard_cooldown_s=(self._config.cognition_ready_discard_cooldown_s if self._config else 30.0),
+                    event_cap=(self._config.cognition_ready_event_cap if self._config else 1024),
+                    global_event_cap=(self._config.cognition_ready_global_cap if self._config else 100_000),
+                )
+                self._conn.commit()
+                return result
 
     def cognition_preturn(
         self,
@@ -3363,6 +3466,7 @@ class StyxMemoryCore:
         token_budget: int | None = None,
         model: str | None = None,
         platform: str | None = None,
+        planned_execution_provenance: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build one fenced pre-generation view of line, affect and recall.
@@ -3416,6 +3520,16 @@ class StyxMemoryCore:
                     effective_query = item["content"].strip()
                     break
 
+        from styx.engine.execution_provenance import (
+            execution_provenance_hash,
+            normalize_execution_provenance,
+        )
+        planned_provenance = normalize_execution_provenance(
+            planned_execution_provenance,
+            legacy_model=model,
+            legacy_platform=platform,
+        )
+        planned_provenance_hash = execution_provenance_hash(planned_provenance)
         request_hash = hashlib.sha256(
             json.dumps(
                 {
@@ -3426,6 +3540,7 @@ class StyxMemoryCore:
                     "token_budget": token_budget,
                     "model": model,
                     "platform": platform,
+                    "planned_execution_provenance": planned_provenance,
                     "extra": extra or {},
                 },
                 ensure_ascii=False,
@@ -3547,6 +3662,8 @@ class StyxMemoryCore:
                     lease_seconds=(
                         self._config.cognition_snapshot_lease_s if self._config else 60.0
                     ),
+                    planned_execution_provenance=planned_provenance,
+                    planned_execution_provenance_hash=planned_provenance_hash,
                 )
                 observations = present_pending_consequences(
                     self._conn, self._agent_id, snapshot_token,
@@ -3669,6 +3786,7 @@ class StyxMemoryCore:
         consequences: list[dict[str, Any]] | None = None,
         model: str | None = None,
         platform: str | None = None,
+        execution_provenance: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Commit a finalized act, diary, journals and explicit residue saga."""
@@ -3725,6 +3843,16 @@ class StyxMemoryCore:
             lock_agent_line,
         )
         from styx.storage.act_reduction import schedule_act_reduction
+        from styx.engine.execution_provenance import (
+            execution_provenance_hash,
+            normalize_execution_provenance,
+        )
+        actual_provenance = normalize_execution_provenance(
+            execution_provenance,
+            legacy_model=model,
+            legacy_platform=platform,
+        )
+        actual_provenance_hash = execution_provenance_hash(actual_provenance)
 
         raw_session = _coerce_session_id(session_id) if session_id else self._session_id
         target_session = raw_session
@@ -3756,6 +3884,8 @@ class StyxMemoryCore:
                     metadata={"model": model, "platform": platform, "extra": extra or {}},
                     snapshot_policy=snapshot_policy,
                     parent_policy=parent_policy,
+                    execution_provenance=actual_provenance,
+                    execution_provenance_hash=actual_provenance_hash,
                 )
                 # The reduction ledger is the durable outbox of the cognitive
                 # act.  Creating it in this transaction guarantees that every
