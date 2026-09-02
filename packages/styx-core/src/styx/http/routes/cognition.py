@@ -12,7 +12,7 @@ from styx.http.models import (
     CognitionPreturnRequest,
     CognitionPreturnResponse,
 )
-from styx.storage.cognition import SnapshotReplayConflict
+from styx.storage.cognition import CognitiveCommitConflict, SnapshotReplayConflict
 
 router = APIRouter()
 
@@ -40,6 +40,8 @@ def preturn(req: CognitionPreturnRequest) -> CognitionPreturnResponse:
 def commit(req: CognitionCommitRequest) -> CognitionCommitResponse:
     session = registry.get(req.agent_id)
     payload = req.model_dump(exclude={"agent_id"})
-    return CognitionCommitResponse.model_validate(
-        session.core.cognition_commit(**payload)
-    )
+    try:
+        result = session.core.cognition_commit(**payload)
+    except CognitiveCommitConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return CognitionCommitResponse.model_validate(result)

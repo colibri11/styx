@@ -45,6 +45,43 @@ def _embed_with_offset(offset: float, dim: int = 768) -> list[float]:
     return base
 
 
+def _set_causal_provenance(
+    conn: psycopg.Connection,
+    memory_id: uuid.UUID,
+    provenance: str,
+) -> None:
+    if provenance == "validated_act_residue":
+        act_id = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT agent_id FROM memories WHERE id=%s", (memory_id,)
+            )
+            agent_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO cognitive_acts "
+                "(id,agent_id,host_key,status,completed_at) "
+                "VALUES (%s,%s,%s,'completed',clock_timestamp())",
+                (act_id, agent_id, f"test-{act_id}"),
+            )
+            cur.execute(
+                "UPDATE memories SET line_provenance=%s,cognitive_act_id=%s,"
+                " residue_ordinal=0,residue_reducer_version='test_v1',"
+                " residue_input_hash=%s,residue_causal_role='choice',"
+                " residue_confidence=0.8,"
+                " residue_evidence='[{\"source\":\"channel_output\","
+                "\"key\":\"assistant_response\"}]'::jsonb,"
+                " residue_predecessors='[]'::jsonb,residue_line_root_hash=%s "
+                "WHERE id=%s",
+                (provenance, act_id, "b" * 64, "a" * 64, memory_id),
+            )
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE memories SET line_provenance=%s WHERE id=%s",
+            (provenance, memory_id),
+        )
+
+
 # ── insert_memory ────────────────────────────────────────────────────
 
 
@@ -126,6 +163,90 @@ def test_find_candidates_returns_within_distance(conn: psycopg.Connection) -> No
     ids = {c.id for c in cands}
     assert near in ids
     assert far not in ids
+
+
+@pytest.mark.parametrize(
+    "provenance", ["validated_act_residue", "validated_transform"]
+)
+def test_find_candidates_excludes_causal_rows_without_rewiring(
+    conn: psycopg.Connection, provenance: str
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    protected = q.insert_memory(
+        role="summary",
+        content="protected",
+        kind="note",
+        kind_src="subjective",
+        embedding=_embed_with_offset(0.01),
+    )
+    legacy = q.insert_memory(
+        role="summary",
+        content="legacy",
+        kind="note",
+        kind_src="subjective",
+        embedding=_embed_with_offset(0.02),
+    )
+    _set_causal_provenance(conn, protected, provenance)
+    conn.commit()
+
+    ids = {
+        candidate.id
+        for candidate in q.find_gatekeeper_candidates(
+            _embed(1.0), max_cosine_distance=0.15
+        )
+    }
+    assert protected not in ids
+    assert legacy in ids
+
+
+@pytest.mark.parametrize(
+    "provenance", ["validated_act_residue", "validated_transform"]
+)
+@pytest.mark.parametrize("operation", ["skip", "merge", "supersede"])
+def test_gatekeeper_refuses_to_mutate_causal_rows_without_rewiring(
+    conn: psycopg.Connection, provenance: str, operation: str
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    protected = q.insert_memory(
+        role="summary",
+        content="protected",
+        kind="note",
+        kind_src="subjective",
+        embedding=_embed(1.0),
+    )
+    legacy = q.insert_memory(
+        role="summary",
+        content="legacy",
+        kind="note",
+        kind_src="subjective",
+        embedding=_embed_with_offset(0.05),
+    )
+    _set_causal_provenance(conn, protected, provenance)
+    conn.commit()
+
+    with pytest.raises(ValueError, match="validated causal memory"):
+        if operation == "skip":
+            q.apply_gatekeeper_skip(protected)
+        elif operation == "merge":
+            q.apply_gatekeeper_merge(
+                new_id=legacy,
+                existing_id=protected,
+                new_content="legacy replacement",
+                new_embedding=_embed_with_offset(0.03),
+            )
+        else:
+            q.apply_gatekeeper_supersede(
+                new_id=legacy,
+                existing_id=protected,
+                new_embedding=_embed_with_offset(0.03),
+            )
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT content,superseded_by FROM memories WHERE id=%s",
+            (protected,),
+        )
+        assert cur.fetchone() == ("protected", None)
 
 
 def test_find_candidates_skips_superseded_and_null_embedding(

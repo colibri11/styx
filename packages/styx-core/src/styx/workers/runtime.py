@@ -310,6 +310,20 @@ class LlmWorker:
         assert self._conn is not None
         threshold_s = max(1, int(self._stale_threshold))
         with self._conn.cursor() as cur:
+            # A hard-killed act reducer has no committed ledger attempt.  Make
+            # the claimed queue attempt durable and failed so only its bounded
+            # causal sweeper may reconcile/requeue it; returning it directly
+            # to pending would allow an endless crash/reclaim loop.
+            cur.execute(
+                "UPDATE llm_tasks SET status='failed', started_at=NULL, "
+                "error='stale_worker_claim', completed_at=now(), "
+                "retry_count=retry_count+1 "
+                "WHERE status='running' "
+                "AND task_type='act_residue_reduction' "
+                "AND started_at < now() - make_interval(secs => %s)",
+                (threshold_s,),
+            )
+            reducer_n = cur.rowcount or 0
             cur.execute(
                 "UPDATE llm_tasks "
                 "   SET status='pending', started_at=NULL, "
@@ -318,7 +332,7 @@ class LlmWorker:
                 "   AND started_at < now() - make_interval(secs => %s)",
                 (threshold_s,),
             )
-            n = cur.rowcount or 0
+            n = reducer_n + (cur.rowcount or 0)
         self._conn.commit()
         if n > 0:
             self._metrics.stale_reaped += n
@@ -378,10 +392,18 @@ class LlmWorker:
         assert self._conn is not None
         with self._conn.cursor() as cur:
             cur.execute(
+                "UPDATE llm_tasks SET status='failed', started_at=NULL, "
+                "error='worker_restart', completed_at=now(), "
+                "retry_count=retry_count+1 "
+                "WHERE status='running' "
+                "AND task_type='act_residue_reduction'"
+            )
+            reducer_n = cur.rowcount or 0
+            cur.execute(
                 "UPDATE llm_tasks SET status='pending', started_at=NULL "
                 " WHERE status='running'"
             )
-            n = cur.rowcount or 0
+            n = reducer_n + (cur.rowcount or 0)
         self._conn.commit()
         return n
 

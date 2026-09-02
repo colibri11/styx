@@ -209,6 +209,7 @@ class StyxCoreClient:
         agent_id: str,
         *,
         host_key: str | None = None,
+        parent_host_key: str | None = None,
         session_id: str | None = None,
         messages: list[dict[str, Any]] | None = None,
         query: str | None = None,
@@ -223,6 +224,7 @@ class StyxCoreClient:
             {
                 "agent_id": agent_id,
                 "host_key": host_key,
+                "parent_host_key": parent_host_key,
                 "session_id": session_id,
                 "messages": messages or [],
                 "query": query,

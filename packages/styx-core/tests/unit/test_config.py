@@ -80,3 +80,33 @@ def test_load_reads_causal_affect_environment(
 
     assert cfg.affective_transition_enabled is False
     assert cfg.affective_transition_timeout_s == pytest.approx(3.25)
+
+
+def test_load_reads_bounded_cognition_reduction_and_residue_retry_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STYX_DATABASE_URL", "postgresql://u:p@h:5432/styx")
+    monkeypatch.setenv("STYX_COGNITION_REDUCTION_WAIT_S", "0.6")
+    monkeypatch.setenv("STYX_ACT_RESIDUE_RETRY_TICK_S", "12.5")
+    monkeypatch.setenv("STYX_ACT_RESIDUE_MAX_ATTEMPTS", "4")
+
+    cfg = config.load()
+
+    assert cfg.cognition_reduction_wait_s == pytest.approx(0.6)
+    assert cfg.act_residue_retry_tick_s == pytest.approx(12.5)
+    assert cfg.act_residue_max_attempts == 4
+
+
+def test_load_clamps_cognition_reduction_wait_and_retry_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STYX_DATABASE_URL", "postgresql://u:p@h:5432/styx")
+    monkeypatch.setenv("STYX_COGNITION_REDUCTION_WAIT_S", "99")
+    monkeypatch.setenv("STYX_ACT_RESIDUE_RETRY_TICK_S", "0")
+    monkeypatch.setenv("STYX_ACT_RESIDUE_MAX_ATTEMPTS", "99")
+
+    cfg = config.load()
+
+    assert cfg.cognition_reduction_wait_s == pytest.approx(5.0)
+    assert cfg.act_residue_retry_tick_s == pytest.approx(1.0)
+    assert cfg.act_residue_max_attempts == 20

@@ -50,7 +50,7 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 | Функция или ограничение | Реализация в Styx | Статус |
 |---|---|---|
 | Сохранение следов и реконструкция | cognition envelope + `StyxComposer` | рабочая Locus-style архитектура |
-| Вклад всей live subjective line | versioned, query-independent `will_projection` | инженерная проекция; не доказательство воли/сознания |
+| Вклад всей валидированной live-линии | versioned, query-independent causal carrier в `will_projection` | инженерная проекция; не доказательство воли/сознания |
 | Дневник, внешнее свидетельство и субъектный след не смешиваются | memory domains, `line_eligible`, selective gatekeeper | граница данных Styx |
 | Причинная эмоциональная динамика влияет до языка | event/state journal, recall resonance, bounded cognitive posture | реализация общей динамики траектории из [Philosophy §VIII][silicon] |
 | Переосмысление сохраняет audit-историю | `engine/reinterpret.py::blend_embeddings` | weighted blend — engineering policy Styx |
@@ -85,8 +85,11 @@ daemon по HTTP. Один daemon обслуживает несколько `age
   (`POST /ingest_experience` принимает payload с `kind_src` enum'ом,
   расширяемым), но конкретных audio/video/sensor pipeline'ов в core
   нет.
-- **Action→consequence feedback** развивается через cognitive act journal;
-  streaming transport и latency остаются отдельными инженерными решениями.
+- **Action→consequence feedback** пока имеет строгую границу: tool
+  result/error остаётся same-act journal event и не переиздаётся как новое
+  внешнее последствие. Durable observation inbox и action correlation входят
+  в следующую волну; streaming transport и latency остаются отдельными
+  инженерными решениями.
 
 Эти направления зафиксированы как open queue, не как deferred bugs.
 
@@ -117,7 +120,8 @@ user message
    │
    ├── /cognition/preturn ─ fenced snapshot
    │                        ├── bounded host messages / window mechanics
-   │                        ├── query-independent will_projection всей live line
+   │                        ├── whole-line causal carrier + coverage/status
+   │                        ├── predecessor reduction freshness
    │                        ├── current affect / cognitive posture
    │                        ├── pending action consequences
    │                        └── reconstructed subjective traces
@@ -127,9 +131,12 @@ user message
    └── /cognition/commit ─ host_key-idempotent terminal saga
                             ├── declared parent lineage, not timestamp ancestry
                             ├── dialogue + ordered bounded/redacted tool journal
-                            ├── consequence inbox + optional incorporated residue
+                            ├── explicit future consequence inbox / external evidence
                             ├── acknowledgement of consequences from this snapshot
-                            └── affect observation after durable act commit (fail-open)
+                            └── durable reduction outcome + async canonical reducer
+
+async reducer ───────────── 0..4 validated residues (включая affect-coordinate)
+                            └── atomic line/root update + carrier rebuild
 ```
 
 `snapshot_token` связывает то, что было показано перед генерацией, с
@@ -140,15 +147,24 @@ recoverable lease: если snapshot был брошен до commit, consequenc
 идемпотентно и происходит только terminal commit'ом предъявленного token пока
 его lease действует; поздний commit истёкшего snapshot не забирает feedback у
 новой presentation.
-Retry commit с тем же `host_key` возвращает существующий act;
+Retry commit с тем же `host_key` и тем же bounded request возвращает
+существующий act; изменённый request под тем же ключом отклоняется с `409`.
 `parent_host_key` сохраняет заявленную ветвящуюся причинную линию даже при
 поздней доставке.
 
 Три домена хранения разделены явно: `dialogue`, `external_evidence` и
-`subjective_trace`. В will/reconstruction входят только live rows с
-`memory_domain=subjective_trace` и `line_eligible=true`; сырой transcript,
-документ или `experience_intake` не становятся субъектной памятью только по
-факту записи.
+`subjective_trace`. Активный causal carrier строится только из live
+`subjective_trace`, прошедших canonical act reducer с provenance
+`validated_act_residue`; legacy/unknown и будущие transform-ряды остаются в
+диагностическом coverage, но не попадают в prompt. Сырой transcript,
+документ, tool result или `experience_intake` не становятся субъектной
+памятью только по факту записи.
+
+Preturn ограниченно ждёт reduction непосредственного predecessor. При
+исчерпании deadline он честно возвращает `continuity_freshness` и последний
+доступный carrier со статусом `empty|provisional|ready|stale|degraded`, а не
+маскирует старую проекцию как текущую. Embedding используется только для
+retrieval/diagnostics и не меняет смысл или порядок carrier.
 
 Hermes и OpenClaw используют этот путь по умолчанию. Legacy preturn/terminal
 surfaces остаются для mixed-version deployment; host-плагины переходят на них
@@ -159,6 +175,10 @@ timeout, auth, validation или server error.
 
 Background workers и periodic sweepers (один daemon-процесс):
 
+- **act_residue_reduction** — canonical 0..4 reduction завершённого act с
+  bounded/redacted input snapshot и atomic incorporation;
+- **act_residue_retry_sweeper** — reconciles crash/orphan outcomes и делает
+  не более настроенного числа попыток, затем фиксирует terminal failure;
 - **importance_worker** — LLM-based final scoring новых memories
 - **lifecycle_sweep** — autotune порогов, дешевеют долго не
   тронутые memories
@@ -187,11 +207,13 @@ Styx реализует эмоциональную динамику как ин�
   event и предыдущее состояние. Последовательный retry дедуплицируется до
   model-call; конкурентный retry окончательно останавливают advisory lock и
   UNIQUE-граница БД.
-- **Состояние вычисляется после завершения хода.** Hermes передаёт
+- **Состояние вычисляется внутри общей редукции акта.** Hermes передаёт
   finalized turn через `post_llm_call`, OpenClaw — через durable
-  `ContextEngine.commitTurn` принятого transcript turn.
-  Наблюдатель видит вход, фактический ответ, недавнюю причинную линию и
-  tool-события; peer stimulus никогда не прибавляется к состоянию напрямую.
+  `ContextEngine.commitTurn` принятого transcript turn. Canonical reducer
+  видит замороженный bounded input snapshot, фактический output и ordered
+  tool-события; при наличии evidence он может вернуть не более одной
+  `affective_coordinate` среди общих residues. Отдельный post-commit observer
+  остаётся только legacy mixed-version fallback.
 - **Инерция и причины.** Неактивный остаток геометрически затухает;
   взвешенный вклад причин со статусом `active` поддерживается ограниченной
   lease. Reaffirmation продлевает исходную причину без второй delta;
@@ -255,7 +277,9 @@ runbook'и — `extensions/styx/skills/styx-recall/SKILL.md`.
 | Hybrid search | `engine/queries.py::compute_weights` | `vector_weight × (1 − cosine) + bm25_weight × ts_rank`, веса адаптивные по query length |
 | Document parsers | `engine/document_parsers/` | pure-Python pypdf / python-docx / openpyxl / builtin Markdown |
 | Memory markers | `storage/cognition.py` + `engine/context.py` + `http/_wrap.py` | canonical `<styx-cognitive-continuity>` + explicit-tool/legacy `<styx-{channel}>` taxonomy |
-| Causal turn observer | `emotional/transition.py` | finalized turn → stimulus/reaction/cause/intensity/confidence/status + cognitive posture, fail-open |
+| Act residue reducer | `storage/act_reduction.py` + `workers/handlers/act_residue.py` | durable 0..4 evidence-bound residues, agent-scoped validation и atomic incorporation |
+| Causal carrier | `engine/causal_carrier.py` | deterministic bounded whole-line projection; timestamps/UUID/embeddings не задают активную семантику |
+| Legacy causal turn observer | `emotional/transition.py` | mixed-version `/affect/observe_turn` fallback; canonical path uses the act-residue reducer |
 | Emotional evidence | `emotional_events` | immutable source evidence, per-agent idempotency, separate from state projection |
 | Batch peer evidence | `emotional/sentiment_batch.py` | piggyback VAD сохраняется как `peer_signal:batch`, но не назначается состоянием агента |
 | Emotional baseline | `emotional/baseline.py` | time-weighted 60-minute window + per-minute EMA, provenance columns |

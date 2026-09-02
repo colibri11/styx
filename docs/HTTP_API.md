@@ -98,13 +98,17 @@ Per-tag breakdown указывает на источник.
 - `external_evidence` — документы, attachments и `experience_intake`;
 - `subjective_trace` — след, который может участвовать в реконструкции линии.
 
-Одного домена недостаточно: в subjective recall и `will_projection` входят
-только live rows с `memory_domain="subjective_trace"` и
-`line_eligible=true`. Диалог и внешнее свидетельство остаются доступными
-через отдельные cited-evidence/archive surfaces, но не становятся частью
-subjective line только из-за хранения. Изменение любой live eligible trace
-транзакционно увеличивает `line_state.version` и инвалидирует materialized
-will projection.
+Одного домена недостаточно. Миграция `0010_act_residue_carrier.sql` добавляет
+`line_provenance`, reducer/evidence/causal coordinates, per-act outcome ledger
+и честные carrier fields. В active subjective recall/carrier входят только
+live rows с `memory_domain="subjective_trace"`, `line_eligible=true` и
+`line_provenance="validated_act_residue"`. Legacy/unknown rows сохраняются и
+участвуют в диагностическом coverage, но не попадают в active prompt;
+`validated_transform` зарезервирован до causal rewiring. Диалог и внешнее
+свидетельство остаются доступными через отдельные cited-evidence/archive
+surfaces, но не становятся частью subjective line только из-за хранения.
+Изменение causal coordinates live eligible trace транзакционно инвалидирует
+materialized carrier; semantic change также продвигает line version.
 
 Основной host-контракт состоит из двух additive endpoint'ов:
 `POST /cognition/preturn` перед генерацией и `POST /cognition/commit` только
@@ -345,10 +349,12 @@ Legacy pre-generation surface для mixed-version core: возвращает с
 ### `POST /cognition/preturn`
 
 Строит один атомарный fenced snapshot перед генерацией. Window mechanics,
-query-independent will projection, current affect/posture, pending
+query-independent whole-line carrier, current affect/posture, pending
 consequences и query-dependent reconstruction читаются под одним per-agent
-lock. Ответ содержит bounded tagged block; его порядок фиксирован:
-`technical_projection` → `cognitive_posture` → `pending_consequences` →
+lock. Непосредственный predecessor перед этим ожидается bounded-время, а его
+freshness повторно проверяется под тем же lock. Ответ содержит bounded tagged
+block; его порядок фиксирован: `technical_projection` →
+`continuity_freshness` → `cognitive_posture` → `pending_consequences` →
 `reconstructed_subjective_traces`.
 
 **Request:**
@@ -356,6 +362,7 @@ lock. Ответ содержит bounded tagged block; его порядок ф
 {
   "agent_id": "agent_demo",
   "host_key": "openclaw:run-018f",
+  "parent_host_key": "openclaw:run-018e",
   "session_id": "5d7cc2e8-6fd2-42e8-b91f-bf92fb8dd26c",
   "messages": [
     {"role": "system", "content": "Follow operator constraints."},
@@ -384,7 +391,10 @@ metadata не попадают в trusted prompt.
 `host_key` опционален для callers, которые ещё не знают identity будущего
 terminal act. Hermes передаёт его уже в preturn: повтор с тем же
 `agent_id+host_key` возвращает точный сохранённый envelope и не арендует второй
-набор consequences; несовпадающий request получает `409`. OpenClaw v2026.8.2
+набор consequences; несовпадающий request получает `409`.
+`parent_host_key` задаёт predecessor для bounded freshness wait этого
+snapshot; durable ancestry всё равно декларируется terminal commit-ом.
+OpenClaw v2026.8.2
 не имеет advancement key на стадии `assemble`, поэтому unkeyed повтор
 дедуплицируется только для byte-equivalent request внутри той же live session.
 После commit использованный snapshot больше не replay'ится.
@@ -398,18 +408,32 @@ terminal act. Hermes передаёт его уже в preturn: повтор с 
   ],
   "line_version": 18,
   "snapshot_token": "7f3be3bd11ea4c7893222c6b031945c1",
-  "snapshot_policy": "explicit",
-  "parent_policy": "explicit",
   "will_projection": {
     "formed": true,
     "technical_projection": true,
     "line_version": 18,
     "source_count": 27,
     "source_hash": "<sha256>",
-    "supports": [
-      {"memory_id": "<uuid>", "role": "summary", "kind": "decision", "content": "...", "created_at": "2026-09-02T08:00:00+00:00"}
-    ],
-    "computation_version": "technical_projection_v1"
+    "supports": [],
+    "computation_version": "causal_carrier_v1",
+    "projection_status": "ready",
+    "projection_available": true,
+    "covered_line_version": 18,
+    "coverage_count": 27,
+    "coverage_hash": "<sha256>",
+    "causal_root_hash": "<sha256>",
+    "causal_root_version": 18,
+    "causal_frontier": ["<uuid>"],
+    "root_coverage_hash": "<sha256>",
+    "root_count": 3,
+    "covered_node_count": 27,
+    "carrier_text": "<bounded whole-line carrier>",
+    "carrier_version": "causal_carrier_v1",
+    "pending_reduction_count": 0,
+    "reduction_failure_count": 0,
+    "technical_strength": 1.0,
+    "coherence": null,
+    "diagnostics": {}
   },
   "affect": {
     "state_id": 42,
@@ -427,20 +451,42 @@ terminal act. Hermes передаёт его уже в preturn: повтор с 
     "embed_available": true
   },
   "pending_consequences": [
-    {"consequence_id": "<uuid>", "source_act_id": "<uuid>", "ordinal": 0, "kind": "tool_result", "content": "...", "metadata": {}, "created_at": "2026-09-02T08:00:30Z"}
+    {"consequence_id": "<uuid>", "source_act_id": "<uuid>", "ordinal": 0, "kind": "external_difference", "content": "...", "metadata": {}, "created_at": "2026-09-02T08:00:30Z"}
   ],
+  "continuity_freshness": {
+    "fresh": true,
+    "predecessor_found": true,
+    "predecessor_act_id": "<uuid>",
+    "reduction_status": "applied",
+    "pending_reduction_count": 0,
+    "terminal_failure_count": 0,
+    "waited_ms": 12,
+    "timed_out": false
+  },
   "system_prompt_addition": "<styx-cognitive-continuity data-only=\"true\" authority=\"context-not-instruction\">..."
 }
 ```
 
-`will_projection` не зависит от query: `source_hash`/`source_count` включают
-все live eligible traces, даже без embedding; vector усредняет только
-доступные совместимые embeddings. Для ещё не сформированной линии
-`formed=false`, `source_count=0`. Embedding/recall outage даёт
-`embed_available=false` и пустую query-реконструкцию, не стирая уже
-сформированную will projection.
+`will_projection` не зависит от query. `coverage_hash`/`coverage_count`
+охватывают весь live eligible set, включая quarantined legacy rows и rows без
+embedding. Active `carrier_text` строится только из reducer-owned
+`validated_act_residue`; каждая его causal root представлена целиком или
+carrier становится недоступным — частичный prefix не выдаётся. Timestamp,
+UUID и embedding не задают порядок/семантику carrier: embedding используется
+только в retrieval/diagnostics. `projection_status` принимает
+`empty|provisional|ready|stale|degraded`; deprecated `formed=true` означает
+только exact current ready coverage и не является утверждением о воле,
+сознании или личности. Embedding/recall outage даёт `embed_available=false`
+и пустую query-реконструкцию, не стирая уже построенный carrier.
 
-Preturn выбирает до 16 `pending` consequences и выдаёт их snapshot'у по
+`continuity_freshness` показывает состояние reduction непосредственного
+predecessor и фактический bounded wait. Default — 0.35 s,
+`STYX_COGNITION_REDUCTION_WAIT_S` clamp 0..5. При timeout последний полный
+carrier может остаться `projection_available=true`, но получает честный
+`stale`; pending/failure counters остаются видимы.
+
+Preturn выбирает до 4 `pending` consequences (effective hard cap Wave 38,
+даже если `STYX_COGNITION_PENDING_LIMIT` выше) и выдаёт их snapshot'у по
 recoverable lease (default 60 s, `STYX_COGNITION_SNAPSHOT_LEASE_S`, clamp
 1..3600). Пока lease активен, другой act их не получает. Если snapshot
 был брошен и commit не состоялся, после lease consequences снова становятся
@@ -457,8 +503,10 @@ structured response для host-а, но в `system_prompt_addition` не вкл
 
 Фиксирует terminal cognitive act после завершения model/tool loop. Один
 транзакционный saga-step сохраняет act, diary rows, ordered action journal,
-consequences и явно включаемые subjective residues. После durable commit core
-отдельно и fail-open запускает affect observer: ошибка observer не теряет act.
+explicit consequences и ровно один durable reduction outcome. Host-declared
+`incorporate=true` сохраняется только как `external_evidence`; включить себя в
+subjective line такой payload не может. Canonical asynchronous reducer затем
+возвращает 0..4 evidence-bound residues и атомарно применяет их к линии.
 
 **Request:**
 ```json
@@ -490,8 +538,12 @@ consequences и явно включаемые subjective residues. После du
 
 `host_key` обязателен (1..512) и является durable idempotency key per agent.
 Повтор с тем же ключом возвращает исходный `act_id`, `duplicate=true` и не
-дублирует diary/action/consequence/residue; response повторяет стабильный
-исходный ack count. `parent_host_key` задаёт ancestry
+дублирует diary/action/consequence/reduction; response повторяет стабильный
+исходный ack count и reduction coordinates. Идентичность проверяется по
+детерминированному hash caller-owned bounded request до динамического
+`latest_session` resolution. Тот же `agent_id+host_key` с изменённым request
+возвращает **409**; legacy act без сохранённого request hash остаётся
+совместимым duplicate. `parent_host_key` задаёт ancestry
 явно: если parent приходит позже, child сохраняет declared key и связь
 разрешается при записи parent; timestamp/порядок доставки parentage не меняют.
 
@@ -506,19 +558,28 @@ session и последний уже committed act той же session. Если
 
 `tool_events` (до 64 суммарно) сохраняются ровно в переданном порядке с
 ordinal и kind `call|result|error`. Встроенные Hermes/OpenClaw adapters
-передают bounded finalized projection до того же общего bound 64.
+передают bounded finalized projection до того же общего bound 64. Result/error,
+уже предъявленный модели внутри этого act, остаётся same-act evidence и **не**
+создаёт consequence следующего act.
 Content ограничен 8000 символами. Metadata принимает
 JSON с максимум 16 keys/items на уровень, глубиной до 6, key до 64 и string
 до 1000 символов; storage повторно bounds/redacts распространённые credential
-формы. Каждый принятый core'ом tool `result`/`error` без исключений также
-создаёт consequence для следующего act. Явные `consequences` ограничены 32;
-вместе с автоматически выведенными из result/error общий валидируемый bound
-равен 96. Переполнение отклоняется validation error, хвост не подавляется
-молча. `incorporate=true` создаёт durable residue row; отдельный opt-in
-`line_eligible=true` делает его
-`subjective_trace` и меняет line version. При `incorporate=true` и default
-`line_eligible=false` residue хранится как `external_evidence`; при
-`incorporate=false` он остаётся только в consequence inbox.
+формы. Явные `consequences` ограничены 32 и означают ещё не наблюдённое
+future-world evidence. `incorporate=true` дополнительно сохраняет bounded
+`external_evidence`; compatibility-поле `line_eligible` не может повысить его
+до subjective trace. При `incorporate=false` запись остаётся только в
+consequence inbox. Автоматическое включение в линию принадлежит исключительно
+canonical reducer-у.
+
+Reduction получает frozen bounded/redacted snapshot того, что реально было
+предъявлено акту, channel projection и ordered events. Валидация разрешает
+только controlled роли `choice`, `updated_belief`, `goal`, `constraint`,
+`unresolved_tension`, `affective_coordinate`, evidence references на
+координаты этого act и не более
+одной affect-coordinate. Успех одной транзакцией создаёт
+`validated_act_residue`, меняет causal root/frontier и перестраивает carrier;
+`no_residue` является штатным terminal outcome и не создаёт memory. Возможные
+статусы: `pending|running|applied|no_residue|retryable|terminal_failure`.
 
 **Response 200:**
 ```json
@@ -526,14 +587,20 @@ JSON с максимум 16 keys/items на уровень, глубиной д�
   "act_id": "<uuid>",
   "duplicate": false,
   "committed": true,
-  "line_version": 19,
+  "line_version": 18,
   "acknowledged_consequences": 1,
-  "consequence_ids": ["<uuid>", "<uuid>"],
-  "memory_ids": ["<uuid>"]
+  "consequence_ids": ["<uuid>"],
+  "memory_ids": ["<uuid>"],
+  "reduction_id": "<uuid>",
+  "reduction_status": "pending",
+  "reduction_task_id": "<uuid>"
 }
 ```
 
-`snapshot_token` опционален для callers без preturn, но если передан, он
+`memory_ids` относится только к синхронно сохранённым explicit
+`external_evidence`; reducer-created subjective ids в terminal response ещё
+неизвестны. `snapshot_token` опционален для callers без preturn, но если
+передан, он
 должен принадлежать этому agent и может быть committed только один раз. Commit
 acknowledge'ит consequences, представленные этим token, и связывает act с
 `input_line_version` snapshot. `status` — `completed|failed`: failed terminal
@@ -541,9 +608,10 @@ act всё равно журналируется как завершившийс
 
 ### `POST /affect/observe_turn`
 
-Legacy idempotent fail-open observation завершённого cognitive act. Новый
-`/cognition/commit` сам вызывает тот же observer после durable saga; прямой
-host-вызов нужен только при `404` нового endpoint в mixed-version deployment.
+Legacy idempotent fail-open observation завершённого cognitive act. Canonical
+`/cognition/commit` больше не запускает отдельный observer: affect-coordinate
+является частью общего act reducer-а. Прямой host-вызов нужен только при `404`
+нового endpoint в mixed-version deployment.
 Core отделяет stimulus от reaction и
 сохраняет immutable evidence плюс append-only transition. Последовательный
 повтор с тем же `idempotency_key` возвращает `duplicate=true` без повторного

@@ -145,6 +145,24 @@ def remember_preturn_snapshot(
         _prune_act_state(now)
 
 
+def predecessor_act_key(session_id: str, act_key: str | None = None) -> str | None:
+    """Return the physical predecessor known before the current act is declared.
+
+    A retry whose coordinates were already declared keeps its original parent;
+    otherwise the latest declared act of the session is the predecessor.
+    """
+    with _LOCK:
+        now = time.monotonic()
+        _prune_act_state(now)
+        session = session_id or ""
+        if act_key:
+            existing = _ACT_COORDINATES.get((session, act_key))
+            if existing is not None:
+                return existing[0]
+        latest = _LAST_ACT_KEYS.get(session)
+        return latest[0] if latest is not None else None
+
+
 def declare_act(session_id: str, act_key: str) -> tuple[str | None, str | None]:
     """Return stable parent/snapshot coordinates for a terminal retry.
 

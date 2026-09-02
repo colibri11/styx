@@ -117,5 +117,7 @@ def test_unkeyed_and_stale_snapshots_do_not_attach_to_next_act(monkeypatch) -> N
 
 def test_declare_act_retry_keeps_original_parent_after_later_act() -> None:
     assert _agent_session.declare_act("s", "act-1") == (None, None)
+    assert _agent_session.predecessor_act_key("s", "act-2") == "act-1"
     assert _agent_session.declare_act("s", "act-2") == ("act-1", None)
+    assert _agent_session.predecessor_act_key("s", "act-1") is None
     assert _agent_session.declare_act("s", "act-1") == (None, None)

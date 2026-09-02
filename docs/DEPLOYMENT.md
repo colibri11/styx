@@ -13,7 +13,7 @@
 
 ## 0. Breaking changes при апгрейде
 
-### Текущий переход: cognitive continuity и migration 0009
+### Текущий переход: act residue / causal carrier и migrations 0009–0010
 
 Core и оба host adapter'а нужно обновлять как один rollout. Миграция
 `0009_cognitive_continuity.sql`:
@@ -26,17 +26,33 @@ Core и оба host adapter'а нужно обновлять как один rol
   eligible subjective trace транзакционно помечает projection dirty;
 - сохраняет UUID и archive/search поверхности существующих rows.
 
+Следующая additive migration `0010_act_residue_carrier.sql`:
+
+- вводит agent-scoped outcome ledger каждого terminal act со статусами
+  `pending|running|applied|no_residue|retryable|terminal_failure`;
+- добавляет reducer provenance/evidence/causal coordinates к memories и
+  quarantine для legacy/unknown rows;
+- добавляет root/frontier и exact coverage/status/carrier поля, а также
+  invalidation по всем causal coordinates;
+- создаёт bounded retry/outbox guards. Queue payload содержит только
+  координаты и digest, без raw dialogue.
+
 Новый host path — `/cognition/preturn` перед model call и ровно один
 `/cognition/commit` после завершения tool loop. Commit несёт finalized channel
 projection, ordered `call|result|error`, `host_key`, declared parent и
-`snapshot_token`. Принимается до 32 явных consequences; каждый допустимый
-`result`/`error` tool event также становится consequence, общий валидируемый
-bound — 96. Core отклоняет переполнение, а не молча обрезает причинный feedback.
+`snapshot_token`. Принимается до 32 явных future-world consequences.
+`result`/`error`, уже увиденный моделью в том же tool loop, остаётся ordered
+journal evidence и не переиздаётся следующему акту как новое последствие.
+Каждый terminal commit в той же транзакции получает ровно один reduction
+outcome; canonical reducer асинхронно выводит 0..4 evidence-bound residues и
+атомарно обновляет causal root/frontier и whole-line carrier.
 Consequences выдаются snapshot'у по lease, подтверждаются только terminal
 act'ом с этим token и после истечения lease снова доступны, если snapshot был
 брошен. Поэтому доставка recoverable at-least-once, а acknowledgement и retry
 того же act идемпотентны; поздний commit истёкшего snapshot не подтверждает
-повторную presentation, exactly-once при падении host не обещается. Legacy
+повторную presentation, exactly-once при падении host не обещается.
+Идентичный retry commit возвращает `duplicate=true`; изменённый bounded
+request под тем же `host_key` возвращает `409`. Legacy
 writers используются только если новый endpoint вернул `404`; не на timeout,
 auth, validation или `5xx`.
 
@@ -45,16 +61,19 @@ auth, validation или `5xx`.
 1. Сделать обычный backup PostgreSQL и остановить host writes либо перевести
    gateway'и в maintenance.
 2. Обновить checkout/пакеты, затем выполнить `.venv/bin/styx migrate` один раз.
-3. Перезапустить `styx-daemon`; проверить `/healthz` и наличие обоих cognition
-   paths в `/openapi.json`.
+3. Перезапустить `styx-daemon`; reducer handler и retry sweeper работают в том
+   же процессе. Проверить `/healthz` и наличие обоих cognition paths в
+   `/openapi.json`.
 4. Обновить `styx-hermes` и OpenClaw plugin, затем перезапустить host
    процессы. Не оставлять mixed-version fallback постоянным режимом.
 5. Выполнить два последовательных хода с tool result. Для Hermes передавать
    физический `host_key` уже в preturn; OpenClaw v2026.8.2 сам доставляет
-   accepted advancement key через durable `commitTurn` outbox. Второй preturn
-   должен получить consequence первого, а terminal commit — вернуть ненулевой
-   `acknowledged_consequences`. Повтор commit с тем же `host_key` должен вернуть
-   `duplicate=true` без новых rows.
+   accepted advancement key через durable `commitTurn` outbox. Commit должен
+   вернуть `reduction_id` и status; второй preturn — явные
+   `continuity_freshness` и carrier status. Same-act tool result не должен
+   появиться в `pending_consequences`. Отдельно переданный explicit consequence
+   должен пройти lease/ack. Повтор commit с тем же body возвращает
+   `duplicate=true`, а с изменённым body — `409` без новых rows.
 
 OpenClaw-плагин требует v2026.8.2: `assemble` сохраняет rich messages и строит
 session-fenced snapshot, а `commitTurn` атомарно и идемпотентно продвигает
@@ -62,7 +81,8 @@ session-fenced snapshot, а `commitTurn` атомарно и идемпотен�
 не используются.
 
 Схема additive, но откат только binaries на старый writer семантически
-небезопасен: legacy writer не задаёт новые domain/eligibility поля явно.
+небезопасен: legacy writer не задаёт новые domain/eligibility/provenance поля
+явно и не создаёт reduction outcome.
 Для rollback возвращайте согласованный snapshot БД либо сохраняйте новый core
 до завершения обратной миграции данных.
 
@@ -498,10 +518,31 @@ SELECT status, count(*)
 FROM cognitive_consequences
 WHERE agent_id = 'agent_demo'
 GROUP BY status ORDER BY status;
+
+SELECT status, count(*) AS outcomes,
+       max(clock_timestamp() - updated_at) AS oldest_age
+FROM cognitive_act_reductions
+WHERE agent_id = 'agent_demo'
+GROUP BY status ORDER BY status;
+
+SELECT projection_status, projection_available,
+       line_version, covered_line_version,
+       pending_reduction_count,
+       (coverage_count = source_count AND coverage_hash = source_hash) AS exact_coverage
+FROM will_projections
+WHERE agent_id = 'agent_demo';
 ```
 
+Устойчивый рост возраста `pending|running|retryable`, появление
+`terminal_failure`, ненулевой `pending_reduction_count` без снижения или
+длительный `stale|degraded` carrier требуют проверки worker logs и
+доступности `STYX_LLM_URL`. Retry sweeper не бесконечен: после
+`STYX_ACT_RESIDUE_MAX_ATTEMPTS` outcome терминализируется. Не переводите
+reduction rows или queue tasks вручную без отдельной recovery-процедуры:
+ledger, task attempt и causal frontier должны оставаться согласованными.
+
 Не включайте `channel_input`, `channel_output`, action/consequence content или
-provider credentials в deploy-логи и тикеты.
+reducer input/result или provider credentials в deploy-логи и тикеты.
 
 ## 6. Troubleshooting
 

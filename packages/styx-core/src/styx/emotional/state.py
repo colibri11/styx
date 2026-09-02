@@ -756,12 +756,15 @@ def append_emotional_event(
     cause_status: str = "unknown",
     cause_status_at: _dt.datetime | None = None,
     metadata: dict[str, Any] | None = None,
+    sync_cause_lifecycle: bool = True,
 ) -> EmotionalEventWriteResult:
     """Append causal evidence, idempotently when a key is provided.
 
     Does not commit.  A duplicate key returns the original immutable event;
     the second payload never overwrites its evidence.
     """
+    if not isinstance(sync_cause_lifecycle, bool):
+        raise ValueError("sync_cause_lifecycle должен быть bool")
     if not source_kind.strip():
         raise ValueError("source_kind не должен быть пустым")
     if len(source_kind) > 64:
@@ -830,7 +833,7 @@ def append_emotional_event(
         row = cur.fetchone()
     if row is not None:
         event = _event_from_row(row)
-        if cause_status != "unknown":
+        if cause_status != "unknown" and sync_cause_lifecycle:
             normalized_status = (
                 cause_status if cause_status != "resolved" else "resolved"
             )

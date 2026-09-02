@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import types
 
 import pytest
 
 from styx.config import StyxConfig
+import styx.workers.main as subject
 from styx.workers.main import _redact_dsn, build_worker
 from styx.workers.handlers.importance import IMPORTANCE_TASK_TYPE
+from styx.workers.handlers.act_residue import ACT_RESIDUE_TASK_TYPE
 
 
 def _config(dsn: str = "postgresql://u:p@h:5432/db") -> StyxConfig:
@@ -36,6 +39,39 @@ def test_build_worker_registers_batch_consolidation_scheduler() -> None:
     w = build_worker(_config())
     periodic_names = {p.name for p in w._periodic}
     assert "batch_consolidation_scheduler" in periodic_names
+
+
+def test_build_worker_registers_act_residue_lifecycle() -> None:
+    w = build_worker(_config())
+    assert ACT_RESIDUE_TASK_TYPE in w._handlers
+    periodic = {p.name: p for p in w._periodic}
+    assert periodic["act_residue_retry_sweeper"].interval_s == pytest.approx(30.0)
+
+
+def test_act_residue_periodic_uses_retry_budget_and_commits(monkeypatch) -> None:
+    calls = []
+
+    def sweep(conn, **kwargs):
+        calls.append((conn, kwargs))
+        return types.SimpleNamespace(requeued=1, terminalized=0, errors=0)
+
+    monkeypatch.setattr(subject, "run_act_residue_retry_sweep", sweep)
+    cfg = StyxConfig(
+        database_url="postgresql://u:p@h:5432/db",
+        act_residue_retry_tick_s=7.5,
+        act_residue_max_attempts=5,
+    )
+    worker = build_worker(cfg)
+    periodic = {
+        item.name: item for item in worker._periodic
+    }["act_residue_retry_sweeper"]
+    conn = types.SimpleNamespace(commit=lambda: calls.append("commit"))
+
+    periodic.fn(conn)
+
+    assert periodic.interval_s == pytest.approx(7.5)
+    assert calls[0] == (conn, {"max_attempts": 5})
+    assert calls[1] == "commit"
 
 
 def test_build_worker_uses_config_llm_settings() -> None:

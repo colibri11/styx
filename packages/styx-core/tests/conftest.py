@@ -15,6 +15,10 @@ import pytest
 DSN_ENV = "STYX_TEST_DATABASE_URL"
 
 _STYX_DROP_STMTS = [
+    # Act residue / causal carrier (wave 38) before its act/task parents.
+    "DROP TABLE IF EXISTS cognitive_act_reductions CASCADE",
+    "DROP FUNCTION IF EXISTS styx_validate_act_reduction_task() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_enforce_projection_readiness() CASCADE",
     # Cognitive continuity (wave 37) — child tables before memories.
     "DROP TABLE IF EXISTS memory_lineage CASCADE",
     "DROP TABLE IF EXISTS cognitive_presentations CASCADE",

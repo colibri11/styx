@@ -52,6 +52,13 @@ class StyxConfig:
     cognition_recall_limit: int = 8
     cognition_pending_limit: int = 16
     cognition_snapshot_lease_s: float = 60.0
+    # Brief bounded barrier for parent-act residue visibility before the next
+    # preturn assembles its causal envelope. Zero disables the wait.
+    cognition_reduction_wait_s: float = 0.35
+    # Durable retry policy for the act-residue reducer. attempt_count grows
+    # when a handler starts, so three means initial execution + two retries.
+    act_residue_retry_tick_s: float = 30.0
+    act_residue_max_attempts: int = 3
     # Baseline tick (волна 7d). EMA α=0.98 над окном 60min, периодически.
     emotional_tick_interval_s: float = 60.0
     # Recall classifier (волна 7c). Минимальная длина assistant-ответа,
@@ -427,6 +434,9 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "cognition_recall_limit",
         "cognition_pending_limit",
         "cognition_snapshot_lease_s",
+        "cognition_reduction_wait_s",
+        "act_residue_retry_tick_s",
+        "act_residue_max_attempts",
         "emotional_tick_interval_s",
         "classifier_min_assistant_length",
         "classifier_max_recall_events_per_turn",
@@ -587,6 +597,18 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         ),
         cognition_snapshot_lease_s=max(
             1.0, min(3600.0, float(merged.get("cognition_snapshot_lease_s", 60.0)))
+        ),
+        cognition_reduction_wait_s=max(
+            0.0,
+            min(5.0, float(merged.get("cognition_reduction_wait_s", 0.35))),
+        ),
+        act_residue_retry_tick_s=max(
+            1.0,
+            min(3600.0, float(merged.get("act_residue_retry_tick_s", 30.0))),
+        ),
+        act_residue_max_attempts=max(
+            1,
+            min(20, int(merged.get("act_residue_max_attempts", 3))),
         ),
         emotional_tick_interval_s=float(
             merged.get("emotional_tick_interval_s", 60.0)
@@ -897,6 +919,18 @@ def _read_env() -> dict[str, Any]:
         "cognition_snapshot_lease_s": (
             float(os.environ["STYX_COGNITION_SNAPSHOT_LEASE_S"])
             if os.environ.get("STYX_COGNITION_SNAPSHOT_LEASE_S") else None
+        ),
+        "cognition_reduction_wait_s": (
+            float(os.environ["STYX_COGNITION_REDUCTION_WAIT_S"])
+            if os.environ.get("STYX_COGNITION_REDUCTION_WAIT_S") else None
+        ),
+        "act_residue_retry_tick_s": (
+            float(os.environ["STYX_ACT_RESIDUE_RETRY_TICK_S"])
+            if os.environ.get("STYX_ACT_RESIDUE_RETRY_TICK_S") else None
+        ),
+        "act_residue_max_attempts": (
+            int(os.environ["STYX_ACT_RESIDUE_MAX_ATTEMPTS"])
+            if os.environ.get("STYX_ACT_RESIDUE_MAX_ATTEMPTS") else None
         ),
         "emotional_tick_interval_s": (
             float(os.environ["STYX_EMOTIONAL_TICK_INTERVAL_S"])

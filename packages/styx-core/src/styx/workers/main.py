@@ -34,6 +34,10 @@ from styx.emotional.baseline import recompute_baseline
 from styx.emotional.state import apply_instant_decay, list_active_agent_ids
 from styx.llm import LLMRateLimiter, OllamaChatClient
 from styx.observability.logging import setup_logging
+from styx.workers.handlers.act_residue import (
+    ACT_RESIDUE_TASK_TYPE,
+    create_act_residue_handler,
+)
 from styx.workers.handlers.importance import (
     IMPORTANCE_TASK_TYPE,
     create_importance_handler,
@@ -43,6 +47,7 @@ from styx.workers.handlers.usage_classification import (
     create_usage_classification_handler,
 )
 from styx.workers.runtime import LlmWorker
+from styx.workers.sweep.act_residue import run_act_residue_retry_sweep
 from styx.workers.sweep.runner import run_sweep
 
 log = logging.getLogger(__name__)
@@ -84,6 +89,30 @@ def build_worker(config: StyxConfig) -> LlmWorker:
     # Wave 7c — usage classification handler.
     worker.register_handler(
         USAGE_CLASSIFICATION_TASK_TYPE, create_usage_classification_handler()
+    )
+
+    # Wave 38 — finalized cognitive acts reduce into an atomic, evidence-bound
+    # causal carrier. Transient dependency failures stay durable as retryable;
+    # the bounded sweeper below is their only requeue path.
+    worker.register_handler(
+        ACT_RESIDUE_TASK_TYPE, create_act_residue_handler()
+    )
+
+    act_residue_max_attempts = config.act_residue_max_attempts
+
+    def _act_residue_retry_tick(conn) -> None:
+        summary = run_act_residue_retry_sweep(
+            conn,
+            max_attempts=act_residue_max_attempts,
+        )
+        conn.commit()
+        if summary.requeued or summary.terminalized or summary.errors:
+            log.info("act_residue retry sweep: %s", summary)
+
+    worker.register_periodic_task(
+        "act_residue_retry_sweeper",
+        interval_s=config.act_residue_retry_tick_s,
+        fn=_act_residue_retry_tick,
     )
 
     # Wave 7b — periodic lifecycle sweep. Стартует свою connection

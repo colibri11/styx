@@ -36,6 +36,43 @@ def _embed(seed: float, dim: int = 768) -> list[float]:
     return base
 
 
+def _set_causal_provenance(
+    conn: psycopg.Connection,
+    memory_id: uuid.UUID,
+    provenance: str,
+) -> None:
+    if provenance == "validated_act_residue":
+        act_id = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT agent_id FROM memories WHERE id=%s", (memory_id,)
+            )
+            agent_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO cognitive_acts "
+                "(id,agent_id,host_key,status,completed_at) "
+                "VALUES (%s,%s,%s,'completed',clock_timestamp())",
+                (act_id, agent_id, f"test-{act_id}"),
+            )
+            cur.execute(
+                "UPDATE memories SET line_provenance=%s,cognitive_act_id=%s,"
+                " residue_ordinal=0,residue_reducer_version='test_v1',"
+                " residue_input_hash=%s,residue_causal_role='choice',"
+                " residue_confidence=0.8,"
+                " residue_evidence='[{\"source\":\"channel_output\","
+                "\"key\":\"assistant_response\"}]'::jsonb,"
+                " residue_predecessors='[]'::jsonb,residue_line_root_hash=%s "
+                "WHERE id=%s",
+                (provenance, act_id, "b" * 64, "a" * 64, memory_id),
+            )
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE memories SET line_provenance=%s WHERE id=%s",
+            (provenance, memory_id),
+        )
+
+
 # ── select_consolidation_window ──────────────────────────────────────
 
 
@@ -153,6 +190,71 @@ def test_window_filters_by_agent(conn: psycopg.Connection) -> None:
     ids = {r["id"] for r in rows}
     assert own in ids
     assert foreign not in ids
+
+
+@pytest.mark.parametrize(
+    "provenance", ["validated_act_residue", "validated_transform"]
+)
+def test_daily_consolidation_excludes_and_refuses_causal_sources(
+    conn: psycopg.Connection, provenance: str
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    protected = q.insert_memory(
+        role="summary",
+        content="canonical",
+        kind="note",
+        kind_src="subjective",
+        embedding=_embed(0.1),
+    )
+    legacy = q.insert_memory(
+        role="summary",
+        content="legacy",
+        kind="note",
+        kind_src="subjective",
+        embedding=_embed(0.2),
+    )
+    _set_causal_provenance(conn, protected, provenance)
+    long_ago = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(days=2)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE memories SET created_at=%s WHERE id IN (%s,%s)",
+            (long_ago, protected, legacy),
+        )
+    conn.commit()
+
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    rows = q.select_consolidation_window(
+        window_from=now - _dt.timedelta(days=7),
+        window_to=now - _dt.timedelta(hours=24),
+    )
+    assert [row["id"] for row in rows] == [legacy]
+    assert [row["id"] for row in q.load_memories_for_consolidation(
+        [protected, legacy]
+    )] == [legacy]
+
+    task_id = enqueue_llm_task(
+        conn, task_type="memory_daily_consolidation", payload={}
+    )
+    with pytest.raises(ValueError, match="validated causal memory"):
+        q.insert_memory_consolidation_application(
+            task_id=task_id, source_ids=[protected, legacy]
+        )
+    with pytest.raises(ValueError, match="validated causal memory"):
+        q.insert_consolidated_memory(
+            content="merged",
+            embedding=_embed(0.5),
+            kind="note",
+            visibility="shared",
+            source_ids=[protected, legacy],
+            application_id=42,
+        )
+    with pytest.raises(ValueError, match="validated causal memory"):
+        q.mark_consolidation_sources_superseded(
+            new_memory_id=legacy, source_ids=[protected]
+        )
+    with conn.cursor() as cur:
+        cur.execute("SELECT superseded_by FROM memories WHERE id=%s", (protected,))
+        assert cur.fetchone()[0] is None
 
 
 # ── insert_memory_consolidation_application ─────────────────────────

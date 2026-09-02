@@ -173,14 +173,38 @@ def _bounded_history(raw: Any) -> list[dict[str, str]]:
 
 
 def _bounded_tool_events(raw: Any) -> list[dict[str, Any]]:
-    """Extract bounded tool calls/results from Hermes conversation messages."""
+    """Extract calls/results from only the finalized current turn.
+
+    Hermes supplies cumulative conversation history.  Scanning its whole tail
+    would journal old tool events again on every later turn, so the current
+    user message is the causal fence just as it is in the OpenClaw adapter.
+    """
     if not isinstance(raw, list):
         return []
+    source = raw[-MAX_SOURCE_MESSAGES:]
+    last_user_index = -1
+    for index in range(len(source) - 1, -1, -1):
+        message = source[index]
+        if isinstance(message, dict) and message.get("role") == "user":
+            last_user_index = index
+            break
+    if last_user_index >= 0:
+        source = source[last_user_index:]
+    else:
+        # Without a user fence, retain at most the latest assistant segment;
+        # this supports internal/continuation turns without replaying history.
+        for index in range(len(source) - 1, -1, -1):
+            message = source[index]
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                source = source[index:]
+                break
+        else:
+            return []
     events: list[dict[str, Any]] = []
     inspected_calls = 0
     # Work backwards so we can stop after the newest MAX_TOOL_EVENTS rather
     # than traversing every tool call in every source message.
-    for message in reversed(raw[-MAX_SOURCE_MESSAGES:]):
+    for message in reversed(source):
         if not isinstance(message, dict):
             continue
         if message.get("role") == "tool":

@@ -141,7 +141,9 @@ def test_post_llm_hook_bounds_history_tools_and_text() -> None:
         len(item["content"]) <= post_llm_hook.MAX_HISTORY_CONTENT_CHARS
         for item in payload["conversation_history"]
     )
-    assert len(payload["tool_events"]) == post_llm_hook.MAX_TOOL_EVENTS
+    # Cumulative history is fenced at the latest user message: only the
+    # current turn's call/result pair is part of this act.
+    assert len(payload["tool_events"]) == 2
     assert all(
         len(item["content"]) <= post_llm_hook.MAX_TOOL_EVENT_CONTENT_CHARS
         for item in payload["tool_events"]
@@ -229,7 +231,7 @@ def test_post_llm_hook_tool_scan_and_serialization_are_bounded_and_safe() -> Non
     assert all("Explosive" in event["content"] for event in events)
 
 
-def test_tool_trajectory_keeps_latest_64_events_in_causal_order() -> None:
+def test_unfenced_tool_trajectory_keeps_only_latest_assistant_segment() -> None:
     history = []
     for index in range(33):
         history.extend([
@@ -252,18 +254,47 @@ def test_tool_trajectory_keeps_latest_64_events_in_causal_order() -> None:
 
     events = post_llm_hook._bounded_tool_events(history)
 
+    assert [(item["kind"], item["tool_event_id"]) for item in events] == [
+        ("call", "call-32"),
+        ("error", "call-32"),
+    ]
+
+
+def test_current_user_fence_keeps_latest_64_events_in_causal_order() -> None:
+    history = [{"role": "user", "content": "current act"}]
+    for index in range(33):
+        history.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": f"call-{index}",
+                    "function": {"name": "tool", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "name": "tool",
+                "content": f"result-{index}",
+                "is_error": index == 32,
+            },
+        ])
+
+    events = post_llm_hook._bounded_tool_events(history)
+
     assert len(events) == 64
-    assert [
-        (events[0]["kind"], events[0]["tool_event_id"]),
-        (events[1]["kind"], events[1]["tool_event_id"]),
-    ] == [
+    assert [(events[0]["kind"], events[0]["tool_event_id"]),
+            (events[1]["kind"], events[1]["tool_event_id"])] == [
         ("call", "call-1"),
         ("result", "call-1"),
     ]
-    assert events[-2]["kind"] == "call"
-    assert events[-2]["tool_event_id"] == "call-32"
-    assert events[-1]["kind"] == "error"
-    assert events[-1]["tool_event_id"] == "call-32"
+    assert (events[-2]["kind"], events[-2]["tool_event_id"]) == (
+        "call", "call-32"
+    )
+    assert (events[-1]["kind"], events[-1]["tool_event_id"]) == (
+        "error", "call-32"
+    )
 
 
 def test_post_llm_hook_bounds_identifiers_and_idempotency_key() -> None:

@@ -17,9 +17,12 @@ at-least-once. `post_llm_call` после завершения tool loop
 Hermes.
 
 Adapter передаёт bounded finalized projection до 64 ordered
-`call|result|error` events суммарно. Для каждого принятого `result`/`error`
-core создаёт consequence, добавляет до 32 явных consequences и валидирует
-combined bound 96 без тихого suppression.
+`call|result|error` events суммарно. `result`/`error`, уже увиденные внутри
+этого tool loop, остаются same-act journal events и не переиздаются как
+future consequence. После commit core создаёт durable reduction outcome;
+canonical reducer асинхронно выводит 0..4 evidence-bound residues и обновляет
+causal carrier. Повтор с тем же `host_key`, но иным bounded request получает
+`409`, а не молча принимается как прежний act.
 
 Legacy `/pre_llm_inject` и `/affect/observe_turn` + provider `sync_turn`
 используются только в mixed-version deployment, когда cognition endpoint

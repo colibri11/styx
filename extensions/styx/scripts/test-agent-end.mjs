@@ -265,9 +265,15 @@ await fencedBefore(
 );
 await fencedEnd({ runId: "fenced-2", messages, success: true }, ctx);
 const fencedCommits = fencedCalls.filter(([kind]) => kind === "commit");
+const fencedPreturns = fencedCalls.filter(([kind]) => kind === "preturn");
 assert.equal(fencedCommits[0][1].snapshot_token, "snap-1");
 assert.equal(firstPreturn.host_key, fencedCommits[0][1].host_key);
+assert.equal(firstPreturn.parent_host_key, undefined);
 assert.equal(fencedCommits[0][1].parent_host_key, null);
+assert.equal(
+  fencedPreturns[1][1].parent_host_key,
+  fencedCommits[0][1].host_key,
+);
 assert.equal(fencedCommits[1][1].snapshot_token, "snap-3");
 assert.equal(fencedCommits[1][1].parent_host_key, fencedCommits[0][1].host_key);
 

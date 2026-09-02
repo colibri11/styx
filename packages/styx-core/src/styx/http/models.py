@@ -267,6 +267,7 @@ class CognitionMessage(BaseModel):
 class CognitionPreturnRequest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=256)
     host_key: str | None = Field(default=None, min_length=1, max_length=512)
+    parent_host_key: str | None = Field(default=None, min_length=1, max_length=512)
     session_id: str | None = Field(default=None, max_length=256)
     messages: list[CognitionMessage] = Field(default_factory=list, max_length=256)
     query: str | None = Field(default=None, max_length=20_000)
@@ -303,6 +304,26 @@ class CognitionWillProjection(BaseModel):
     source_hash: str = Field(max_length=64)
     supports: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
     computation_version: str = Field(max_length=64)
+    projection_status: Literal[
+        "empty", "provisional", "ready", "stale", "degraded"
+    ] = "provisional"
+    projection_available: bool = False
+    covered_line_version: int = Field(default=0, ge=0)
+    coverage_count: int = Field(default=0, ge=0)
+    coverage_hash: str = Field(default="", max_length=64)
+    causal_root_hash: str = Field(default="", max_length=64)
+    causal_root_version: int = Field(default=0, ge=0)
+    causal_frontier: list[str] = Field(default_factory=list, max_length=4)
+    root_coverage_hash: str = Field(default="", max_length=64)
+    root_count: int = Field(default=0, ge=0)
+    covered_node_count: int = Field(default=0, ge=0)
+    carrier_text: str = Field(default="", max_length=6_000)
+    carrier_version: str | None = Field(default=None, max_length=64)
+    pending_reduction_count: int = Field(default=0, ge=0)
+    reduction_failure_count: int = Field(default=0, ge=0)
+    technical_strength: float = Field(default=0.0, ge=0.0, le=1.0)
+    coherence: float | None = Field(default=None, ge=-1.0, le=1.0)
+    diagnostics: dict[str, Any] = Field(default_factory=dict, max_length=64)
 
 
 class CognitionVAD(BaseModel):
@@ -354,6 +375,9 @@ class CognitionPreturnResponse(BaseModel):
     reconstruction: CognitionReconstruction
     pending_consequences: list[CognitionPendingConsequence] = Field(
         default_factory=list, max_length=16
+    )
+    continuity_freshness: dict[str, Any] = Field(
+        default_factory=dict, max_length=32
     )
     system_prompt_addition: str = Field(max_length=16_000)
 
@@ -424,6 +448,11 @@ class CognitionCommitResponse(BaseModel):
     acknowledged_consequences: int = Field(ge=0)
     consequence_ids: list[str] = Field(default_factory=list, max_length=96)
     memory_ids: list[str] = Field(default_factory=list)
+    reduction_id: str
+    reduction_status: Literal[
+        "pending", "running", "applied", "no_residue", "retryable", "terminal_failure"
+    ]
+    reduction_task_id: str | None = None
 
 
 # ── agent state ───────────────────────────────────────────────────────────

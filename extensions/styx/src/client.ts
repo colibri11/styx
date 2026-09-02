@@ -193,6 +193,7 @@ export type AffectObserveTurnResponse = {
 export type CognitionPreturnRequest = {
   agent_id: string;
   host_key?: string | null;
+  parent_host_key?: string | null;
   session_id?: string | null;
   messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -233,6 +234,24 @@ export type CognitionPreturnResponse = {
     source_hash: string;
     supports: Array<Record<string, unknown>>;
     computation_version: string;
+    projection_status: "empty" | "provisional" | "ready" | "stale" | "degraded";
+    projection_available: boolean;
+    covered_line_version: number;
+    coverage_count: number;
+    coverage_hash: string;
+    causal_root_hash: string;
+    causal_root_version: number;
+    causal_frontier: string[];
+    root_coverage_hash: string;
+    root_count: number;
+    covered_node_count: number;
+    carrier_text: string;
+    carrier_version: string | null;
+    pending_reduction_count: number;
+    reduction_failure_count: number;
+    technical_strength: number;
+    coherence: number | null;
+    diagnostics: Record<string, unknown>;
   };
   affect?: Record<string, unknown> | null;
   reconstruction: {
@@ -241,6 +260,7 @@ export type CognitionPreturnResponse = {
     embed_available: boolean;
   };
   pending_consequences: Array<Record<string, unknown>>;
+  continuity_freshness: Record<string, unknown>;
   system_prompt_addition?: string | null;
 };
 
@@ -286,6 +306,15 @@ export type CognitionCommitResponse = {
   acknowledged_consequences: number;
   consequence_ids: string[];
   memory_ids: string[];
+  reduction_id: string;
+  reduction_status:
+    | "pending"
+    | "running"
+    | "applied"
+    | "no_residue"
+    | "retryable"
+    | "terminal_failure";
+  reduction_task_id: string | null;
 };
 
 // ── memory_store (волна 17) ──────────────────────────────────────────────

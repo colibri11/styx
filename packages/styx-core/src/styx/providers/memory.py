@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -3293,6 +3294,7 @@ class StyxMemoryCore:
         *,
         messages: list[dict[str, Any]],
         host_key: str | None = None,
+        parent_host_key: str | None = None,
         query: str | None = None,
         session_id: str | None = None,
         token_budget: int | None = None,
@@ -3356,6 +3358,7 @@ class StyxMemoryCore:
                 {
                     "messages": normalized,
                     "query": effective_query,
+                    "parent_host_key": parent_host_key,
                     "session_id": session_id,
                     "token_budget": token_budget,
                     "model": model,
@@ -3388,6 +3391,52 @@ class StyxMemoryCore:
 
         snapshot_token = uuid.uuid4().hex
         target_session = _coerce_session_id(session_id) if session_id else self._session_id
+        freshness: dict[str, Any] = {
+            "fresh": True,
+            "predecessor_found": False,
+            "reduction_status": "untracked",
+            "waited_ms": 0,
+            "timed_out": False,
+        }
+        if parent_host_key or target_session is not None:
+            from styx.storage.act_reduction import read_predecessor_freshness
+
+            wait_s = (
+                self._config.cognition_reduction_wait_s if self._config else 0.35
+            )
+            started = time.monotonic()
+            deadline = started + max(0.0, wait_s)
+            while True:
+                # Do not hold the provider mutex while sleeping: a concurrent
+                # in-process writer may need it, while an external worker needs
+                # the PostgreSQL line lock released between these reads.
+                with self._write_lock:
+                    if self._conn is None:
+                        raise RuntimeError(
+                            "provider shut down during predecessor wait"
+                        )
+                    try:
+                        freshness = read_predecessor_freshness(
+                            self._conn,
+                            self._agent_id,
+                            parent_host_key=parent_host_key,
+                            session_id=(None if parent_host_key else target_session),
+                        )
+                        self._conn.commit()
+                    except Exception:
+                        self._conn.rollback()
+                        raise
+                now = time.monotonic()
+                if freshness.get("fresh") is True or now >= deadline:
+                    break
+                time.sleep(min(0.025, max(0.0, deadline - now)))
+            freshness = {
+                **freshness,
+                "waited_ms": int(
+                    max(0.0, time.monotonic() - started) * 1000
+                ),
+                "timed_out": freshness.get("fresh") is not True,
+            }
         with self._write_lock:
             if self._conn is None:
                 raise RuntimeError("provider shut down mid-cognition_preturn")
@@ -3402,6 +3451,22 @@ class StyxMemoryCore:
                     self._conn.commit()
                     return replay
                 lock_agent_line(self._conn, self._agent_id)
+                if parent_host_key or target_session is not None:
+                    # The bounded poll is only an availability hint.  Re-read
+                    # beneath the same per-agent transaction lock used to
+                    # build carrier/root so freshness and projection describe
+                    # one causal coordinate, not adjacent instants.
+                    locked_freshness = read_predecessor_freshness(
+                        self._conn,
+                        self._agent_id,
+                        parent_host_key=parent_host_key,
+                        session_id=(None if parent_host_key else target_session),
+                    )
+                    freshness = {
+                        **locked_freshness,
+                        "waited_ms": freshness.get("waited_ms", 0),
+                        "timed_out": locked_freshness.get("fresh") is not True,
+                    }
                 will = ensure_will_projection(self._conn, self._agent_id)
                 traces = strict_reconstruction(
                     self._conn, self._agent_id, query_vector,
@@ -3481,6 +3546,7 @@ class StyxMemoryCore:
                     cognitive_posture=posture,
                     pending=pending,
                     traces=traces,
+                    continuity_freshness=freshness,
                 )
                 public_will = {
                     key: value for key, value in will.items() if key != "embedding"
@@ -3497,6 +3563,7 @@ class StyxMemoryCore:
                         "embed_available": query_vector is not None,
                     },
                     "pending_consequences": pending,
+                    "continuity_freshness": freshness,
                     "system_prompt_addition": prompt,
                 }
                 # Both the first response and every retry use the same JSON
@@ -3540,22 +3607,12 @@ class StyxMemoryCore:
             raise ValueError("host_key must contain 1..512 characters")
 
         actions = [dict(item) for item in (tool_events or [])[:64]]
-        declared = [dict(item) for item in (consequences or [])[:32]]
-        journal_consequences = list(declared)
-        for action in actions:
-            if action.get("kind") in {"result", "error"}:
-                journal_consequences.append({
-                    "kind": f"tool_{action['kind']}",
-                    "content": str(action.get("content", ""))[:8000],
-                    "metadata": {
-                        "tool_event_id": str(action.get("tool_event_id", ""))[:256],
-                        "name": str(action.get("name", ""))[:256],
-                    },
-                    "incorporate": False,
-                })
-        # Preserve all declared consequences plus every allowed result/error.
-        # HTTP bounds make the combined journal finite: 32 + 64 = 96.
-        journal_consequences = journal_consequences[:96]
+        # Tool results/errors in ``actions`` were already observed inside this
+        # cognitive act.  They belong to its ordered journal and must not be
+        # replayed as a future-world consequence in the next act.  Only an
+        # explicitly declared, not-yet-observed consequence enters this inbox;
+        # Wave 39 gives those external observations their own durable intake.
+        journal_consequences = [dict(item) for item in (consequences or [])[:32]]
 
         from styx.storage.cognition import (
             redact_journal_metadata,
@@ -3595,6 +3652,7 @@ class StyxMemoryCore:
             current_line_version,
             lock_agent_line,
         )
+        from styx.storage.act_reduction import schedule_act_reduction
 
         raw_session = _coerce_session_id(session_id) if session_id else self._session_id
         target_session = raw_session
@@ -3627,6 +3685,15 @@ class StyxMemoryCore:
                     snapshot_policy=snapshot_policy,
                     parent_policy=parent_policy,
                 )
+                # The reduction ledger is the durable outbox of the cognitive
+                # act.  Creating it in this transaction guarantees that every
+                # terminal act has exactly one reduction outcome even when the
+                # host retries a commit or the asynchronous worker is down.
+                reduction = schedule_act_reduction(
+                    self._conn,
+                    self._agent_id,
+                    result.act_id,
+                )
                 if result.duplicate:
                     duplicate_line_version = current_line_version(
                         self._conn, self._agent_id
@@ -3640,6 +3707,11 @@ class StyxMemoryCore:
                         "acknowledged_consequences": result.acknowledged_count,
                         "consequence_ids": [str(value) for value in result.consequence_ids],
                         "memory_ids": [],
+                        "reduction_id": str(reduction.reduction_id),
+                        "reduction_status": reduction.status,
+                        "reduction_task_id": (
+                            str(reduction.task_id) if reduction.task_id else None
+                        ),
                     }
 
                 if not self._queries.find_sync_turn_message_parts(host_key):
@@ -3659,7 +3731,11 @@ class StyxMemoryCore:
                 for index, consequence in enumerate(journal_consequences):
                     if not consequence.get("incorporate"):
                         continue
-                    eligible = bool(consequence.get("line_eligible", False))
+                    # A host-declared consequence is external evidence.  It
+                    # cannot declare itself part of the subjective line in the
+                    # same terminal call; only the core-owned act reducer may
+                    # incorporate a validated cognitive residue.
+                    eligible = False
                     memory_id = self._queries.insert_memory(
                         role="summary",
                         content=str(consequence.get("content", ""))[:2400],
@@ -3672,35 +3748,13 @@ class StyxMemoryCore:
                             "cognitive_host_key": host_key,
                             "residue_kind": consequence.get("kind"),
                         },
-                        memory_domain=(
-                            "subjective_trace" if eligible else "external_evidence"
-                        ),
+                        memory_domain="external_evidence",
                         line_eligible=eligible,
                         cognitive_act_id=result.act_id,
                     )
                     memory_ids.append(str(memory_id))
                 line_version = current_line_version(self._conn, self._agent_id)
                 self._conn.commit()
-
-        # Affect is a coordinate of this act, never the will projection.  It is
-        # deliberately outside the durable saga: evaluator failure cannot lose
-        # the act, and the legacy endpoint deduplicates on this same host key.
-        if not result.duplicate:
-            try:
-                self.observe_affective_turn(
-                    idempotency_key=host_key,
-                    turn_id=host_key,
-                    session_id=session_id,
-                    user_message=user_message,
-                    assistant_response=assistant_response,
-                    conversation_history=conversation_history or [],
-                    tool_events=[a for a in actions if a.get("kind") in {"call", "result"}],
-                    model=model,
-                    platform=platform,
-                    extra=extra,
-                )
-            except Exception as exc:  # noqa: BLE001 - explicit fail-open seam
-                log.warning("cognition_commit affect observer failed: %s", exc)
 
         return {
             "act_id": str(result.act_id),
@@ -3710,6 +3764,11 @@ class StyxMemoryCore:
             "acknowledged_consequences": result.acknowledged_count,
             "consequence_ids": [str(value) for value in result.consequence_ids],
             "memory_ids": memory_ids,
+            "reduction_id": str(reduction.reduction_id),
+            "reduction_status": reduction.status,
+            "reduction_task_id": (
+                str(reduction.task_id) if reduction.task_id else None
+            ),
         }
 
     # -- setup wizard ----------------------------------------------------

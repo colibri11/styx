@@ -57,6 +57,7 @@ def test_pre_llm_hook_injects_canonical_envelope_and_remembers_fence() -> None:
     assert payload["messages"] == [{"role": "user", "content": "current event"}]
     assert payload["query"] == "current event"
     assert payload["host_key"] == "hermes:session-1:turn-1"
+    assert payload["parent_host_key"] is None
     assert payload["extra"]["current_event"] == {
         "turn_id": "turn-1",
         "is_first_turn": True,
@@ -161,6 +162,21 @@ def test_minimal_hermes_lifecycle_shares_one_fence_and_host_identity() -> None:
     assert client.calls[0][1]["host_key"] == client.commits[0]["host_key"]
     assert client.commits[0]["snapshot_token"] == "snapshot-9"
     assert client.commits[0]["parent_host_key"] is None
+
+
+def test_second_preturn_names_the_declared_predecessor() -> None:
+    client = _CaptureClient()
+    _agent_session.set_session("agent-a", client)
+    first_key = "hermes:session-1:turn-1"
+    assert _agent_session.declare_act("session-1", first_key) == (None, None)
+
+    pre_llm_hook.on_pre_llm_call(
+        session_id="session-1",
+        turn_id="turn-2",
+        user_message="next",
+    )
+
+    assert client.calls[0][1]["parent_host_key"] == first_key
 
 
 def test_pre_llm_hook_without_turn_id_omits_physical_host_key() -> None:

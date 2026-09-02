@@ -118,6 +118,18 @@ export class TerminalTurnBarrier {
     this.prune(now);
   }
 
+  /** Return the last declared physical act without mutating ancestry. */
+  predecessorActKey(scope: string): string | null {
+    const now = Date.now();
+    this.prune(now);
+    const entry = this.lastActByScope.get(scope);
+    if (!entry) return null;
+    entry.touchedAt = now;
+    this.lastActByScope.delete(scope);
+    this.lastActByScope.set(scope, entry);
+    return entry.value;
+  }
+
   /** Declare physical ancestry once; retries return the original coordinates. */
   declareAct(
     scope: string,

@@ -118,6 +118,9 @@ def on_pre_llm_call(**hermes_kwargs: Any) -> dict[str, str] | None:
         resp = client.cognition_preturn(
             agent_id,
             host_key=host_key,
+            parent_host_key=_agent_session.predecessor_act_key(
+                session_id, host_key
+            ),
             session_id=session_id,
             messages=messages,
             query=user_text or None,

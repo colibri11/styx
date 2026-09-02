@@ -13,7 +13,11 @@ import psycopg
 import pytest
 
 from styx.storage import migrate
-from styx.storage.queries import AgentScopedQueries, enqueue_llm_task
+from styx.storage.queries import (
+    AgentScopedQueries,
+    enqueue_llm_task,
+    worker_load_memory_for_reinterpret,
+)
 
 
 @pytest.fixture
@@ -38,6 +42,43 @@ def _make_memory(
         kind="note", kind_src="subjective",
         embedding=_embed(0.1),
     )
+
+
+def _set_causal_provenance(
+    conn: psycopg.Connection,
+    memory_id: uuid.UUID,
+    provenance: str,
+) -> None:
+    if provenance == "validated_act_residue":
+        act_id = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT agent_id FROM memories WHERE id=%s", (memory_id,)
+            )
+            agent_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO cognitive_acts "
+                "(id,agent_id,host_key,status,completed_at) "
+                "VALUES (%s,%s,%s,'completed',clock_timestamp())",
+                (act_id, agent_id, f"test-{act_id}"),
+            )
+            cur.execute(
+                "UPDATE memories SET line_provenance=%s,cognitive_act_id=%s,"
+                " residue_ordinal=0,residue_reducer_version='test_v1',"
+                " residue_input_hash=%s,residue_causal_role='choice',"
+                " residue_confidence=0.8,"
+                " residue_evidence='[{\"source\":\"channel_output\","
+                "\"key\":\"assistant_response\"}]'::jsonb,"
+                " residue_predecessors='[]'::jsonb,residue_line_root_hash=%s "
+                "WHERE id=%s",
+                (provenance, act_id, "b" * 64, "a" * 64, memory_id),
+            )
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE memories SET line_provenance=%s WHERE id=%s",
+            (provenance, memory_id),
+        )
 
 
 # ── find_pending_reinterpret_application ─────────────────────────────
@@ -143,6 +184,34 @@ def test_memory_exists_false_for_other_agent(conn: psycopg.Connection) -> None:
 def test_memory_exists_false_for_unknown(conn: psycopg.Connection) -> None:
     q = AgentScopedQueries(conn, agent_id="alpha")
     assert q.memory_exists(uuid.uuid4()) is False
+
+
+@pytest.mark.parametrize(
+    "provenance", ["validated_act_residue", "validated_transform"]
+)
+def test_reinterpret_fences_causal_rows_until_rewiring_exists(
+    conn: psycopg.Connection, provenance: str
+) -> None:
+    q = AgentScopedQueries(conn, agent_id="alpha")
+    mid = _make_memory(q, content="canonical")
+    _set_causal_provenance(conn, mid, provenance)
+    conn.commit()
+
+    assert q.memory_exists(mid) is False
+    assert worker_load_memory_for_reinterpret(conn, mid) is None
+    assert q.apply_reinterpret_update(
+        memory_id=mid,
+        merged_text="mutated",
+        merged_embedding=_embed(0.5),
+    ) == 0
+    task_id = enqueue_llm_task(
+        conn, task_type="reinterpret_merge", payload={}
+    )
+    with pytest.raises(ValueError, match="validated causal memory"):
+        q.insert_reinterpret_application(task_id=task_id, memory_id=mid)
+    with conn.cursor() as cur:
+        cur.execute("SELECT content FROM memories WHERE id=%s", (mid,))
+        assert cur.fetchone()[0] == "canonical"
 
 
 # ── insert_reinterpret_application + load_pending ───────────────────

@@ -258,10 +258,12 @@ export function createBeforePromptBuildHook(
       event.turnId || ctx.turnId,
     );
     const hostKey = identity ? openclawHostKey(identity) : null;
+    const parentHostKey = terminalBarrier.predecessorActKey(terminalScope);
     try {
       const request = {
         agent_id: agentId,
         ...(hostKey ? { host_key: hostKey } : {}),
+        ...(parentHostKey ? { parent_host_key: parentHostKey } : {}),
         session_id: sessionId || null,
         messages,
         query: bounded(event.prompt, 20_000) || null,

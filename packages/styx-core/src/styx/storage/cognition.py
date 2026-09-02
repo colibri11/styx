@@ -12,26 +12,58 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 
-WILL_COMPUTATION_VERSION = "technical_projection_v1"
+WILL_COMPUTATION_VERSION = "causal_carrier_v1"
 MAX_SUPPORTS = 8
 MAX_PENDING = 16
+MAX_PRESENTED_PENDING = 4
+MAX_PRESENTED_PENDING_CONTENT = 512
 MAX_TRACES = 8
 MAX_SYSTEM_PROMPT_ADDITION = 16_000
 MAX_JSON_DEPTH = 6
 MAX_JSON_NODES = 256
 MAX_JSON_BYTES = 32_768
 MAX_PARENT_DEPTH = 1024
+COMMIT_REQUEST_HASH_METADATA_KEY = "_styx_commit_request_sha256"
+
+_MODEL_PRIVATE_COORDINATE_KEYS = frozenset(
+    {
+        "hostkey",
+        "parenthostkey",
+        "predecessorhostkey",
+        "cognitivehostkey",
+        "callerhostkey",
+    }
+)
+_MODEL_REDUCTION_STATUSES = frozenset(
+    {
+        "absent",
+        "applied",
+        "no_residue",
+        "pending",
+        "predecessor_pending",
+        "retryable",
+        "running",
+        "terminal_failure",
+        "unscheduled",
+        "untracked",
+    }
+)
+_SHA256_COORDINATE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SnapshotReplayConflict(ValueError):
     """A keyed snapshot can only replay its original live, unused envelope."""
+
+
+class CognitiveCommitConflict(ValueError):
+    """A committed host key cannot be reused for different caller semantics."""
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+"),
@@ -189,30 +221,21 @@ def _representative_indices(total: int, limit: int) -> list[int]:
     return sorted({round(index * (total - 1) / (limit - 1)) for index in range(limit)})
 
 
-def _source_digest(rows: Iterable[dict[str, Any]]) -> str:
-    digest = hashlib.sha256()
-    for row in rows:
-        digest.update(str(row["id"]).encode())
-        digest.update(b"\0")
-        digest.update(hashlib.sha256(row["content"].encode("utf-8")).digest())
-        digest.update(b"\0")
-        digest.update(str(row["updated_at"]).encode())
-        digest.update(b"\n")
-    return digest.hexdigest()
-
-
 def ensure_will_projection(
     conn: psycopg.Connection,
     agent_id: str,
     *,
     support_limit: int = MAX_SUPPORTS,
 ) -> dict[str, Any]:
-    """Return/rebuild a versioned projection over all live eligible traces.
+    """Return/rebuild the query-independent carrier of the complete live line.
 
-    The source hash and count always include traces without an embedding.  The
-    vector averages only available vectors, so an embedding outage never
-    erases an already formed line.
+    Embeddings remain diagnostic coordinates.  The active model receives the
+    bounded extractive carrier built from the complete eligible set, while
+    legacy/unfenced rows remain explicitly provisional.  Pending act
+    reductions make an otherwise usable carrier visibly stale.
     """
+    from styx.engine.causal_carrier import build_causal_carrier
+
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "INSERT INTO line_state(agent_id, version, dirty) VALUES (%s, 0, true) "
@@ -220,23 +243,59 @@ def ensure_will_projection(
             (agent_id,),
         )
         cur.execute(
-            "SELECT version, dirty FROM line_state WHERE agent_id = %s FOR UPDATE",
+            "SELECT version,dirty,causal_root_hash,causal_root_version,"
+            " causal_frontier FROM line_state WHERE agent_id = %s FOR UPDATE",
             (agent_id,),
         )
         state = cur.fetchone()
         assert state is not None
         version = int(state["version"])
+        cur.execute(
+            "SELECT "
+            " count(*) FILTER (WHERE status IN ('pending','running','retryable'))::int "
+            "   AS pending_count, "
+            " count(*) FILTER (WHERE status='terminal_failure')::int AS failure_count "
+            "FROM cognitive_act_reductions WHERE agent_id=%s",
+            (agent_id,),
+        )
+        reduction_state = cur.fetchone() or {"pending_count": 0, "failure_count": 0}
+        pending_count = int(reduction_state["pending_count"] or 0)
+        failure_count = int(reduction_state["failure_count"] or 0)
         if not state["dirty"]:
             cur.execute(
-                "SELECT formed, source_count, source_hash, supports, "
-                "       computation_version, embedding "
+                "SELECT formed,source_count,source_hash,supports,"
+                " computation_version,embedding,projection_status,"
+                " projection_available,covered_line_version,coverage_count,"
+                " coverage_hash,carrier_text,carrier_payload,carrier_version "
                 "FROM will_projections WHERE agent_id=%s AND line_version=%s",
                 (agent_id, version),
             )
             cached = cur.fetchone()
             if cached is not None:
+                payload = dict(cached["carrier_payload"] or {})
+                base_status = str(
+                    payload.get("base_projection_status")
+                    or cached["projection_status"]
+                )
+                effective_status = (
+                    "degraded" if failure_count
+                    else "stale" if pending_count and cached["projection_available"]
+                    else base_status
+                )
+                formed = bool(
+                    effective_status == "ready"
+                    and cached["projection_available"]
+                    and int(cached["covered_line_version"]) == version
+                    and int(cached["coverage_count"]) == int(cached["source_count"])
+                    and cached["coverage_hash"] == cached["source_hash"]
+                )
+                cur.execute(
+                    "UPDATE will_projections SET projection_status=%s,formed=%s,"
+                    " pending_reduction_count=%s WHERE agent_id=%s AND line_version=%s",
+                    (effective_status, formed, pending_count, agent_id, version),
+                )
                 return {
-                    "formed": bool(cached["formed"]),
+                    "formed": formed,
                     "technical_projection": True,
                     "line_version": version,
                     "source_count": int(cached["source_count"]),
@@ -244,16 +303,50 @@ def ensure_will_projection(
                     "supports": cached["supports"],
                     "computation_version": cached["computation_version"],
                     "embedding": _parse_vector(cached["embedding"]),
+                    "projection_status": effective_status,
+                    "projection_available": bool(cached["projection_available"]),
+                    "covered_line_version": int(cached["covered_line_version"]),
+                    "coverage_count": int(cached["coverage_count"]),
+                    "coverage_hash": cached["coverage_hash"],
+                    "carrier_text": cached["carrier_text"] or "",
+                    "carrier_version": cached["carrier_version"],
+                    "pending_reduction_count": pending_count,
+                    "reduction_failure_count": failure_count,
+                    "technical_strength": float(payload.get("technical_strength", 0.0)),
+                    "coherence": payload.get("coherence"),
+                    "diagnostics": payload.get("diagnostics", {}),
+                    "causal_root_hash": str(state["causal_root_hash"]),
+                    "causal_root_version": int(state["causal_root_version"]),
+                    "causal_frontier": list(state["causal_frontier"] or []),
+                    "root_coverage_hash": payload.get("root_coverage_hash", ""),
+                    "root_count": int(payload.get("root_count", 0)),
+                    "covered_node_count": int(
+                        payload.get("covered_node_count", 0)
+                    ),
                 }
 
         cur.execute(
-            "SELECT id, role, kind, content, embedding, created_at, updated_at "
+            "SELECT id,seq,role,kind,content,embedding,created_at,updated_at,"
+            " line_provenance,cognitive_act_id,residue_ordinal,residue_causal_role,"
+            " residue_predecessors,residue_line_root_hash,residue_affect "
             "FROM memories WHERE agent_id=%s "
             "  AND memory_domain='subjective_trace' AND line_eligible=true "
             "  AND superseded_by IS NULL ORDER BY seq ASC",
             (agent_id,),
         )
         rows = list(cur.fetchall())
+
+        carrier_rows = [
+            {
+                **dict(row),
+                "embedding": _parse_vector(row["embedding"]),
+            }
+            for row in rows
+        ]
+        carrier = build_causal_carrier(
+            carrier_rows,
+            max_supports=max(1, support_limit),
+        )
 
         vectors = [_parse_vector(row["embedding"]) for row in rows]
         vectors = [vector for vector in vectors if vector]
@@ -266,26 +359,54 @@ def ensure_will_projection(
                 for index in range(dimension)
             ]
 
-        supports = [
-            {
-                "memory_id": str(rows[index]["id"]),
-                "role": rows[index]["role"],
-                "kind": rows[index]["kind"],
-                "content": rows[index]["content"][:500],
-                "created_at": rows[index]["created_at"].isoformat(),
-            }
-            for index in _representative_indices(len(rows), max(1, support_limit))
-        ]
-        source_hash = _source_digest(rows)
-        formed = bool(rows)
+        supports = list(carrier["supports"])
+        source_hash = carrier["coverage_hash"]
+        base_status = carrier["projection_status"]
+        effective_status = (
+            "degraded" if failure_count
+            else "stale" if pending_count and carrier["projection_available"]
+            else base_status
+        )
+        projection_available = bool(carrier["projection_available"])
+        carrier_text = carrier["carrier_text"] or None
+        carrier_version = (
+            str(carrier["diagnostics"].get("algorithm_version"))
+            if projection_available else None
+        )
+        formed = bool(
+            effective_status == "ready"
+            and projection_available
+            and carrier["coverage_count"] == len(rows)
+        )
+        carrier_payload = {
+            "base_projection_status": base_status,
+            "technical_strength": carrier["technical_strength"],
+            "coherence": carrier["coherence"],
+            "root_coverage_hash": carrier["root_coverage_hash"],
+            "root_count": carrier["root_count"],
+            "covered_node_count": carrier["covered_node_count"],
+            "diagnostics": carrier["diagnostics"],
+        }
         cur.execute(
             "INSERT INTO will_projections "
-            "(agent_id,line_version,formed,source_count,source_hash,embedding,supports,computation_version) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+            "(agent_id,line_version,formed,source_count,source_hash,embedding,supports,"
+            " computation_version,projection_status,projection_available,"
+            " covered_line_version,coverage_count,coverage_hash,carrier_text,"
+            " carrier_payload,carrier_version,pending_reduction_count,carrier_built_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+            " clock_timestamp()) "
             "ON CONFLICT (agent_id,line_version) DO UPDATE SET "
             "formed=excluded.formed, source_count=excluded.source_count, "
             "source_hash=excluded.source_hash, embedding=excluded.embedding, "
-            "supports=excluded.supports, computation_version=excluded.computation_version",
+            "supports=excluded.supports, computation_version=excluded.computation_version,"
+            "projection_status=excluded.projection_status,"
+            "projection_available=excluded.projection_available,"
+            "covered_line_version=excluded.covered_line_version,"
+            "coverage_count=excluded.coverage_count,coverage_hash=excluded.coverage_hash,"
+            "carrier_text=excluded.carrier_text,carrier_payload=excluded.carrier_payload,"
+            "carrier_version=excluded.carrier_version,"
+            "pending_reduction_count=excluded.pending_reduction_count,"
+            "carrier_built_at=excluded.carrier_built_at",
             (
                 agent_id,
                 version,
@@ -295,6 +416,15 @@ def ensure_will_projection(
                 _vector_literal(projection_vector),
                 Jsonb(supports),
                 WILL_COMPUTATION_VERSION,
+                effective_status,
+                projection_available,
+                version,
+                carrier["coverage_count"],
+                carrier["coverage_hash"],
+                carrier_text,
+                Jsonb(carrier_payload),
+                carrier_version,
+                pending_count,
             ),
         )
         cur.execute(
@@ -311,6 +441,24 @@ def ensure_will_projection(
         "supports": supports,
         "computation_version": WILL_COMPUTATION_VERSION,
         "embedding": projection_vector,
+        "projection_status": effective_status,
+        "projection_available": projection_available,
+        "covered_line_version": version,
+        "coverage_count": carrier["coverage_count"],
+        "coverage_hash": carrier["coverage_hash"],
+        "carrier_text": carrier["carrier_text"],
+        "carrier_version": carrier_version,
+        "pending_reduction_count": pending_count,
+        "reduction_failure_count": failure_count,
+        "technical_strength": carrier["technical_strength"],
+        "coherence": carrier["coherence"],
+        "diagnostics": carrier["diagnostics"],
+        "causal_root_hash": str(state["causal_root_hash"]),
+        "causal_root_version": int(state["causal_root_version"]),
+        "causal_frontier": list(state["causal_frontier"] or []),
+        "root_coverage_hash": carrier["root_coverage_hash"],
+        "root_count": carrier["root_count"],
+        "covered_node_count": carrier["covered_node_count"],
     }
 
 
@@ -321,7 +469,12 @@ def strict_reconstruction(
     *,
     limit: int = MAX_TRACES,
 ) -> list[dict[str, Any]]:
-    """Query only live subjective traces; no query vector means no guesses."""
+    """Query only validated live line traces; no query vector means no guesses.
+
+    Legacy rows remain available through explicit archive/dialogue tools, but
+    they cannot silently enter the active cognitive envelope as subjective
+    evidence merely because an older schema labelled them ``subjective``.
+    """
     if not query_vector:
         return []
     qvec = _vector_literal(query_vector)
@@ -331,6 +484,7 @@ def strict_reconstruction(
             "       1 - (embedding <=> %s::vector) AS score "
             "FROM memories WHERE agent_id=%s "
             "  AND memory_domain='subjective_trace' AND line_eligible=true "
+            "  AND line_provenance = 'validated_act_residue' "
             "  AND superseded_by IS NULL AND embedding IS NOT NULL "
             "ORDER BY embedding <=> %s::vector, seq DESC LIMIT %s",
             (qvec, agent_id, qvec, min(max(1, limit), MAX_TRACES)),
@@ -372,7 +526,10 @@ def present_pending_consequences(
         snapshot = cur.fetchone()
         if snapshot is None:
             raise ValueError("snapshot_token is unknown for this agent")
-        bounded_limit = min(max(1, limit), MAX_PENDING)
+        # Presentation is the acknowledgement boundary, not merely a DB
+        # selection.  Lease only the subset that is guaranteed to fit the
+        # active prompt; omitted rows remain pending for a later snapshot.
+        bounded_limit = min(max(1, limit), MAX_PENDING, MAX_PRESENTED_PENDING)
         if snapshot["active"] and snapshot["presentation_completed_at"] is None:
             cur.execute(
                 "SELECT c.id FROM cognitive_consequences c "
@@ -424,7 +581,9 @@ def present_pending_consequences(
             "source_act_id": str(row["act_id"]),
             "ordinal": int(row["ordinal"]),
             "kind": row["kind"],
-            "content": row["content"],
+            "content": redact_journal_text(
+                row["content"], limit=MAX_PRESENTED_PENDING_CONTENT
+            ),
             "metadata": row["metadata"],
             "created_at": row["created_at"].isoformat(),
         }
@@ -588,6 +747,66 @@ def _assert_acyclic_parentage(
         raise ValueError("cognitive act parentage exceeds bounded ancestry depth")
 
 
+def _commit_request_fingerprint(
+    *,
+    agent_id: str,
+    host_key: str,
+    parent_host_key: str | None,
+    session_id: uuid.UUID | None,
+    snapshot_token: str | None,
+    snapshot_policy: str,
+    parent_policy: str,
+    status: str,
+    channel_input: dict[str, Any],
+    channel_output: dict[str, Any],
+    actions: Sequence[dict[str, Any]],
+    consequences: Sequence[dict[str, Any]],
+    metadata: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Hash only bounded caller coordinates, before dynamic resolution.
+
+    ``latest_session`` parent/snapshot selection and the current line version
+    deliberately do not participate: an identical delivery must remain an
+    idempotent duplicate even if external state advanced after the first
+    commit.  The returned metadata has internal keys removed so a host cannot
+    forge either the fingerprint or resolution audit fields.
+    """
+    caller_metadata = dict(metadata)
+    caller_metadata.pop(COMMIT_REQUEST_HASH_METADATA_KEY, None)
+    caller_metadata.pop("continuity_resolution", None)
+    safe_metadata = redact_journal_metadata(caller_metadata)
+
+    def _safe_items(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            safe = redact_journal_metadata(item)
+            # Journal content has a wider intentional bound than generic
+            # nested metadata, so preserve the exact persisted text here.
+            safe["content"] = redact_journal_text(item.get("content", ""))
+            safe["metadata"] = redact_journal_metadata(item.get("metadata", {}))
+            normalized.append(safe)
+        return normalized
+
+    payload = {
+        "version": "cognition_commit_request_v1",
+        "agent_id": agent_id,
+        "host_key": host_key,
+        "session_id": str(session_id) if session_id is not None else None,
+        "declared_parent_key": parent_host_key,
+        "snapshot_token": snapshot_token,
+        "snapshot_policy": snapshot_policy,
+        "parent_policy": parent_policy,
+        "status": status,
+        "channel_input": redact_journal_json(channel_input),
+        "channel_output": redact_journal_json(channel_output),
+        "actions": _safe_items(actions),
+        "consequences": _safe_items(consequences),
+        "metadata": safe_metadata,
+    }
+    digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    return digest, safe_metadata
+
+
 def commit_cognitive_act(
     conn: psycopg.Connection,
     agent_id: str,
@@ -607,13 +826,42 @@ def commit_cognitive_act(
     parent_policy: str = "explicit",
 ) -> CommitResult:
     """Append one idempotent act and its ordered journals in the caller tx."""
+    if snapshot_policy not in {"explicit", "latest_session"}:
+        raise ValueError("unsupported snapshot_policy")
+    if parent_policy not in {"explicit", "latest_session"}:
+        raise ValueError("unsupported parent_policy")
+    request_hash, safe_metadata = _commit_request_fingerprint(
+        agent_id=agent_id,
+        host_key=host_key,
+        parent_host_key=parent_host_key,
+        session_id=session_id,
+        snapshot_token=snapshot_token,
+        snapshot_policy=snapshot_policy,
+        parent_policy=parent_policy,
+        status=status,
+        channel_input=channel_input,
+        channel_output=channel_output,
+        actions=actions,
+        consequences=consequences,
+        metadata=metadata,
+    )
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id FROM cognitive_acts WHERE agent_id=%s AND host_key=%s",
+            "SELECT id,metadata FROM cognitive_acts WHERE agent_id=%s AND host_key=%s",
             (agent_id, host_key),
         )
         existing = cur.fetchone()
         if existing is not None:
+            existing_metadata = existing["metadata"]
+            stored_hash = (
+                existing_metadata.get(COMMIT_REQUEST_HASH_METADATA_KEY)
+                if isinstance(existing_metadata, dict)
+                else None
+            )
+            if stored_hash is not None and stored_hash != request_hash:
+                raise CognitiveCommitConflict(
+                    "host_key was already committed with a different request"
+                )
             cur.execute(
                 "SELECT count(*)::int AS acknowledged_count FROM cognitive_consequences "
                 "WHERE agent_id=%s AND acknowledged_by_act_id=%s",
@@ -629,11 +877,6 @@ def commit_cognitive_act(
                 existing["id"], True, acknowledged,
                 tuple(row["id"] for row in cur.fetchall()),
             )
-
-        if snapshot_policy not in {"explicit", "latest_session"}:
-            raise ValueError("unsupported snapshot_policy")
-        if parent_policy not in {"explicit", "latest_session"}:
-            raise ValueError("unsupported parent_policy")
 
         effective_parent_host_key = parent_host_key
         if (
@@ -670,13 +913,14 @@ def commit_cognitive_act(
                 effective_snapshot_token = latest_snapshot["token"]
 
         metadata = {
-            **metadata,
+            **safe_metadata,
             "continuity_resolution": {
                 "snapshot_policy": snapshot_policy,
                 "snapshot_claimed": effective_snapshot_token is not None,
                 "parent_policy": parent_policy,
                 "parent_resolved": effective_parent_host_key is not None,
             },
+            COMMIT_REQUEST_HASH_METADATA_KEY: request_hash,
         }
 
         _assert_acyclic_parentage(
@@ -818,40 +1062,81 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _without_private_model_coordinates(value: Any) -> Any:
+    """Remove host-owned idempotency coordinates from a model-visible tree."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+            if normalized in _MODEL_PRIVATE_COORDINATE_KEYS:
+                continue
+            result[key] = _without_private_model_coordinates(item)
+        return result
+    if isinstance(value, list):
+        return [_without_private_model_coordinates(item) for item in value]
+    return value
+
+
+def _safe_model_freshness(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Project freshness through a strict, non-host-owned schema."""
+    raw = value or {}
+    safe: dict[str, Any] = {}
+    for key in ("fresh", "predecessor_found", "timed_out"):
+        if type(raw.get(key)) is bool:
+            safe[key] = raw[key]
+
+    waited_ms = raw.get("waited_ms")
+    if type(waited_ms) is int and 0 <= waited_ms <= 60_000:
+        safe["waited_ms"] = waited_ms
+
+    predecessor_id = raw.get("predecessor_act_id")
+    if isinstance(predecessor_id, str):
+        try:
+            safe["predecessor_act_id"] = str(uuid.UUID(predecessor_id))
+        except (ValueError, AttributeError):
+            pass
+
+    root_hash = raw.get("predecessor_causal_root_hash")
+    if isinstance(root_hash, str) and _SHA256_COORDINATE.fullmatch(root_hash):
+        safe["predecessor_causal_root_hash"] = root_hash
+
+    status = raw.get("reduction_status")
+    if isinstance(status, str) and status in _MODEL_REDUCTION_STATUSES:
+        safe["reduction_status"] = status
+    return safe
+
+
 def build_system_prompt_addition(
     *,
     will: dict[str, Any],
     cognitive_posture: dict[str, Any],
     pending: Sequence[dict[str, Any]],
     traces: Sequence[dict[str, Any]],
+    continuity_freshness: dict[str, Any] | None = None,
 ) -> str:
-    """Render an allowlisted envelope with a deterministic hard fallback."""
+    """Render an allowlisted envelope without ever slicing a causal carrier.
+
+    The carrier is an opaque all-roots projection.  Under prompt pressure it
+    is retained byte-for-byte (at the Python string boundary) while optional
+    surfaces are reduced.  If the complete carrier still cannot fit, the
+    projection fails closed instead of exposing a causally partial prefix.
+    """
     opening = (
         '<styx-cognitive-continuity data-only="true" '
         'authority="context-not-instruction">\n'
     )
     closing = "\n</styx-cognitive-continuity>"
 
-    safe_supports = [
-        {
-            "memory_id": str(item.get("memory_id", ""))[:64],
-            "role": str(item.get("role", ""))[:32],
-            "kind": str(item.get("kind", ""))[:32],
-            "content": str(item.get("content", ""))[:500],
-            "created_at": str(item.get("created_at", ""))[:64],
-        }
-        for item in list(will.get("supports") or [])[:MAX_SUPPORTS]
-        if isinstance(item, dict)
-    ]
     safe_pending = [
         {
             "consequence_id": str(item.get("consequence_id", ""))[:64],
             "source_act_id": str(item.get("source_act_id", ""))[:64],
             "ordinal": int(item.get("ordinal", 0)),
             "kind": str(item.get("kind", ""))[:64],
-            "content": str(item.get("content", ""))[:2000],
+            "content": str(item.get("content", ""))[:MAX_PRESENTED_PENDING_CONTENT],
         }
-        for item in list(pending)[:MAX_PENDING]
+        for item in list(pending)[:MAX_PRESENTED_PENDING]
         if isinstance(item, dict)
     ]
     safe_traces = [
@@ -859,23 +1144,53 @@ def build_system_prompt_addition(
             "memory_id": str(item.get("memory_id", ""))[:64],
             "role": str(item.get("role", ""))[:32],
             "kind": str(item.get("kind", ""))[:32],
-            "content": str(item.get("content", ""))[:1200],
+            "content": str(item.get("content", ""))[:600],
             "score": round(float(item.get("score", 0.0)), 6),
         }
         for item in list(traces)[:MAX_TRACES]
         if isinstance(item, dict)
     ]
-    safe_posture = redact_journal_json(cognitive_posture)
+    safe_posture = _without_private_model_coordinates(
+        redact_journal_json(cognitive_posture)
+    )
     if not isinstance(safe_posture, dict):
         safe_posture = {}
+    root_count = int(will.get("root_count", 0))
+    pending_reduction_count = int(will.get("pending_reduction_count", 0))
+    reduction_failure_count = int(will.get("reduction_failure_count", 0))
+    active_status = str(will.get("projection_status", "empty"))[:16]
+    if not root_count and not pending_reduction_count and not reduction_failure_count:
+        # Quarantine is a public diagnostic surface, never a model-visible
+        # pseudo-line.  With no validated roots it is cognitively equivalent
+        # to an empty retained causal line.
+        active_status = "empty"
+    raw_carrier = str(will.get("carrier_text", ""))
+    carrier_available = bool(will.get("projection_available")) and bool(raw_carrier)
     projection = {
         "formed": bool(will.get("formed")),
-        "line_version": int(will.get("line_version", 0)),
-        "source_count": int(will.get("source_count", 0)),
-        "supports": safe_supports,
+        "projection_status": active_status,
+        "projection_available": carrier_available,
+        # Full storage versions/counts/hashes include quarantine and stay on
+        # the public diagnostic API.  Only reducer-owned root coordinates are
+        # visible to the model.
+        "causal_root_hash": (
+            str(will.get("causal_root_hash"))
+            if _SHA256_COORDINATE.fullmatch(str(will.get("causal_root_hash", "")))
+            else ""
+        ),
+        "causal_root_version": int(will.get("causal_root_version", 0)),
+        "root_count": root_count,
+        "covered_node_count": int(will.get("covered_node_count", 0)),
+        "pending_reduction_count": pending_reduction_count,
+        "reduction_failure_count": reduction_failure_count,
+        # This is the query-independent lossy carrier computed from the whole
+        # eligible line. It is quoted data, not an imperative or identity claim.
+        "carrier_text": raw_carrier if carrier_available else "",
     }
+    safe_freshness = _safe_model_freshness(continuity_freshness)
     payload = {
         "technical_projection": projection,
+        "continuity_freshness": safe_freshness,
         "cognitive_posture": safe_posture,
         "pending_consequences": safe_pending,
         "reconstructed_subjective_traces": safe_traces,
@@ -890,27 +1205,53 @@ def build_system_prompt_addition(
     if len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION:
         return prompt
 
-    payload["technical_projection"]["supports"] = []
+    # Preserve the complete carrier and every actually leased consequence.
+    # Query-dependent recall is the first optional surface removed.
     payload["reconstructed_subjective_traces"] = []
-    payload["pending_consequences"] = [
-        {**item, "content": item["content"][:256]} for item in safe_pending[:8]
-    ]
     prompt = _render(payload)
     if len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION:
         return prompt
 
-    fallback = {
+    payload["cognitive_posture"] = {}
+    payload["pending_consequences"] = [
+        {**item, "content": item["content"][:256]} for item in safe_pending
+    ]
+    payload["details_omitted"] = True
+    prompt = _render(payload)
+    if len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION:
+        return prompt
+
+    compact = {
         "technical_projection": {
             "formed": projection["formed"],
-            "line_version": projection["line_version"],
-            "source_count": projection["source_count"],
-            "supports": [],
+            "projection_status": projection["projection_status"],
+            "projection_available": projection["projection_available"],
+            "root_count": projection["root_count"],
+            "carrier_text": projection["carrier_text"],
         },
+        "continuity_freshness": safe_freshness,
         "cognitive_posture": {},
-        "pending_consequences": [],
+        "pending_consequences": [
+            {**item, "content": item["content"][:128]} for item in safe_pending
+        ],
         "reconstructed_subjective_traces": [],
         "details_omitted": True,
     }
-    prompt = _render(fallback)
+    prompt = _render(compact)
+    if len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION:
+        return prompt
+
+    # The only remaining way to respect the hard envelope bound is to withhold
+    # the whole carrier.  Never substitute a prefix: it would silently erase
+    # some roots while claiming the projection remains available.
+    compact["technical_projection"] = {
+        "formed": False,
+        "projection_status": "degraded",
+        "projection_available": False,
+        "root_count": projection["root_count"],
+        "carrier_text": "",
+        "carrier_unavailable_reason": "complete_carrier_exceeds_prompt_budget",
+    }
+    prompt = _render(compact)
     assert len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION
     return prompt

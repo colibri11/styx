@@ -7,10 +7,83 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
-## [Unreleased — prepared: styx-core 1.2.0 / styx-hermes 1.2.0 / OpenClaw 0.3.0]
+## [Unreleased — prepared: styx-core 1.3.0 / styx-hermes 1.3.0 / OpenClaw 0.4.0]
+
+Подготовлено, но не опубликовано: durable act residue и causal carrier всей
+валидированной сохраняющейся линии. Эти версии не означают наличие tag или
+release. Полный Docker closure gate пройден на реальных PostgreSQL и Ollama.
+
+### Добавлено
+
+- Additive migration `0010_act_residue_carrier.sql`: versioned outcome ledger
+  каждого terminal cognitive act, reducer provenance/evidence, causal
+  root/frontier и exact carrier coverage/status.
+- Canonical asynchronous reducer с bounded frozen input snapshot и исходом
+  `0..4` evidence-bound residues. Применение идемпотентно и атомарно; штатный
+  `no_residue` не создаёт ложную память.
+- Query-independent whole-line carrier с честными состояниями
+  `empty|provisional|ready|stale|degraded` и отдельным freshness fence
+  непосредственного predecessor.
+
+### Изменено
+
+- Tool result/error, уже увиденный внутри act, остаётся ordered same-act
+  evidence и не переиздаётся как future-world consequence. Explicit future
+  evidence остаётся отдельным lease/ack каналом до observation contract
+  следующей волны.
+- Affective coordinate выводится тем же canonical reducer-ом и входит в тот же
+  act lineage; отдельный post-commit affect observer сохранён только как
+  mixed-version legacy fallback.
+- Active carrier/reconstruction принимают только provenance
+  `validated_act_residue`. Legacy/unknown и ещё не поддержанные transform rows
+  сохраняются для audit/coverage, но не влияют на model-visible semantics.
+- Повтор `/cognition/commit` сравнивает hash bounded caller request:
+  идентичный retry остаётся duplicate, изменённый payload под тем же host key
+  получает `409`.
+
+### Надёжность и безопасность
+
+- Parent reduction применяется до child: порядок worker execution не может
+  инвертировать ancestry. Crash/orphan задачи восстанавливаются bounded retry
+  sweeper-ом и после исчерпания budget переходят в `terminal_failure`.
+- Timestamp, UUID, embedding, quarantine и техническая метаинформация не
+  меняют активную семантику carrier; невозможность вместить все roots закрывает
+  carrier целиком вместо выдачи частичного prefix.
+- Queue/result/error surfaces хранят безопасные координаты и коды вместо raw
+  dialogue; старые gatekeeper/consolidation/reinterpret writers ограждены от
+  мутации validated residues до полноценного causal rewiring.
+
+### Совместимость и миграция
+
+- Core и оба host adapter-а обновляются согласованно после migrations
+  `0009` и `0010`. Binary-only rollback на writer без reducer provenance и
+  outcome ledger не поддерживается.
+- Новые operational настройки: `STYX_COGNITION_REDUCTION_WAIT_S`,
+  `STYX_ACT_RESIDUE_RETRY_TICK_S`, `STYX_ACT_RESIDUE_MAX_ATTEMPTS`.
+
+### Гейты на текущем checkpoint
+
+- PostgreSQL targeted: **271 passed**; pure targeted: **80 passed**.
+- Docker build: green; isolated Docker core targeted: **277 passed**;
+  Hermes cognition hooks: **32 passed**.
+- OpenClaw `npm test`: green; Docker provider-neutral integration:
+  **5 passed / 3 expected skipped**; runtime inspect: plugin loaded/activated,
+  package 0.4.0 на OpenClaw 2026.8.2.
+- Focused final review: **ACCEPT**.
+- Полный external-model Docker core: **1762 passed / 16 skipped / 0 failed**
+  на real PostgreSQL + Ollama; четыре model-dependent skip соответствуют
+  контрактному `skip`/fail-open ответу модели, остальные — явные host-only и
+  provider-neutral ветки. Полный Docker Hermes: **230 passed / 0 failed**.
+- Wave 38 closure gates пройдены; tag/release не создавались.
+
+## [Prepared checkpoint — styx-core 1.2.0 / styx-hermes 1.2.0 / OpenClaw 0.3.0]
 
 Подготовлено, но не опубликовано: IAm v2 cognitive continuity. Указанные
 версии пакетов не означают наличие tag или release.
+
+Это промежуточный Wave 37 checkpoint. Текущий контракт 1.3.0 выше отменяет
+автоматическое переиздание same-act tool result/error как consequence и
+переносит affective reduction в общий canonical reducer.
 
 ### Добавлено
 

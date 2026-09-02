@@ -51,6 +51,14 @@ from .search_weights import SearchConfig
 # Postgres вернёт CheckViolation.
 MEMORIES_CONTENT_LIMIT = 2400
 
+# Wave 38 establishes these rows as members of the retained causal structure.
+# Legacy transform pipelines may read neither as candidates nor mutate them
+# until Wave 40 can atomically rewire the causal root/frontier.
+CAUSAL_REWIRE_REQUIRED_PROVENANCE = frozenset({
+    "validated_act_residue",
+    "validated_transform",
+})
+
 
 class ContentTooLongError(ValueError):
     """content превышает MEMORIES_CONTENT_LIMIT — нарушение инварианта.
@@ -377,6 +385,27 @@ class AgentScopedQueries:
         внутри которого семантическая точка вошла в линию агента.
         """
         return read_last_state_record(self._conn, self._agent_id)
+
+    def _assert_legacy_transform_sources(
+        self, memory_ids: list[uuid.UUID] | tuple[uuid.UUID, ...]
+    ) -> None:
+        """Deny legacy mutation of causal rows before root rewiring exists."""
+        if not memory_ids:
+            return
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT line_provenance FROM memories "
+                "WHERE agent_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+                (self._agent_id, list(memory_ids)),
+            )
+            protected = any(
+                row[0] in CAUSAL_REWIRE_REQUIRED_PROVENANCE
+                for row in cur.fetchall()
+            )
+        if protected:
+            raise ValueError(
+                "legacy transform cannot mutate a validated causal memory"
+            )
 
     def _latest_source_emotional_context(
         self, source_ids: list[uuid.UUID]
@@ -1151,6 +1180,8 @@ class AgentScopedQueries:
             "   AND embedding IS NOT NULL "
             "   AND memory_domain = 'subjective_trace' "
             "   AND line_eligible = true "
+            "   AND line_provenance NOT IN "
+            "       ('validated_act_residue','validated_transform') "
         )
         params: list[Any] = [qvec, self._agent_id]
         if exclude_id is not None:
@@ -1177,6 +1208,7 @@ class AgentScopedQueries:
 
         Не делает commit — caller управляет транзакцией.
         """
+        self._assert_legacy_transform_sources([memory_id])
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT memory_domain, line_eligible FROM memories "
@@ -1221,6 +1253,7 @@ class AgentScopedQueries:
 
         Не делает commit — caller управляет транзакцией.
         """
+        self._assert_legacy_transform_sources([new_id, existing_id])
         with self._conn.cursor() as cur:
             cur.execute(
                 "UPDATE memories AS existing "
@@ -1275,6 +1308,7 @@ class AgentScopedQueries:
 
         Не делает commit — caller управляет транзакцией.
         """
+        self._assert_legacy_transform_sources([new_id, existing_id])
         with self._conn.cursor() as cur:
             cur.execute(
                 "UPDATE memories SET embedding = %s "
@@ -2199,6 +2233,7 @@ class AgentScopedQueries:
         self, *, task_id: uuid.UUID, memory_id: uuid.UUID
     ) -> int:
         """INSERT application (status='pending_sleep'). Не делает commit."""
+        self._assert_legacy_transform_sources([memory_id])
         sql = (
             "INSERT INTO reinterpret_applications "
             "(task_id, memory_id, agent_id, status) "
@@ -2209,9 +2244,15 @@ class AgentScopedQueries:
             return int(cur.fetchone()[0])
 
     def memory_exists(self, memory_id: uuid.UUID) -> bool:
-        """Light check — есть ли memory с этим id под `agent_id`."""
+        """Light check for legacy reinterpret eligibility.
+
+        Canonical causal rows are intentionally reported unavailable until
+        reinterpret can atomically rewire their root/frontier (Wave 40).
+        """
         sql = (
-            "SELECT 1 FROM memories WHERE id = %s AND agent_id = %s LIMIT 1"
+            "SELECT 1 FROM memories WHERE id = %s AND agent_id = %s "
+            "  AND line_provenance NOT IN "
+            "      ('validated_act_residue','validated_transform') LIMIT 1"
         )
         with self._conn.cursor() as cur:
             cur.execute(sql, (memory_id, self._agent_id))
@@ -2248,7 +2289,9 @@ class AgentScopedQueries:
         sql = (
             "UPDATE memories SET content = %s, embedding = %s, "
             "  updated_at = now() "
-            "WHERE id = %s AND agent_id = %s"
+            "WHERE id = %s AND agent_id = %s "
+            "  AND line_provenance NOT IN "
+            "      ('validated_act_residue','validated_transform')"
         )
         with self._conn.cursor() as cur:
             cur.execute(
@@ -2358,6 +2401,8 @@ class AgentScopedQueries:
             "  AND superseded_by IS NULL "
             "  AND kind_src <> 'dialogue_consolidation_daily' "
             "  AND memory_domain = 'subjective_trace' AND line_eligible = true "
+            "  AND line_provenance NOT IN "
+            "      ('validated_act_residue','validated_transform') "
             "  AND embedding IS NOT NULL "
             "ORDER BY created_at ASC"
         )
@@ -2374,6 +2419,7 @@ class AgentScopedQueries:
                 "memory_consolidation_applications.source_ids — минимум 2 "
                 f"(получено {len(source_ids)})"
             )
+        self._assert_legacy_transform_sources(source_ids)
         sql = (
             "INSERT INTO memory_consolidation_applications "
             "(task_id, agent_id, source_ids, status) "
@@ -2415,7 +2461,9 @@ class AgentScopedQueries:
             "SELECT id, content, kind, kind_src, visibility, memory_domain, line_eligible, "
             "       superseded_by, embedding "
             "  FROM memories "
-            " WHERE id = ANY(%s) AND agent_id = %s"
+            " WHERE id = ANY(%s) AND agent_id = %s "
+            "   AND line_provenance NOT IN "
+            "       ('validated_act_residue','validated_transform')"
         )
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, (memory_ids, self._agent_id))
@@ -2444,6 +2492,7 @@ class AgentScopedQueries:
         metadata.consolidation хранит source_ids + count + application_id.
         Не делает commit.
         """
+        self._assert_legacy_transform_sources(source_ids)
         from psycopg.types.json import Jsonb
         metadata = {
             "consolidation": {
@@ -2510,6 +2559,7 @@ class AgentScopedQueries:
         AND superseded_by IS NULL. Idempotent — если уже superseded
         другим pipeline'ом, пропускаем. Возвращает rowcount.
         Не делает commit."""
+        self._assert_legacy_transform_sources(source_ids)
         sql = (
             "UPDATE memories SET superseded_by = %s, updated_at = now() "
             "WHERE id = ANY(%s) AND superseded_by IS NULL "
@@ -3462,7 +3512,9 @@ def worker_load_memory_for_reinterpret(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT id, agent_id, content, embedding "
-            "  FROM memories WHERE id = %s",
+            "  FROM memories WHERE id = %s "
+            "   AND line_provenance NOT IN "
+            "       ('validated_act_residue','validated_transform')",
             (memory_id,),
         )
         row = cur.fetchone()

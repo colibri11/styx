@@ -10,8 +10,9 @@ idempotent advancement, поэтому OpenClaw не деградирует pers
 legacy context engine.
 
 `ContextEngine.assemble` вызывает `/cognition/preturn` и добавляет один
-`<styx-cognitive-continuity>` block в порядке: technical will projection →
-current posture → pending feedback → reconstructed subjective traces.
+`<styx-cognitive-continuity>` block в порядке: whole-line causal carrier →
+continuity freshness → current posture → pending feedback → reconstructed
+subjective traces.
 OpenClaw AgentMessage возвращаются без нормализации: tool calls, multimodal
 parts и provider metadata остаются у host. Встроенный memory prompt OpenClaw
 добавляется ровно один раз рядом со Styx block.
@@ -28,9 +29,11 @@ Consequences выдаются по recoverable lease: fallback-повтор то
 заменяется данными другой session.
 
 Plugin передаёт bounded finalized projection до 64 ordered
-`call|result|error` events суммарно. Для каждого принятого result/error core
-создаёт consequence, добавляет до 32 explicit consequences и валидирует
-combined bound 96 без тихого suppression.
+`call|result|error` events суммарно. Result/error, уже увиденный внутри акта,
+остаётся same-act journal event и не возвращается следующему акту как новое
+последствие. Commit создаёт durable reduction outcome; canonical reducer
+асинхронно выводит 0..4 evidence-bound residues и перестраивает causal
+carrier. Повтор advancement key с изменённым bounded request получает `409`.
 
 Архитектурный контракт — в корневом `README.md` и `docs/HTTP_API.md`.
 

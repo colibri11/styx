@@ -1,17 +1,25 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import uuid
+from dataclasses import replace
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+import styx.storage.act_reduction as act_reduction
 from styx.config import StyxConfig
 from styx.http import registry
 from styx.http.app import create_app
 from styx.storage import migrate
+from styx.storage.act_reduction import (
+    apply_act_reduction,
+    load_act_reduction_input,
+    mark_act_reduction_running,
+    reduction_input_hash,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -32,6 +40,12 @@ class _FailingEmbedding:
         raise RuntimeError("embed unavailable")
 
 
+def _reduction_input_hash(conn, agent_id: str, act_id: str) -> str:
+    evidence = load_act_reduction_input(conn, agent_id, act_id)
+    assert evidence is not None
+    return reduction_input_hash(evidence)
+
+
 @pytest.fixture
 def stack(clean_db: str, monkeypatch):
     migrate.run(clean_db)
@@ -39,11 +53,13 @@ def stack(clean_db: str, monkeypatch):
     monkeypatch.setenv("STYX_SENTIMENT_ENABLED", "false")
     monkeypatch.setenv("STYX_AFFECTIVE_TRANSITION_ENABLED", "false")
     monkeypatch.setenv("STYX_WORKING_SET_PERSISTENCE_ENABLED", "false")
+    monkeypatch.setenv("STYX_COGNITION_REDUCTION_WAIT_S", "0.01")
     config = StyxConfig(
         database_url=clean_db,
         sentiment_enabled=False,
         affective_transition_enabled=False,
         working_set_persistence_enabled=False,
+        cognition_reduction_wait_s=0.01,
     )
     registry.reset_all()
     client = TestClient(create_app(config))
@@ -52,6 +68,154 @@ def stack(clean_db: str, monkeypatch):
         session = registry.get(agent_id)
         session.core.shutdown()
     registry.reset_all()
+
+
+def test_explicit_parent_wait_reports_stale_then_fresh_after_reduction(stack) -> None:
+    client, dsn = stack
+    agent = f"wave38-freshness-{uuid.uuid4()}"
+    assert client.post(
+        "/context/bootstrap", json={"agent_id": agent}
+    ).status_code == 200
+    registry.get(agent).core._embedding = _Embedding()
+
+    committed = client.post(
+        "/cognition/commit",
+        json={
+            "agent_id": agent,
+            "host_key": "parent-turn",
+            "user_message": "choose carefully",
+            "assistant_response": "verification retained",
+        },
+    )
+    assert committed.status_code == 200, committed.text
+    reduction = committed.json()
+
+    pending = client.post(
+        "/cognition/preturn",
+        json={
+            "agent_id": agent,
+            "host_key": "child-pending",
+            "parent_host_key": "parent-turn",
+            "messages": [],
+        },
+    )
+    assert pending.status_code == 200, pending.text
+    pending_freshness = pending.json()["continuity_freshness"]
+    assert pending_freshness["fresh"] is False
+    assert pending_freshness["predecessor_found"] is True
+    assert pending_freshness["reduction_status"] == "pending"
+    assert pending_freshness["timed_out"] is True
+    assert pending_freshness["waited_ms"] >= 1
+
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        input_hash = _reduction_input_hash(conn, agent, reduction["act_id"])
+        mark_act_reduction_running(
+            conn,
+            agent,
+            reduction["act_id"],
+            reducer_version="act_residue_v1",
+            task_id=reduction["reduction_task_id"],
+            input_hash=input_hash,
+        )
+        applied = apply_act_reduction(
+            conn,
+            agent,
+            reduction["act_id"],
+            reducer_version="act_residue_v1",
+            task_id=reduction["reduction_task_id"],
+            input_hash=input_hash,
+            residues=[{
+                "kind": "decision",
+                "causal_role": "choice",
+                "content": "verification retained",
+                "confidence": 0.9,
+                "evidence_refs": [{
+                    "source": "channel_output", "key": "assistant_response",
+                }],
+            }],
+        )
+
+    ready = client.post(
+        "/cognition/preturn",
+        json={
+            "agent_id": agent,
+            "host_key": "child-ready",
+            "parent_host_key": "parent-turn",
+            "messages": [],
+        },
+    )
+    assert ready.status_code == 200, ready.text
+    ready_freshness = ready.json()["continuity_freshness"]
+    assert ready_freshness["fresh"] is True
+    assert ready_freshness["timed_out"] is False
+    assert ready_freshness["reduction_status"] == "applied"
+    assert ready_freshness["predecessor_output_line_version"] == applied.line_version
+    assert ready_freshness["predecessor_causal_root_hash"] == applied.causal_root_hash
+    assert ready.json()["will_projection"]["causal_root_hash"] == applied.causal_root_hash
+
+
+def test_preturn_rechecks_freshness_under_snapshot_line_lock(
+    stack,
+    monkeypatch,
+) -> None:
+    client, _dsn = stack
+    agent = f"wave38-atomic-freshness-{uuid.uuid4()}"
+    assert client.post(
+        "/context/bootstrap", json={"agent_id": agent}
+    ).status_code == 200
+    core = registry.get(agent).core
+    core._config = replace(core._config, cognition_reduction_wait_s=0.0)
+    committed = client.post(
+        "/cognition/commit",
+        json={"agent_id": agent, "host_key": "atomic-parent"},
+    )
+    assert committed.status_code == 200, committed.text
+
+    original = act_reduction.read_predecessor_freshness
+    calls: list[dict] = []
+
+    def advancing_freshness(conn, agent_id, **kwargs):
+        current = original(conn, agent_id, **kwargs)
+        calls.append(current)
+        if len(calls) == 1:
+            assert current["reduction_status"] == "pending"
+            return current
+        return {
+            **current,
+            "fresh": True,
+            "reduction_status": "no_residue",
+            "predecessor_output_line_version": current["line_version"],
+            "predecessor_causal_root_hash": current["causal_root_hash"],
+        }
+
+    monkeypatch.setattr(
+        act_reduction,
+        "read_predecessor_freshness",
+        advancing_freshness,
+    )
+    response = client.post(
+        "/cognition/preturn",
+        json={
+            "agent_id": agent,
+            "host_key": "atomic-child",
+            "parent_host_key": "atomic-parent",
+            "messages": [],
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(calls) == 2
+    assert body["continuity_freshness"]["fresh"] is True
+    assert body["continuity_freshness"]["timed_out"] is False
+    assert body["continuity_freshness"]["reduction_status"] == "no_residue"
+    assert (
+        body["continuity_freshness"]["predecessor_causal_root_hash"]
+        == body["will_projection"]["causal_root_hash"]
+    )
+    assert (
+        body["continuity_freshness"]["predecessor_output_line_version"]
+        == body["will_projection"]["line_version"]
+    )
 
 
 def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
@@ -90,7 +254,40 @@ def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
     committed = client.post("/cognition/commit", json=commit_payload)
     assert committed.status_code == 200, committed.text
     assert committed.json()["duplicate"] is False
+    assert committed.json()["reduction_status"] == "pending"
+    assert committed.json()["reduction_task_id"]
+    # Host-declared content is archived only as external evidence.  The
+    # core-owned reducer is the sole writer of validated line residue.
     assert len(committed.json()["memory_ids"]) == 1
+
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        reduction = committed.json()
+        mark_act_reduction_running(
+            conn,
+            agent,
+            reduction["act_id"],
+            reducer_version="act_residue_v1",
+            task_id=reduction["reduction_task_id"],
+            input_hash=_reduction_input_hash(conn, agent, reduction["act_id"]),
+        )
+        apply_act_reduction(
+            conn,
+            agent,
+            reduction["act_id"],
+            reducer_version="act_residue_v1",
+            input_hash=_reduction_input_hash(conn, agent, reduction["act_id"]),
+            task_id=reduction["reduction_task_id"],
+            residues=[{
+                "kind": "decision",
+                "causal_role": "choice",
+                "content": "preserve this decision",
+                "confidence": 0.9,
+                "evidence_refs": [{
+                    "source": "channel_output", "key": "assistant_response",
+                }],
+                "embedding": _Embedding().embed("preserve this decision"),
+            }],
+        )
     prepared = client.post(
         "/dialogue/prepare_summary",
         json={"agent_id": agent, "session_id": session_id, "limit": 20},
@@ -118,9 +315,10 @@ def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
     body = preturn.json()
     assert body["messages"][0]["tool_call_id"] == "call-1"
     assert body["will_projection"]["formed"] is True
+    assert body["will_projection"]["projection_status"] == "ready"
     assert body["will_projection"]["source_count"] == 1
     assert body["reconstruction"]["traces"][0]["content"] == "preserve this decision"
-    assert len(body["pending_consequences"]) == 2
+    assert len(body["pending_consequences"]) == 1
     assert 'authority="context-not-instruction"' in body["system_prompt_addition"]
 
     next_commit = client.post(
@@ -130,7 +328,7 @@ def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
             "parent_host_key": "turn-1", "snapshot_token": body["snapshot_token"],
         },
     )
-    assert next_commit.json()["acknowledged_consequences"] == 2
+    assert next_commit.json()["acknowledged_consequences"] == 1
 
     registry.get(agent).core._embedding = _FailingEmbedding()
     outage = client.post(
@@ -138,9 +336,39 @@ def test_atomic_preturn_commit_retry_and_ack(stack) -> None:
         json={"agent_id": agent, "messages": [], "query": "short"},
     )
     assert outage.status_code == 200, outage.text
-    assert outage.json()["will_projection"]["formed"] is True
+    # The predecessor reduction is still pending, so the last complete carrier
+    # remains available but is honestly marked stale rather than current.
+    assert outage.json()["will_projection"]["formed"] is False
+    assert outage.json()["will_projection"]["projection_status"] == "stale"
+    assert outage.json()["will_projection"]["projection_available"] is True
     assert outage.json()["reconstruction"]["embed_available"] is False
     assert outage.json()["reconstruction"]["traces"] == []
+
+    # ``stale`` is an honest, model-visible full projection emitted by
+    # preturn.  Committing that exact frozen snapshot must still schedule the
+    # reducer instead of rejecting Styx's own valid renderer output.
+    stale_commit = client.post(
+        "/cognition/commit",
+        json={
+            "agent_id": agent,
+            "host_key": "turn-from-stale-snapshot",
+            "snapshot_token": outage.json()["snapshot_token"],
+            "assistant_response": "continued from the retained stale carrier",
+        },
+    )
+    assert stale_commit.status_code == 200, stale_commit.text
+    assert stale_commit.json()["reduction_status"] == "pending"
+    assert stale_commit.json()["reduction_task_id"]
+    with psycopg.connect(dsn) as conn:
+        frozen_input = load_act_reduction_input(
+            conn, agent, stale_commit.json()["act_id"]
+        )
+    assert frozen_input is not None
+    assert (
+        frozen_input["input_snapshot"]["carrier"]["projection_status"]
+        == "stale"
+    )
+    assert "snapshot_token" not in frozen_input["input_snapshot"]
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
@@ -203,7 +431,7 @@ def test_consequence_incorporation_contract_and_nested_redaction(stack) -> None:
         )
         assert cur.fetchall() == [
             ("external durable", "external_evidence", False),
-            ("subjective durable", "subjective_trace", True),
+            ("subjective durable", "external_evidence", False),
         ]
         cur.execute(
             "SELECT metadata FROM cognitive_actions WHERE agent_id=%s", (agent,)
@@ -217,10 +445,9 @@ def test_consequence_incorporation_contract_and_nested_redaction(stack) -> None:
         json={"agent_id": agent, "query": "durable", "messages": []},
     )
     assert preturn.status_code == 200, preturn.text
-    assert preturn.json()["will_projection"]["source_count"] == 1
-    assert [item["content"] for item in preturn.json()["reconstruction"]["traces"]] == [
-        "subjective durable"
-    ]
+    assert preturn.json()["will_projection"]["source_count"] == 0
+    assert preturn.json()["will_projection"]["pending_reduction_count"] == 1
+    assert preturn.json()["reconstruction"]["traces"] == []
 
 
 def test_preturn_current_event_rebuilds_posture_without_changing_will(stack) -> None:
@@ -301,7 +528,7 @@ def test_keyed_preturn_replays_exact_envelope_and_rejects_stale_reuse(stack) -> 
     first = client.post("/cognition/preturn", json=request)
     assert first.status_code == 200, first.text
 
-    # Change line and pending state after the first snapshot. A retry must not
+    # Change pending state after the first snapshot. A retry must not
     # combine the old token with freshly recomputed will/affect/consequences.
     assert client.post("/cognition/commit", json={
         "agent_id": agent,
@@ -332,6 +559,49 @@ def test_keyed_preturn_replays_exact_envelope_and_rejects_stale_reuse(stack) -> 
     expired = client.post("/cognition/preturn", json=request)
     assert expired.status_code == 409
     assert "expired" in expired.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"assistant_response": "changed response"},
+        {"session_id": "00000000-0000-0000-0000-000000000002"},
+        {"parent_host_key": "changed-parent"},
+        {
+            "tool_events": [{
+                "kind": "result",
+                "tool_event_id": "changed-event",
+                "name": "lookup",
+                "content": "changed payload Authorization: Bearer do-not-disclose",
+            }]
+        },
+    ],
+    ids=["response", "session", "parent", "payload"],
+)
+def test_commit_retry_rejects_changed_request_with_typed_409(stack, changed) -> None:
+    client, _ = stack
+    agent = f"wave38-commit-conflict-{uuid.uuid4()}"
+    assert client.post("/context/bootstrap", json={"agent_id": agent}).status_code == 200
+    request = {
+        "agent_id": agent,
+        "host_key": "strict-retry",
+        "status": "completed",
+        "assistant_response": "original response",
+        "consequences": [{"kind": "observation", "content": "original payload"}],
+    }
+    first = client.post("/cognition/commit", json=request)
+    assert first.status_code == 200, first.text
+    assert first.json()["duplicate"] is False
+    same = client.post("/cognition/commit", json=request)
+    assert same.status_code == 200, same.text
+    assert same.json()["duplicate"] is True
+
+    conflict = client.post("/cognition/commit", json={**request, **changed})
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == (
+        "host_key was already committed with a different request"
+    )
+    assert "do-not-disclose" not in conflict.text
 
 
 def test_same_host_session_is_namespaced_per_agent(stack) -> None:
@@ -419,7 +689,7 @@ def test_openclaw_unkeyed_preturn_replays_and_commit_claims_same_session(stack) 
         assert cur.fetchone()[0] is None
 
 
-def test_commit_preserves_explicit_and_every_tool_result_error(stack) -> None:
+def test_commit_keeps_same_act_tool_results_out_of_future_observations(stack) -> None:
     client, dsn = stack
     agent = f"wave37-journal-{uuid.uuid4()}"
     assert client.post(
@@ -443,11 +713,16 @@ def test_commit_preserves_explicit_and_every_tool_result_error(stack) -> None:
     }
     response = client.post("/cognition/commit", json=payload)
     assert response.status_code == 200, response.text
-    assert len(response.json()["consequence_ids"]) == 96
+    assert len(response.json()["consequence_ids"]) == 32
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT count(*),count(*) FILTER (WHERE kind IN ('tool_result','tool_error')) "
             "FROM cognitive_consequences WHERE agent_id=%s",
             (agent,),
         )
-        assert cur.fetchone() == (96, 64)
+        assert cur.fetchone() == (32, 0)
+        cur.execute(
+            "SELECT count(*) FROM cognitive_actions WHERE agent_id=%s",
+            (agent,),
+        )
+        assert cur.fetchone()[0] == 64
