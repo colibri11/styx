@@ -13,7 +13,7 @@
 
 ## 0. Breaking changes при апгрейде
 
-### Текущий переход: durable observations и migrations 0009–0011
+### Текущий переход: versioned causal graph и migrations 0009–0012
 
 Core и оба host adapter'а нужно обновлять как один rollout. Миграция
 `0009_cognitive_continuity.sql`:
@@ -50,6 +50,26 @@ Migration `0011_durable_observations.sql` эволюционирует суще�
 - вводит authenticated `POST /cognition/observations`, queue age/count
   observability и per-agent backpressure.
 
+Migration `0012_causal_rewiring.sql` переводит validated subjective line на
+versioned causal DAG:
+
+- canonical nodes становятся immutable; consolidation и reinterpretation
+  создают новый `validated_transform`, а не меняют исходный content;
+- `causal_operations` и versioned `memory_lineage` фиксируют exact input/root,
+  source coverage, active edge interval и идемпотентный outcome;
+- forgetting сначала пишет content-free tombstone, затем атомарно закрывает
+  старые edges и создаёт deterministic nearest-retained rewiring;
+- существующие Wave 38 residues аттестуются content-addressed backfill-ом,
+  прежние transforms остаются quarantined, root/frontier пересчитываются;
+- carrier-v1 cache инвалидируется и перестраивается из полного active
+  node+edge snapshot по carrier v2.
+
+`STYX_CAUSAL_FORGETTING_ENABLED=0` остаётся безопасным default. Включать его
+следует только после проверки нового carrier на реальных данных и выбора
+retention thresholds из `docs/CONFIGURATION.md`; отсутствие embedding,
+активная emotional cause lease или stale/degraded projection запрещают
+автоматическое забывание.
+
 Новый host path — `/cognition/preturn` перед model call и ровно один
 `/cognition/commit` после завершения tool loop. Commit несёт finalized channel
 projection, ordered `call|result|error`, `host_key`, declared parent и
@@ -78,7 +98,9 @@ auth, validation или `5xx`.
 2. Обновить checkout/пакеты, затем выполнить `.venv/bin/styx migrate` один раз.
 3. Перезапустить `styx-daemon`; reducer handler и retry sweeper работают в том
    же процессе. Проверить `/healthz` и наличие обоих cognition paths в
-   `/openapi.json`, включая `/cognition/observations`.
+   `/openapi.json`, включая `/cognition/observations`. Проверить, что
+   `/analytics?agent_id=...` содержит causal graph counters, а ready carrier
+   сообщает `causal_carrier_v2`.
 4. Обновить `styx-hermes` и OpenClaw plugin, затем перезапустить host
    процессы. Не оставлять mixed-version fallback постоянным режимом.
 5. Выполнить два последовательных хода с tool result. Для Hermes передавать
@@ -95,10 +117,10 @@ session-fenced snapshot, а `commitTurn` атомарно и идемпотен�
 принятый transcript turn. Hooks `agent_end`/`before_prompt_build` для finality
 не используются.
 
-Схема additive, но откат только binaries на старый writer после `0011`
+Схема additive, но откат только binaries на старый writer после `0012`
 семантически
-небезопасен: legacy writer не задаёт новые domain/eligibility/provenance поля
-явно и не создаёт reduction outcome.
+небезопасен: legacy writer не поддерживает immutable canonical nodes,
+operation ledger и versioned edges.
 Для rollback возвращайте согласованный snapshot БД либо сохраняйте новый core
 до завершения обратной миграции данных.
 

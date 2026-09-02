@@ -7,7 +7,57 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
-## [Unreleased — prepared: styx-core 1.4.0 / styx-hermes 1.4.0 / OpenClaw 0.5.0]
+## [Unreleased — prepared: styx-core 1.5.0 / styx-hermes 1.5.0 / OpenClaw 0.5.0]
+
+Подготовлено, но не опубликовано: versioned causal reduction, forgetting и
+nearest-retained rewiring. Версии не означают наличие tag или release.
+
+### Добавлено
+
+- Additive migration `0012_causal_rewiring.sql`: content-addressed immutable
+  causal nodes, durable operation ledger, versioned validated edge ledger и
+  content-free tombstones.
+- Детерминированный graph planner и единый transactional apply для canonical
+  consolidation, reinterpretation и forgetting с exact source/root/version
+  fences.
+- Opt-in conservative forgetting scheduler, content-free lineage explain и
+  causal graph counters в per-agent analytics.
+
+### Изменено
+
+- Whole-line carrier v2 строится из полного current active node+edge snapshot.
+  Legacy/quarantined history остаётся диагностической; applied transforms
+  становятся model-visible без дублирования superseded source text.
+- Canonical consolidation/reinterpretation создают новый node и закрывают
+  старые edges/status в одной операции; legacy writers остаются только для
+  legacy rows.
+- Upgrade с Wave 38 пересчитывает root/frontier SQL-эквивалентом pure
+  алгоритма и инвалидирует carrier-v1 cache.
+
+### Надёжность и безопасность
+
+- Self/cross-agent/duplicate edges, cycle, stale CAS и changed idempotency
+  request отвергаются. Повреждённый edge snapshot закрывает carrier целиком.
+- Tombstone обязан предшествовать forgetting; physical delete active
+  canonical node запрещён. Active emotional cause lease защищает связанный
+  residue, отсутствие embedding не трактуется как низкая релевантность.
+- Counterfactual fixtures подтверждают сохранение downstream choice при
+  полностью удержанном successor-вкладе и изменение choice при исчезновении
+  уникального не удержанного вклада; UUID/time/embedding остаются sham.
+
+### Проверка текущего checkpoint
+
+- Host core release gate: **1769 passed / 48 expected skipped / 0 failed**.
+- Fresh Docker core на real PostgreSQL + Ollama `.32`: **1813 passed / 16
+  expected skipped / 0 failed**; styx-hermes: **231 passed / 0 failed**.
+- OpenClaw contract suite green; provider-neutral host integration:
+  **5 passed / 3 expected skipped**. Hermes canonical preturn smoke green.
+- Первый широкий host-run исчерпал Docker disk на PostgreSQL WAL; удалён
+  только rebuildable build cache, named volumes сохранены, recovery завершён.
+  Повторные чистые host/Docker gates выше прошли без infra errors.
+- Push/tag/release не выполнялись.
+
+## [Prepared checkpoint — styx-core 1.4.0 / styx-hermes 1.4.0 / OpenClaw 0.5.0]
 
 Подготовлено, но не опубликовано: durable perception/action feedback. Версии
 не означают наличие tag или release.

@@ -1687,9 +1687,39 @@ links (relation='co_retrieved' Hebbian), decay projections.
   "co_retrieval_links": [
     {"target_memory_id": "uuid", "target_preview": "...", "weight": 1.5, "...": "..."}
   ],
+  "causal_lineage": {
+    "node": {
+      "line_provenance": "validated_transform",
+      "line_status": "active",
+      "causal_node_hash": "sha256",
+      "causal_node_kind": "reinterpretation",
+      "causal_payload_version": "causal_node_v1",
+      "causal_operation_id": "uuid"
+    },
+    "operation": {
+      "operation_kind": "reinterpret",
+      "status": "applied",
+      "input_line_version": 7,
+      "output_line_version": 8,
+      "source_count": 1,
+      "target_count": 1
+    },
+    "edges": [{
+      "transform": "reinterpreted",
+      "valid_from_line_version": 8,
+      "valid_to_line_version": null,
+      "edge_hash": "sha256"
+    }],
+    "tombstone": null
+  },
   "computed_at": "2026-05-05T12:00:00Z"
 }
 ```
+
+`causal_lineage` содержит только технические operation/hash/version
+coordinates; forgotten raw content через tombstone не восстанавливается.
+Для legacy memory поле может содержать quarantined node без operation/edges
+или быть `null`.
 
 **Errors:**
 - 404 — memory не найдено для agent_id.
@@ -1763,7 +1793,18 @@ Per-agent counts + global totals + pending indexing. Caller-scoped:
     "documents_count": 12,
     "chunks_count": 348,
     "dialogue_messages_count": 4521,
-    "total_storage_bytes": 24518
+    "total_storage_bytes": 24518,
+    "causal_graph": {
+      "active_nodes": 14,
+      "active_roots": 2,
+      "superseded_nodes": 3,
+      "forgotten_nodes": 2,
+      "active_edges": 13,
+      "rewired_edges": 1,
+      "tombstones": 2,
+      "pending_operations": 0,
+      "failed_operations": 0
+    }
   }],
   "global": {
     "total_memories": 1247,

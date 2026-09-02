@@ -2182,6 +2182,7 @@ class StyxMemoryCore:
                 "weight": float(link.get("weight") or 1.0),
                 "last_reinforced": last_re if last_re else None,
             })
+        causal_lineage = self._queries.explain_causal_lineage(memory_id=mid)
 
         from datetime import datetime, timezone
         return ExplainLifetimeOutcome(
@@ -2250,6 +2251,7 @@ class StyxMemoryCore:
             decay=decay_block,
             recall_history=history_rows,
             co_retrieval_links=co_links,
+            causal_lineage=causal_lineage,
             computed_at=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -4132,6 +4134,7 @@ class ExplainLifetimeOutcome:
     decay: dict[str, Any]
     recall_history: list[dict[str, Any]] | None
     co_retrieval_links: list[dict[str, Any]]
+    causal_lineage: dict[str, Any] | None
     computed_at: str
 
 

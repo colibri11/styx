@@ -114,6 +114,7 @@ def explain_lifetime(
         decay=outcome.decay,
         recall_history=outcome.recall_history,
         co_retrieval_links=outcome.co_retrieval_links,
+        causal_lineage=outcome.causal_lineage,
         computed_at=outcome.computed_at,
     )
     return populate_llm_text(response, "explain", wrap=wrap)

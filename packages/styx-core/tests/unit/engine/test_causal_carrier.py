@@ -7,6 +7,7 @@ from copy import deepcopy
 import pytest
 
 from styx.engine.causal_carrier import ALGORITHM_VERSION, build_causal_carrier
+from styx.engine.causal_graph import causal_edge_hash, causal_node_hash
 
 
 def _row(
@@ -585,3 +586,144 @@ def test_limits_reject_unbounded_or_unrenderable_contracts() -> None:
         build_causal_carrier([], max_carrier_chars=511)
     with pytest.raises(ValueError, match="max_excerpt_chars"):
         build_causal_carrier([], max_excerpt_chars=0)
+
+
+def test_carrier_v2_accepts_active_transform_and_hashes_nodes_plus_edges() -> None:
+    first_hash = causal_node_hash(
+        node_kind="act_residue", content="kept premise", causal_role="choice",
+        predecessor_hashes=[],
+    )
+    second_hash = causal_node_hash(
+        node_kind="reinterpretation", content="revised conclusion",
+        causal_role="reinterpreted", predecessor_hashes=[first_hash],
+    )
+    rows = [
+        {
+            **_row("first-id", "kept premise", created_at="2026-09-01T00:00:00Z"),
+            "causal_node_hash": first_hash,
+            "causal_node_kind": "act_residue",
+            "line_status": "active",
+        },
+        {
+            "id": "second-id",
+            "content": "revised conclusion",
+            "embedding": None,
+            "created_at": "2026-09-02T00:00:00Z",
+            "line_provenance": "validated_transform",
+            "causal_node_hash": second_hash,
+            "causal_node_kind": "reinterpretation",
+            "line_status": "active",
+            "seq": 2,
+        },
+    ]
+    edges = [{
+        "source_memory_id": "first-id",
+        "target_memory_id": "second-id",
+        "transform": "retained_rewire",
+        "source_node_hash": first_hash,
+        "target_node_hash": second_hash,
+        "edge_hash": causal_edge_hash(
+            source_hash=first_hash, target_hash=second_hash,
+            relation="retained_rewire",
+        ),
+    }]
+    result = build_causal_carrier(rows, edges=edges)
+
+    assert result["projection_status"] == "ready"
+    assert result["projection_available"] is True
+    assert result["coverage_count"] == 3
+    assert result["covered_node_count"] == 2
+    assert result["diagnostics"]["active_edge_count"] == 1
+    assert "revised conclusion" in result["carrier_text"]
+
+    changed_relation = [{
+        **edges[0],
+        "transform": "incorporated",
+        "edge_hash": causal_edge_hash(
+            source_hash=first_hash, target_hash=second_hash,
+            relation="incorporated",
+        ),
+    }]
+    changed = build_causal_carrier(rows, edges=changed_relation)
+    assert changed["coverage_hash"] != result["coverage_hash"]
+
+
+def test_carrier_v2_semantics_are_uuid_timestamp_embedding_and_seq_neutral() -> None:
+    hashes = [
+        causal_node_hash(
+            node_kind="act_residue", content=content, causal_role="choice",
+            predecessor_hashes=[],
+        )
+        for content in ("left", "right")
+    ]
+
+    def snapshot(prefix: str, *, later: bool, reverse_seq: bool):
+        ids = [f"{prefix}-a", f"{prefix}-b"]
+        rows = [
+            {
+                **_row(
+                    ids[index], content,
+                    created_at=(
+                        "2036-01-01T00:00:00Z" if later
+                        else "2026-01-01T00:00:00Z"
+                    ),
+                    seq=(2 - index if reverse_seq else index + 1),
+                    embedding=[0.0, 1.0] if later else [1.0, 0.0],
+                ),
+                "causal_node_hash": hashes[index],
+                "causal_node_kind": "act_residue",
+                "line_status": "active",
+            }
+            for index, content in enumerate(("left", "right"))
+        ]
+        edge = [{
+            "source_memory_id": ids[0], "target_memory_id": ids[1],
+            "transform": "incorporated", "source_node_hash": hashes[0],
+            "target_node_hash": hashes[1],
+            "edge_hash": causal_edge_hash(
+                source_hash=hashes[0], target_hash=hashes[1],
+                relation="incorporated",
+            ),
+        }]
+        return build_causal_carrier(rows, edges=edge)
+
+    first = snapshot("one", later=False, reverse_seq=False)
+    second = snapshot("two", later=True, reverse_seq=True)
+    assert first["coverage_hash"] == second["coverage_hash"]
+    assert first["root_coverage_hash"] == second["root_coverage_hash"]
+    assert first["carrier_text"] == second["carrier_text"]
+
+
+def test_carrier_v2_withholds_corrupt_edge_snapshot() -> None:
+    node_hashes = [
+        causal_node_hash(
+            node_kind="act_residue", content=content, causal_role="choice",
+            predecessor_hashes=[],
+        )
+        for content in ("cause", "effect")
+    ]
+    rows = [
+        {
+            **_row(
+                str(index), content, seq=index + 1,
+                created_at="2026-09-02T00:00:00Z",
+            ),
+            "causal_node_hash": node_hashes[index],
+            "causal_node_kind": "act_residue",
+            "line_status": "active",
+        }
+        for index, content in enumerate(("cause", "effect"))
+    ]
+    edge = [{
+        "source_memory_id": "0", "target_memory_id": "1",
+        "transform": "incorporated", "source_node_hash": node_hashes[0],
+        "target_node_hash": node_hashes[1], "edge_hash": "f" * 64,
+    }]
+
+    result = build_causal_carrier(rows, edges=edge)
+
+    assert result["projection_status"] == "degraded"
+    assert result["projection_available"] is False
+    assert result["carrier_text"] == ""
+    assert result["coverage_count"] == 3
+    assert result["diagnostics"]["edge_integrity_error_count"] == 1

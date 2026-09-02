@@ -24,18 +24,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Iterable, Literal, Mapping, Sequence, TypedDict
 
+from styx.engine.causal_graph import causal_edge_hash
+
 ProjectionStatus = Literal["empty", "provisional", "ready", "degraded"]
 
-ALGORITHM_VERSION = "causal_carrier_v1"
+ALGORITHM_VERSION = "causal_carrier_v2"
 DEFAULT_MAX_SUPPORTS = 8
 DEFAULT_MAX_CARRIER_CHARS = 6_000
 DEFAULT_MAX_EXCERPT_CHARS = 600
 MAX_EMBEDDING_DIMENSIONS = 4_096
 
-# Wave 38 has exactly one active provenance.  Transform/consolidation rows are
-# retained by storage for forward-compatible audit, but remain quarantined until
-# causal rewiring is implemented in Wave 40.
-VALIDATED_ACT_PROVENANCE = frozenset({"validated_act_residue"})
+VALIDATED_ACT_PROVENANCE = frozenset({
+    "validated_act_residue", "validated_transform",
+})
 LEGACY_UNKNOWN_PROVENANCE = frozenset(
     {"", "legacy", "legacy_unknown", "provenance_unknown"}
 )
@@ -117,6 +118,9 @@ class _Trace:
     affect_hash: str
     classification: Literal["validated", "quarantine"]
     unfenced_validated: bool
+    causal_node_hash: str | None
+    causal_node_kind: str | None
+    line_status: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,9 +223,21 @@ def _normalize_trace(row: Mapping[str, Any]) -> _Trace:
     provenance = _text(row.get("line_provenance")).strip().lower()
     act_id_text = _text(row.get("cognitive_act_id")).strip()
     act_id = act_id_text or None
+    node_hash_text = _text(row.get("causal_node_hash")).strip().lower()
+    node_hash = node_hash_text or None
+    node_kind_text = _text(row.get("causal_node_kind")).strip().lower()
+    node_kind = node_kind_text or None
+    status_text = _text(row.get("line_status")).strip().lower()
+    line_status = status_text or None
     raw_role = row.get("causal_role")
     if raw_role is None:
         raw_role = row.get("residue_causal_role")
+    if raw_role is None and provenance == "validated_transform":
+        raw_role = {
+            "consolidation": "consolidated",
+            "reinterpretation": "reinterpreted",
+            "carrier_reduction": "carrier_reduction",
+        }.get(node_kind or "", "reduction")
     causal_role = _text(raw_role or "residue").strip().lower()
     raw_predecessors = row.get("predecessor_ids")
     if raw_predecessors is None:
@@ -255,13 +271,27 @@ def _normalize_trace(row: Mapping[str, Any]) -> _Trace:
     vector, supplied, invalid = _embedding(row.get("embedding"))
 
     claims_validation = provenance in VALIDATED_ACT_PROVENANCE
-    validated = bool(
-        claims_validation
-        and act_id is not None
-        and source_seq is not None
-        and residue_ordinal is not None
-        and causal_role in ACT_RESIDUE_CAUSAL_ROLES
+    canonical_active = bool(
+        node_hash is not None and len(node_hash) == 64 and line_status == "active"
     )
+    if provenance == "validated_transform":
+        validated = bool(
+            canonical_active
+            and source_seq is not None
+            and causal_role in REDUCTION_CAUSAL_ROLES
+        )
+        if residue_ordinal is None:
+            residue_ordinal = 0
+            ordinal_invalid = False
+    else:
+        validated = bool(
+            claims_validation
+            and act_id is not None
+            and source_seq is not None
+            and residue_ordinal is not None
+            and causal_role in ACT_RESIDUE_CAUSAL_ROLES
+            and (line_status in {None, "active"})
+        )
     classification: Literal["validated", "quarantine"] = (
         "validated" if validated else "quarantine"
     )
@@ -291,6 +321,9 @@ def _normalize_trace(row: Mapping[str, Any]) -> _Trace:
         affect_hash=_canonical_value_hash(row.get("residue_affect") or {}),
         classification=classification,
         unfenced_validated=claims_validation and not validated,
+        causal_node_hash=node_hash,
+        causal_node_kind=node_kind,
+        line_status=line_status,
     )
 
 
@@ -298,6 +331,11 @@ def _trace_sort_key(trace: _Trace) -> tuple[int, int, str, str, str, str, str]:
     # Source sequence is the primary retained-line coordinate.  Timestamp and
     # embedding are audit/retrieval coordinates and cannot reorder active
     # semantics.  Ordinal is explicit so sibling residues remain deterministic.
+    if trace.causal_node_hash is not None:
+        return (
+            0, 0, "", trace.causal_node_hash, trace.content_hash,
+            trace.line_provenance, trace.causal_role,
+        )
     return (
         trace.source_seq if trace.source_seq is not None else 2**63 - 1,
         trace.residue_ordinal if trace.residue_ordinal is not None else 2**15 - 1,
@@ -309,7 +347,9 @@ def _trace_sort_key(trace: _Trace) -> tuple[int, int, str, str, str, str, str]:
     )
 
 
-def _coverage_hash(traces: Sequence[_Trace]) -> str:
+def _coverage_hash(
+    traces: Sequence[_Trace], edges: Sequence[Mapping[str, Any]] = (),
+) -> str:
     """Hash only coordinates that can change retained causal semantics.
 
     Capture time and embedding are deliberately absent.  They remain useful
@@ -319,18 +359,43 @@ def _coverage_hash(traces: Sequence[_Trace]) -> str:
     digest = hashlib.sha256()
     digest.update(f"{ALGORITHM_VERSION}\n{len(traces)}\n".encode())
     for trace in traces:
-        leaf = {
-            "cognitive_act_id": trace.cognitive_act_id,
-            "content_hash": trace.content_hash,
-            "id": trace.trace_id,
-            "line_provenance": trace.line_provenance,
-            "causal_role": trace.causal_role,
-            "predecessor_ids": trace.predecessor_ids,
-            "root_id": trace.root_id,
-            "seq": trace.source_seq,
-            "residue_ordinal": trace.residue_ordinal,
-            "affect_hash": trace.affect_hash,
-        }
+        if trace.causal_node_hash is not None:
+            leaf = {
+                "causal_node_hash": trace.causal_node_hash,
+                "causal_node_kind": trace.causal_node_kind,
+                "causal_role": trace.causal_role,
+                "line_provenance": trace.line_provenance,
+                "line_status": trace.line_status,
+            }
+        else:
+            leaf = {
+                "cognitive_act_id": trace.cognitive_act_id,
+                "content_hash": trace.content_hash,
+                "id": trace.trace_id,
+                "line_provenance": trace.line_provenance,
+                "causal_role": trace.causal_role,
+                "predecessor_ids": trace.predecessor_ids,
+                "root_id": trace.root_id,
+                "seq": trace.source_seq,
+                "residue_ordinal": trace.residue_ordinal,
+                "affect_hash": trace.affect_hash,
+            }
+        encoded = json.dumps(
+            leaf, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    edge_leaves = sorted(
+        ({
+            "relation": _text(edge.get("transform") or edge.get("relation")),
+            "source_node_hash": _text(edge.get("source_node_hash")),
+            "target_node_hash": _text(edge.get("target_node_hash")),
+        } for edge in edges),
+        key=lambda item: (
+            item["source_node_hash"], item["target_node_hash"], item["relation"]
+        ),
+    )
+    for leaf in edge_leaves:
         encoded = json.dumps(
             leaf, ensure_ascii=True, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -468,11 +533,26 @@ def _root_coverage_hash(
     digest.update(f"{ALGORITHM_VERSION}:roots:{len(frontier)}\n".encode())
     for root in frontier:
         covered_leaves = []
-        for trace_id in sorted(root_ancestry.get(root.trace_id, frozenset())):
-            trace = by_id.get(trace_id)
-            covered_leaves.append(
-                {
-                    "id": trace_id,
+        covered = [
+            by_id.get(trace_id)
+            for trace_id in root_ancestry.get(root.trace_id, frozenset())
+        ]
+        covered.sort(key=lambda trace: (
+            trace.causal_node_hash if trace is not None else "",
+            trace.content_hash if trace is not None else "",
+            trace.trace_id if trace is not None else "",
+        ))
+        for trace in covered:
+            if trace is not None and trace.causal_node_hash is not None:
+                covered_leaves.append({
+                    "causal_node_hash": trace.causal_node_hash,
+                    "causal_node_kind": trace.causal_node_kind,
+                    "line_provenance": trace.line_provenance,
+                    "causal_role": trace.causal_role,
+                })
+            else:
+                covered_leaves.append({
+                    "id": trace.trace_id if trace is not None else None,
                     "content_hash": trace.content_hash if trace is not None else None,
                     "line_provenance": (
                         trace.line_provenance if trace is not None else None
@@ -490,15 +570,21 @@ def _root_coverage_hash(
                         trace.residue_ordinal if trace is not None else None
                     ),
                     "affect_hash": trace.affect_hash if trace is not None else None,
-                }
-            )
-        item = {
-            "root_id": root.trace_id,
-            "root_content_hash": root.content_hash,
-            "line_root": root.root_id,
-            "causal_role": root.causal_role,
-            "covered_leaves": covered_leaves,
-        }
+                })
+        if root.causal_node_hash is not None:
+            item = {
+                "root_node_hash": root.causal_node_hash,
+                "causal_role": root.causal_role,
+                "covered_leaves": covered_leaves,
+            }
+        else:
+            item = {
+                "root_id": root.trace_id,
+                "root_content_hash": root.content_hash,
+                "line_root": root.root_id,
+                "causal_role": root.causal_role,
+                "covered_leaves": covered_leaves,
+            }
         encoded = json.dumps(
             item, ensure_ascii=True, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -645,8 +731,13 @@ def _support(
         ),
         "covered_count": len(covered),
         "covered_hash": _ids_hash(covered),
-        "source_seq": trace.source_seq or 0,
-        "residue_ordinal": trace.residue_ordinal or 0,
+        "source_seq": (
+            candidate.causal_rank + 1
+            if trace.causal_node_hash is not None else trace.source_seq or 0
+        ),
+        "residue_ordinal": (
+            0 if trace.causal_node_hash is not None else trace.residue_ordinal or 0
+        ),
     }
 
 
@@ -711,6 +802,7 @@ def _render_carrier(
 def build_causal_carrier(
     rows: Iterable[Mapping[str, Any]],
     *,
+    edges: Iterable[Mapping[str, Any]] = (),
     max_supports: int = DEFAULT_MAX_SUPPORTS,
     max_carrier_chars: int = DEFAULT_MAX_CARRIER_CHARS,
     max_excerpt_chars: int = DEFAULT_MAX_EXCERPT_CHARS,
@@ -735,9 +827,58 @@ def build_causal_carrier(
     if max_excerpt_chars < 1:
         raise ValueError("max_excerpt_chars must be at least 1")
 
-    all_traces = sorted((_normalize_trace(row) for row in rows), key=_trace_sort_key)
-    coverage_hash = _coverage_hash(all_traces)
-    coverage_count = len(all_traces)
+    row_list = [dict(row) for row in rows]
+    edge_list = [dict(edge) for edge in edges]
+    active_ids = {
+        _text(row.get("id")) for row in row_list
+        if _text(row.get("line_status")) in {"", "active"}
+    }
+    active_node_hashes = {
+        _text(row.get("id")): _text(row.get("causal_node_hash"))
+        for row in row_list
+        if _text(row.get("id")) in active_ids
+        and _text(row.get("causal_node_hash"))
+    }
+    predecessor_map: dict[str, set[str]] = {}
+    active_edges: list[dict[str, Any]] = []
+    edge_integrity_error_count = 0
+    seen_edges: set[tuple[str, str, str]] = set()
+    for edge in edge_list:
+        source = _text(edge.get("source_memory_id") or edge.get("source_id"))
+        target = _text(edge.get("target_memory_id") or edge.get("target_id"))
+        relation = _text(edge.get("transform") or edge.get("relation"))
+        coordinate = (source, target, relation)
+        source_hash = active_node_hashes.get(source)
+        target_hash = active_node_hashes.get(target)
+        valid = bool(
+            source_hash
+            and target_hash
+            and source != target
+            and coordinate not in seen_edges
+            and _text(edge.get("source_node_hash")) == source_hash
+            and _text(edge.get("target_node_hash")) == target_hash
+            and _text(edge.get("edge_hash")) == causal_edge_hash(
+                source_hash=source_hash,
+                target_hash=target_hash,
+                relation=relation,
+            )
+        )
+        seen_edges.add(coordinate)
+        if not valid:
+            edge_integrity_error_count += 1
+            continue
+        predecessor_map.setdefault(target, set()).add(source)
+        active_edges.append(edge)
+    for row in row_list:
+        if _text(row.get("causal_node_hash")):
+            row["predecessor_ids"] = sorted(
+                predecessor_map.get(_text(row.get("id")), set())
+            )
+    all_traces = sorted(
+        (_normalize_trace(row) for row in row_list), key=_trace_sort_key
+    )
+    coverage_hash = _coverage_hash(all_traces, edge_list)
+    coverage_count = len(all_traces) + len(edge_list)
     empty_root_hash = _root_coverage_hash([], {}, [])
     if not all_traces:
         return {
@@ -781,6 +922,9 @@ def build_causal_carrier(
                 "selected_support_count": 0,
                 "rendered_root_count": 0,
                 "carrier_clipped": False,
+                "active_edge_count": len(edge_list),
+                "validated_active_edge_count": len(active_edges),
+                "edge_integrity_error_count": edge_integrity_error_count,
             },
         }
 
@@ -877,6 +1021,7 @@ def build_causal_carrier(
         + dangling_count
         + ambiguous_count
         + duplicate_id_count
+        + edge_integrity_error_count
         + (0 if root_coverage_complete else 1)
     )
     if structural_errors:
@@ -897,6 +1042,10 @@ def build_causal_carrier(
             max_chars=max_carrier_chars,
         )
     else:
+        carrier_text, rendered_count, clipped = "", 0, False
+    if edge_integrity_error_count:
+        # A carrier assembled from an inconsistent ledger would invent a
+        # causal topology.  Keep only content-free diagnostics until repair.
         carrier_text, rendered_count, clipped = "", 0, False
     if rendered_count != root_count and status != "degraded":
         status = "degraded"
@@ -958,6 +1107,9 @@ def build_causal_carrier(
             "selected_support_count": len(supports),
             "rendered_root_count": rendered_count,
             "carrier_clipped": clipped,
+            "active_edge_count": len(edge_list),
+            "validated_active_edge_count": len(active_edges),
+            "edge_integrity_error_count": edge_integrity_error_count,
         },
     }
 

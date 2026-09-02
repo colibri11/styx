@@ -282,6 +282,30 @@ def build_worker(config: StyxConfig) -> LlmWorker:
             fn=_memory_consolidation_apply_tick,
         )
 
+    # Wave 40 — conservative semantic forgetting.  Disabled by default;
+    # when enabled it is still gated by idle-agent, ready-carrier, age,
+    # relevance, embedding and active-cause checks.
+    if config.causal_forgetting_enabled:
+        from styx.workers.sweep.causal_forgetting import (
+            run_causal_forgetting_sweep,
+        )
+
+        forgetting_config = config.causal_forgetting_config()
+
+        def _causal_forgetting_tick(conn) -> None:
+            summary = run_causal_forgetting_sweep(
+                conn, config=forgetting_config,
+            )
+            conn.commit()
+            if summary.applied_operations or summary.errors:
+                log.info("causal forgetting sweep: %s", summary)
+
+        worker.register_periodic_task(
+            "causal_forgetting_sweeper",
+            interval_s=config.causal_forgetting_tick_s,
+            fn=_causal_forgetting_tick,
+        )
+
     # Defect-fix A — async embed chunks большого документа. file-ingest
     # большого документа INSERT'ит chunks с embedding=NULL и enqueue'ит
     # эту задачу; handler embed'ит chunks (не LLM-задача — только

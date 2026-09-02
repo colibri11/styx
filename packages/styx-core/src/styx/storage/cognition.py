@@ -328,13 +328,30 @@ def ensure_will_projection(
         cur.execute(
             "SELECT id,seq,role,kind,content,embedding,created_at,updated_at,"
             " line_provenance,cognitive_act_id,residue_ordinal,residue_causal_role,"
-            " residue_predecessors,residue_line_root_hash,residue_affect "
+            " residue_predecessors,residue_line_root_hash,residue_affect,"
+            " causal_node_hash,causal_node_kind,line_status "
             "FROM memories WHERE agent_id=%s "
             "  AND memory_domain='subjective_trace' AND line_eligible=true "
-            "  AND superseded_by IS NULL ORDER BY seq ASC",
+            "  AND superseded_by IS NULL "
+            "  AND (line_provenance NOT IN "
+            "       ('validated_act_residue','validated_transform') "
+            "       OR line_status='active') ORDER BY seq ASC",
             (agent_id,),
         )
         rows = list(cur.fetchall())
+        cur.execute(
+            "SELECT edge.source_memory_id,edge.target_memory_id,edge.transform,"
+            " edge.source_node_hash,edge.target_node_hash,edge.edge_hash "
+            "FROM memory_lineage edge "
+            "JOIN memories source ON source.agent_id=edge.agent_id "
+            " AND source.id=edge.source_memory_id AND source.line_status='active' "
+            "JOIN memories target ON target.agent_id=edge.agent_id "
+            " AND target.id=edge.target_memory_id AND target.line_status='active' "
+            "WHERE edge.agent_id=%s AND edge.edge_provenance='validated' "
+            "AND edge.valid_to_line_version IS NULL ORDER BY edge.edge_hash",
+            (agent_id,),
+        )
+        graph_edges = list(cur.fetchall())
 
         carrier_rows = [
             {
@@ -345,6 +362,7 @@ def ensure_will_projection(
         ]
         carrier = build_causal_carrier(
             carrier_rows,
+            edges=graph_edges,
             max_supports=max(1, support_limit),
         )
 
@@ -376,7 +394,7 @@ def ensure_will_projection(
         formed = bool(
             effective_status == "ready"
             and projection_available
-            and carrier["coverage_count"] == len(rows)
+            and carrier["coverage_count"] == len(rows) + len(graph_edges)
         )
         carrier_payload = {
             "base_projection_status": base_status,
@@ -411,7 +429,7 @@ def ensure_will_projection(
                 agent_id,
                 version,
                 formed,
-                len(rows),
+                carrier["coverage_count"],
                 source_hash,
                 _vector_literal(projection_vector),
                 Jsonb(supports),
@@ -436,7 +454,7 @@ def ensure_will_projection(
         "formed": formed,
         "technical_projection": True,
         "line_version": version,
-        "source_count": len(rows),
+        "source_count": carrier["coverage_count"],
         "source_hash": source_hash,
         "supports": supports,
         "computation_version": WILL_COMPUTATION_VERSION,

@@ -53,8 +53,8 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 | Вклад всей валидированной live-линии | versioned, query-independent causal carrier в `will_projection` | инженерная проекция; не доказательство воли/сознания |
 | Дневник, внешнее свидетельство и субъектный след не смешиваются | memory domains, `line_eligible`, selective gatekeeper | граница данных Styx |
 | Причинная эмоциональная динамика влияет до языка | event/state journal, recall resonance, bounded cognitive posture | реализация общей динамики траектории из [Philosophy §VIII][silicon] |
-| Переосмысление сохраняет audit-историю | `engine/reinterpret.py::blend_embeddings` | weighted blend — engineering policy Styx |
-| Редукция и глубина хранения | relevance eviction, consolidation, active/hot/long tiers, decay | engineering policy Styx |
+| Переосмысление сохраняет audit-историю | immutable transform node + versioned causal edges | reduction policy Styx |
+| Редукция и глубина хранения | causal consolidation/forgetting, tombstones, active/hot/long tiers | engineering policy Styx |
 | Работа между model calls | background workers и periodic sweepers | реализация сохраняющегося контура |
 | Cross-agent связи | shared knowledge graph с origin `agent_id` | инженерная модель; не социальная верификация личности |
 | Контроль данных оператором | self-hosted PG + Ollama, host-agnostic daemon | продуктовая политика Styx |
@@ -85,11 +85,11 @@ daemon по HTTP. Один daemon обслуживает несколько `age
   (`POST /ingest_experience` принимает payload с `kind_src` enum'ом,
   расширяемым), но конкретных audio/video/sensor pipeline'ов в core
   нет.
-- **Action→consequence feedback** пока имеет строгую границу: tool
-  result/error остаётся same-act journal event и не переиздаётся как новое
-  внешнее последствие. Durable observation inbox и action correlation входят
-  в следующую волну; streaming transport и latency остаются отдельными
-  инженерными решениями.
+- **Action→consequence feedback** принимает короткие предварительно
+  редуцированные внешние различия через durable observation inbox с optional
+  action correlation. Tool result/error остаётся same-act journal event и не
+  переиздаётся автоматически. Streaming transport и конкретные sensory
+  reducers остаются extension points.
 
 Эти направления зафиксированы как open queue, не как deferred bugs.
 
@@ -160,10 +160,11 @@ Retry commit с тем же `host_key` и тем же bounded request возвр
 поздней доставке.
 
 Три домена хранения разделены явно: `dialogue`, `external_evidence` и
-`subjective_trace`. Активный causal carrier строится только из live
-`subjective_trace`, прошедших canonical act reducer с provenance
-`validated_act_residue`; legacy/unknown и будущие transform-ряды остаются в
-диагностическом coverage, но не попадают в prompt. Сырой transcript,
+`subjective_trace`. Активный causal carrier строится из current snapshot
+immutable `validated_act_residue`/`validated_transform` nodes и versioned
+validated edges. Consolidation и reinterpretation создают новый node, а
+forgetting сначала фиксирует content-free tombstone и nearest-retained
+rewiring. Legacy/unknown/quarantined rows не попадают в prompt. Сырой transcript,
 документ, tool result или `experience_intake` не становятся субъектной
 памятью только по факту записи.
 
@@ -199,7 +200,10 @@ Background workers и periodic sweepers (один daemon-процесс):
 - **reinterpret_apply_sweeper** — отложенное применение
   переосмыслений после закрытия turn'а агента (write-gate)
 - **memory_consolidation** — кластерное N→1 объединение близких
-  memories
+  memories; canonical sources проходят append-only causal reduction
+- **causal_forgetting** — opt-in conservative reduction старых idle nodes;
+  active cause lease, stale/degraded carrier и отсутствие embedding закрывают
+  удаление
 - **relation_decay** — Hebbian forgetting cold links в knowledge graph
 
 ### Эмоциональная проекция

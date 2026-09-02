@@ -37,6 +37,7 @@ DEFAULT_REDUCER_VERSION = "act_residue_v1"
 MAX_ACTIONS = 64
 MAX_OBSERVATIONS = 16
 MAX_RESIDUES = 4
+MAX_CAUSAL_FRONTIER = 64
 MAX_EVIDENCE_REFS = 8
 MAX_RESIDUE_CONTENT = 2400
 MAX_SNAPSHOT_CARRIER = 6000
@@ -272,7 +273,7 @@ def causal_line_root_hash(
     if previous_root_version < 0 or output_line_version <= previous_root_version:
         raise ActReductionValidationError("causal root versions must advance")
     frontier = [str(_as_uuid(item, "predecessor_frontier")) for item in predecessor_frontier]
-    if len(frontier) > MAX_RESIDUES or len(set(frontier)) != len(frontier):
+    if len(frontier) > MAX_CAUSAL_FRONTIER or len(set(frontier)) != len(frontier):
         raise ActReductionValidationError("predecessor frontier must contain 0..4 unique ids")
     nodes: list[dict[str, Any]] = []
     for ordinal, residue in enumerate(residues):
@@ -354,8 +355,9 @@ def load_causal_line_state(
             cur.execute(
                 "SELECT id FROM memories WHERE agent_id=%s AND id=ANY(%s) "
                 "AND memory_domain='subjective_trace' AND line_eligible=true "
-                "AND line_provenance='validated_act_residue' "
-                "AND superseded_by IS NULL",
+                "AND line_provenance IN "
+                "('validated_act_residue','validated_transform') "
+                "AND line_status='active'",
                 (agent_id, list(state.frontier)),
             )
             live = {item[0] for item in cur.fetchall()}
@@ -2012,8 +2014,9 @@ def apply_act_reduction(
             cur.execute(
                 "SELECT count(*) FROM memories WHERE agent_id=%s "
                 "AND memory_domain='subjective_trace' AND line_eligible=true "
-                "AND line_provenance='validated_act_residue' "
-                "AND superseded_by IS NULL",
+                "AND line_provenance IN "
+                "('validated_act_residue','validated_transform') "
+                "AND line_status='active'",
                 (agent_id,),
             )
             if int(cur.fetchone()[0]) != 0:
@@ -2032,20 +2035,66 @@ def apply_act_reduction(
         {**residue, "memory_id": memory_ids[ordinal]}
         for ordinal, residue in enumerate(normalised)
     ]
-    next_root = (
-        causal_line_root_hash(
-            previous_root_hash=causal_state.causal_root_hash,
-            previous_root_version=causal_state.causal_root_version,
-            output_line_version=expected_line_version,
-            act_id=act_uuid,
-            reducer_version=reducer_version,
-            input_hash=input_hash,
-            predecessor_frontier=predecessor_frontier,
-            residues=rooted_residues,
+    predecessor_json = [str(item) for item in predecessor_frontier]
+
+    # Wave 40 promotes the edge ledger to the source of truth.  Node/root
+    # hashes contain semantic material only; row ids, clocks and embeddings do
+    # not alter the causal coordinate.
+    from styx.engine.causal_graph import (
+        GraphEdge,
+        GraphNode,
+        causal_edge_hash,
+        causal_node_hash,
+        validate_graph,
+    )
+    from styx.storage.causal_graph import load_causal_graph
+
+    current_nodes, current_edges = load_causal_graph(conn, agent_id)
+    validate_graph(current_nodes, current_edges)
+    current_by_id = {node.node_id: node for node in current_nodes}
+    predecessor_hashes: list[str] = []
+    for predecessor in predecessor_frontier:
+        node = current_by_id.get(str(predecessor))
+        if node is None or node.line_status != "active":
+            raise ActReductionConflict(
+                "predecessor frontier is absent from the active causal graph"
+            )
+        predecessor_hashes.append(node.node_hash)
+    residue_hashes = [
+        causal_node_hash(
+            node_kind="act_residue",
+            content=residue["content"],
+            causal_role=residue["causal_role"],
+            predecessor_hashes=predecessor_hashes,
         )
+        for residue in normalised
+    ]
+    planned_nodes = list(current_nodes) + [
+        GraphNode(str(memory_ids[index]), residue_hashes[index], "active")
+        for index in range(len(memory_ids))
+    ]
+    planned_edges = list(current_edges)
+    for ordinal, memory_id in enumerate(memory_ids):
+        for predecessor in predecessor_frontier:
+            source = current_by_id[str(predecessor)]
+            planned_edges.append(GraphEdge(
+                f"planned:{act_uuid}:{ordinal}:{predecessor}",
+                str(predecessor), str(memory_id), "incorporated",
+                causal_edge_hash(
+                    source_hash=source.node_hash,
+                    target_hash=residue_hashes[ordinal],
+                    relation="incorporated",
+                ),
+            ))
+    planned_validation = validate_graph(planned_nodes, planned_edges)
+    next_root = (
+        planned_validation.graph_root_hash
         if rooted_residues else causal_state.causal_root_hash
     )
-    predecessor_json = [str(item) for item in predecessor_frontier]
+
+    if memory_ids:
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('styx.causal_operation','1',true)")
 
     for ordinal, residue in enumerate(normalised):
         memory_id = memory_ids[ordinal]
@@ -2069,17 +2118,20 @@ def apply_act_reduction(
                 " memory_domain,line_eligible,cognitive_act_id,line_provenance,"
                 " residue_ordinal,residue_reducer_version,residue_input_hash,"
                 " residue_causal_role,residue_confidence,residue_evidence,"
-                " residue_predecessors,residue_line_root_hash,residue_affect) "
+                " residue_predecessors,residue_line_root_hash,residue_affect,"
+                " causal_node_hash,causal_node_kind,causal_payload_version,"
+                " line_status) "
                 "VALUES (%s,%s,'summary',%s,'subjective',%s,%s,%s,"
                 " 'subjective_trace',true,%s,'validated_act_residue',"
-                " %s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'act_residue',"
+                " 'causal_node_v1','active') RETURNING id",
                 (
                     memory_id, agent_id, residue["kind"], residue["content"],
                     _vector_literal(residue["embedding"]), Jsonb(metadata), act_uuid,
                     ordinal, reducer_version, input_hash, residue["causal_role"],
                     residue["confidence"], Jsonb(residue["evidence_refs"]),
                     Jsonb(predecessor_json), next_root,
-                    Jsonb(residue["affect"] or {}),
+                    Jsonb(residue["affect"] or {}), residue_hashes[ordinal],
                 ),
             )
             assert cur.fetchone()[0] == memory_id
@@ -2087,14 +2139,7 @@ def apply_act_reduction(
                 predecessor_frontier if predecessor_frontier else (None,)
             )
             for predecessor_ordinal, predecessor_id in enumerate(predecessors):
-                cur.execute(
-                    "INSERT INTO memory_lineage "
-                    "(agent_id,source_memory_id,target_memory_id,cognitive_act_id,"
-                    " transform,ordinal,retained_weight,source_coordinates) "
-                    "VALUES (%s,%s,%s,%s,'incorporated',%s,%s,%s)",
-                    (
-                        agent_id, predecessor_id, memory_id, act_uuid, ordinal,
-                        residue["confidence"], Jsonb({
+                coordinates = Jsonb({
                             "edge_kind": "predecessor_frontier",
                             "predecessor_ordinal": predecessor_ordinal,
                             "predecessor_frontier": predecessor_json,
@@ -2104,9 +2149,45 @@ def apply_act_reduction(
                             "input_hash": input_hash,
                             "causal_role": residue["causal_role"],
                             "evidence_refs": residue["evidence_refs"],
-                        }),
-                    ),
-                )
+                        })
+                if predecessor_id is None:
+                    # Compatibility-only root marker.  It is deliberately not
+                    # a validated DAG edge.
+                    cur.execute(
+                        "INSERT INTO memory_lineage "
+                        "(agent_id,source_memory_id,target_memory_id,cognitive_act_id,"
+                        " transform,ordinal,retained_weight,source_coordinates) "
+                        "VALUES (%s,NULL,%s,%s,'incorporated',%s,%s,%s)",
+                        (
+                            agent_id, memory_id, act_uuid, ordinal,
+                            residue["confidence"], coordinates,
+                        ),
+                    )
+                else:
+                    source_hash = current_by_id[str(predecessor_id)].node_hash
+                    edge_key = (
+                        f"act:{act_uuid}:{reducer_version}:{ordinal}:"
+                        f"{predecessor_id}"
+                    )
+                    cur.execute(
+                        "INSERT INTO memory_lineage "
+                        "(agent_id,source_memory_id,target_memory_id,cognitive_act_id,"
+                        " transform,ordinal,retained_weight,source_coordinates,"
+                        " edge_key,edge_provenance,relation_version,source_node_hash,"
+                        " target_node_hash,valid_from_line_version,edge_hash) "
+                        "VALUES (%s,%s,%s,%s,'incorporated',%s,%s,%s,%s,"
+                        "'validated',1,%s,%s,%s,%s)",
+                        (
+                            agent_id, predecessor_id, memory_id, act_uuid, ordinal,
+                            residue["confidence"], coordinates, edge_key,
+                            source_hash, residue_hashes[ordinal],
+                            expected_line_version, causal_edge_hash(
+                                source_hash=source_hash,
+                                target_hash=residue_hashes[ordinal],
+                                relation="incorporated",
+                            ),
+                        ),
+                    )
         _apply_affective_residue(
             conn,
             agent_id=agent_id,
@@ -2119,17 +2200,28 @@ def apply_act_reduction(
         )
 
     if memory_ids:
+        actual_nodes, actual_edges = load_causal_graph(conn, agent_id)
+        actual_validation = validate_graph(actual_nodes, actual_edges)
+        if actual_validation.graph_root_hash != next_root:
+            raise ActReductionConflict("applied causal graph differs from planned graph")
+        if not set(str(item) for item in memory_ids).issubset(
+            actual_validation.frontier
+        ):
+            raise ActReductionConflict("applied causal frontier omits new residues")
         with conn.cursor() as cur:
             cur.execute("SELECT version FROM line_state WHERE agent_id=%s FOR UPDATE", (agent_id,))
             actual_line_version = int(cur.fetchone()[0])
-            if actual_line_version != expected_line_version:
-                raise ActReductionConflict("line version did not advance exactly once per residue")
+            if actual_line_version != causal_state.line_version:
+                raise ActReductionConflict("line version changed during atomic incorporation")
+            actual_line_version = expected_line_version
             cur.execute(
-                "UPDATE line_state SET causal_root_hash=%s,causal_frontier=%s,"
+                "UPDATE line_state SET version=%s,causal_root_hash=%s,causal_frontier=%s,"
                 " causal_root_version=%s,causal_root_act_id=%s,dirty=true,"
-                " updated_at=clock_timestamp() WHERE agent_id=%s",
+                " causal_root_operation_id=NULL,updated_at=clock_timestamp() "
+                "WHERE agent_id=%s",
                 (
-                    next_root, Jsonb([str(item) for item in memory_ids]),
+                    actual_line_version, next_root,
+                    Jsonb(list(actual_validation.frontier)),
                     actual_line_version, act_uuid, agent_id,
                 ),
             )

@@ -89,6 +89,23 @@
 | `STYX_ACT_RESIDUE_RETRY_TICK_S` | `30.0` | Интервал sweeper-а, который reconciles retryable/crashed act-residue outcomes; clamp 1..3600 s. |
 | `STYX_ACT_RESIDUE_MAX_ATTEMPTS` | `3` | Общий bounded budget reducer-а: initial attempt плюс retries; clamp 1..20. После исчерпания outcome становится `terminal_failure`. |
 
+## Versioned causal graph и forgetting
+
+Canonical consolidation/reinterpretation создают новый immutable node и
+versioned edges; они не меняют validated residue in-place. Автоматическое
+forgetting выключено по умолчанию. Оно рассматривает только старые idle
+active nodes с embedding, низкой bounded relevance, готовым current carrier и
+без активной emotional cause lease или незавершённой causal operation.
+
+| Var | Default | Назначение |
+|---|---|---|
+| `STYX_CAUSAL_FORGETTING_ENABLED` | off | Явно включает conservative automatic forgetting. |
+| `STYX_CAUSAL_FORGETTING_TICK_S` | `3600.0` | Интервал sweep; минимум 1 s. |
+| `STYX_CAUSAL_FORGETTING_MIN_AGE_DAYS` | `90` | Минимальный возраст кандидата; минимум 1 день. |
+| `STYX_CAUSAL_FORGETTING_MIN_IDLE_DAYS` | `30` | Минимум дней без доступа; минимум 1 день. |
+| `STYX_CAUSAL_FORGETTING_RELEVANCE_CEILING` | `0.15` | Максимальная relevance кандидата; clamp 0..1. |
+| `STYX_CAUSAL_FORGETTING_MAX_BATCH` | `2` | Максимум nodes одного agent-scoped operation; clamp 1..16, последняя active node не удаляется. |
+
 ## Causal affect / emotional baseline
 
 | Var | Default | Назначение |

@@ -195,7 +195,7 @@ def test_window_filters_by_agent(conn: psycopg.Connection) -> None:
 @pytest.mark.parametrize(
     "provenance", ["validated_act_residue", "validated_transform"]
 )
-def test_daily_consolidation_excludes_and_refuses_causal_sources(
+def test_daily_consolidation_quarantines_incomplete_causal_sources(
     conn: psycopg.Connection, provenance: str
 ) -> None:
     q = AgentScopedQueries(conn, agent_id="alpha")
@@ -235,10 +235,13 @@ def test_daily_consolidation_excludes_and_refuses_causal_sources(
     task_id = enqueue_llm_task(
         conn, task_type="memory_daily_consolidation", payload={}
     )
-    with pytest.raises(ValueError, match="validated causal memory"):
-        q.insert_memory_consolidation_application(
-            task_id=task_id, source_ids=[protected, legacy]
-        )
+    # Freezing source ids in the application is safe for both canonical and
+    # legacy branches.  Only the later legacy mutation helpers stay guarded;
+    # the Wave 40 sweeper routes complete active nodes through graph apply.
+    application_id = q.insert_memory_consolidation_application(
+        task_id=task_id, source_ids=[protected, legacy]
+    )
+    assert application_id > 0
     with pytest.raises(ValueError, match="validated causal memory"):
         q.insert_consolidated_memory(
             content="merged",

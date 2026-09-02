@@ -114,3 +114,24 @@ def test_load_clamps_cognition_reduction_wait_and_retry_bounds(
     assert cfg.act_residue_retry_tick_s == pytest.approx(1.0)
     assert cfg.act_residue_max_attempts == 20
     assert cfg.cognition_observation_pending_cap == 100_000
+
+
+def test_load_reads_and_bounds_causal_forgetting_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STYX_DATABASE_URL", "postgresql://u:p@h:5432/styx")
+    monkeypatch.setenv("STYX_CAUSAL_FORGETTING_ENABLED", "true")
+    monkeypatch.setenv("STYX_CAUSAL_FORGETTING_TICK_S", "0")
+    monkeypatch.setenv("STYX_CAUSAL_FORGETTING_MIN_AGE_DAYS", "0")
+    monkeypatch.setenv("STYX_CAUSAL_FORGETTING_MIN_IDLE_DAYS", "14")
+    monkeypatch.setenv("STYX_CAUSAL_FORGETTING_RELEVANCE_CEILING", "9")
+    monkeypatch.setenv("STYX_CAUSAL_FORGETTING_MAX_BATCH", "99")
+
+    cfg = config.load()
+
+    assert cfg.causal_forgetting_enabled is True
+    assert cfg.causal_forgetting_tick_s == 1.0
+    assert cfg.causal_forgetting_min_age_days == 1
+    assert cfg.causal_forgetting_min_idle_days == 14
+    assert cfg.causal_forgetting_relevance_ceiling == 1.0
+    assert cfg.causal_forgetting_max_batch == 16

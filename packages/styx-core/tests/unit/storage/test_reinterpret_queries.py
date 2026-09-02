@@ -69,15 +69,31 @@ def _set_causal_provenance(
                 " residue_confidence=0.8,"
                 " residue_evidence='[{\"source\":\"channel_output\","
                 "\"key\":\"assistant_response\"}]'::jsonb,"
-                " residue_predecessors='[]'::jsonb,residue_line_root_hash=%s "
+                " residue_predecessors='[]'::jsonb,residue_line_root_hash=%s,"
+                " causal_node_hash=%s,causal_node_kind='act_residue',"
+                " causal_payload_version='causal_node_v1',line_status='active' "
                 "WHERE id=%s",
-                (provenance, act_id, "b" * 64, "a" * 64, memory_id),
+                (
+                    provenance, act_id, "b" * 64, "a" * 64,
+                    "c" * 64, memory_id,
+                ),
             )
         return
     with conn.cursor() as cur:
+        operation_id = uuid.uuid4()
         cur.execute(
-            "UPDATE memories SET line_provenance=%s WHERE id=%s",
-            (provenance, memory_id),
+            "INSERT INTO causal_operations ("
+            "id,agent_id,operation_key,operation_kind,input_line_version,"
+            "input_root_hash,request_hash,algorithm_name,algorithm_version,status) "
+            "VALUES (%s,'alpha',%s,'reinterpret',0,%s,%s,'test','v1','running')",
+            (operation_id, f"test:{memory_id}", "0" * 64, "d" * 64),
+        )
+        cur.execute(
+            "UPDATE memories SET line_provenance=%s,causal_node_hash=%s,"
+            "causal_node_kind='reinterpretation',"
+            "causal_payload_version='causal_node_v1',causal_operation_id=%s,"
+            "line_status='active' WHERE id=%s",
+            (provenance, "e" * 64, operation_id, memory_id),
         )
 
 
@@ -189,7 +205,7 @@ def test_memory_exists_false_for_unknown(conn: psycopg.Connection) -> None:
 @pytest.mark.parametrize(
     "provenance", ["validated_act_residue", "validated_transform"]
 )
-def test_reinterpret_fences_causal_rows_until_rewiring_exists(
+def test_reinterpret_routes_active_causal_rows_without_allowing_legacy_mutation(
     conn: psycopg.Connection, provenance: str
 ) -> None:
     q = AgentScopedQueries(conn, agent_id="alpha")
@@ -197,8 +213,8 @@ def test_reinterpret_fences_causal_rows_until_rewiring_exists(
     _set_causal_provenance(conn, mid, provenance)
     conn.commit()
 
-    assert q.memory_exists(mid) is False
-    assert worker_load_memory_for_reinterpret(conn, mid) is None
+    assert q.memory_exists(mid) is True
+    assert worker_load_memory_for_reinterpret(conn, mid) is not None
     assert q.apply_reinterpret_update(
         memory_id=mid,
         merged_text="mutated",
@@ -207,8 +223,7 @@ def test_reinterpret_fences_causal_rows_until_rewiring_exists(
     task_id = enqueue_llm_task(
         conn, task_type="reinterpret_merge", payload={}
     )
-    with pytest.raises(ValueError, match="validated causal memory"):
-        q.insert_reinterpret_application(task_id=task_id, memory_id=mid)
+    assert q.insert_reinterpret_application(task_id=task_id, memory_id=mid) > 0
     with conn.cursor() as cur:
         cur.execute("SELECT content FROM memories WHERE id=%s", (mid,))
         assert cur.fetchone()[0] == "canonical"

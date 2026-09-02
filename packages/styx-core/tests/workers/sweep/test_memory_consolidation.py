@@ -13,6 +13,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from styx import turn_state
+from styx.engine.causal_graph import causal_node_hash
 from styx.engine.memory_consolidation import MemoryConsolidationConfig
 from styx.storage import migrate
 from styx.storage.queries import (
@@ -62,6 +63,51 @@ def _seed_close_memories(
             "UPDATE memories SET created_at = %s WHERE id = ANY(%s)",
             (long_ago, ids),
         )
+    conn.commit()
+    return ids
+
+
+def _seed_canonical_memories(
+    conn: psycopg.Connection, agent_id: str, count: int,
+) -> list[uuid.UUID]:
+    ids: list[uuid.UUID] = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT set_config('styx.causal_operation','1',true)")
+        for index in range(count):
+            memory_id = uuid.uuid4()
+            act_id = uuid.uuid4()
+            content = f"canonical-{index}"
+            node_hash = causal_node_hash(
+                node_kind="act_residue", content=content,
+                causal_role="choice", predecessor_hashes=[],
+            )
+            cur.execute(
+                "INSERT INTO cognitive_acts "
+                "(id,agent_id,host_key,status,completed_at) "
+                "VALUES (%s,%s,%s,'completed',clock_timestamp())",
+                (act_id, agent_id, f"test-{act_id}"),
+            )
+            vector = [1.0, 0.001 * index] + [0.0] * 766
+            cur.execute(
+                "INSERT INTO memories ("
+                "id,agent_id,role,visibility,kind,kind_src,content,embedding,"
+                "memory_domain,line_eligible,line_provenance,cognitive_act_id,"
+                "residue_ordinal,residue_reducer_version,residue_input_hash,"
+                "residue_causal_role,residue_confidence,residue_evidence,"
+                "residue_predecessors,residue_line_root_hash,causal_node_hash,"
+                "causal_node_kind,causal_payload_version,line_status) VALUES ("
+                "%s,%s,'summary','shared','note','subjective',%s,%s,"
+                "'subjective_trace',true,'validated_act_residue',%s,0,'test_v1',"
+                "%s,'choice',1.0,'[{\"source\":\"channel_output\","
+                "\"key\":\"assistant_response\"}]'::jsonb,'[]'::jsonb,%s,%s,"
+                "'act_residue','causal_node_v1','active')",
+                (
+                    memory_id, agent_id, content,
+                    "[" + ",".join(str(item) for item in vector) + "]",
+                    act_id, "a" * 64, "0" * 64, node_hash,
+                ),
+            )
+            ids.append(memory_id)
     conn.commit()
     return ids
 
@@ -257,6 +303,65 @@ def test_apply_sweep_applies_when_idle(db) -> None:
         row = cur.fetchone()
     assert row[0] == "applied"
     assert row[1] is not None
+
+
+def test_apply_sweep_consolidates_canonical_sources_append_only(db) -> None:
+    sources = _seed_canonical_memories(db, "alpha", 3)
+    app_id = _enqueue_pending_consolidation(
+        db, "alpha", sources, task_status="done",
+        task_result=_merged_result(sources),
+    )
+    summary = run_memory_consolidation_apply_sweep(db)
+    assert summary.applied == 1
+    assert summary.errors == 0
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT status,new_memory_id FROM memory_consolidation_applications "
+            "WHERE id=%s", (app_id,),
+        )
+        status, target_id = cur.fetchone()
+        assert status == "applied"
+        assert target_id is not None
+        cur.execute(
+            "SELECT content,line_provenance,line_status,causal_node_kind "
+            "FROM memories WHERE id=%s", (target_id,),
+        )
+        assert cur.fetchone() == (
+            "общий смысл", "validated_transform", "active", "consolidation",
+        )
+        cur.execute(
+            "SELECT count(*) FROM memories WHERE id=ANY(%s) "
+            "AND line_status='superseded' AND superseded_by=%s",
+            (sources, target_id),
+        )
+        assert cur.fetchone()[0] == 3
+        cur.execute(
+            "SELECT count(*) FROM memory_lineage WHERE agent_id='alpha' "
+            "AND target_memory_id=%s AND transform='consolidated' "
+            "AND valid_to_line_version IS NULL", (target_id,),
+        )
+        assert cur.fetchone()[0] == 3
+
+
+def test_apply_sweep_rejects_changed_source_coverage(db) -> None:
+    sources = _seed_canonical_memories(db, "alpha", 3)
+    changed = _merged_result(list(reversed(sources)))
+    app_id = _enqueue_pending_consolidation(
+        db, "alpha", sources, task_status="done", task_result=changed,
+    )
+    summary = run_memory_consolidation_apply_sweep(db)
+    assert summary.skipped == 1
+    assert summary.applied == 0
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT status,new_memory_id FROM memory_consolidation_applications "
+            "WHERE id=%s", (app_id,),
+        )
+        assert cur.fetchone() == ("skipped", None)
+        cur.execute(
+            "SELECT count(*) FROM causal_operations WHERE agent_id='alpha'",
+        )
+        assert cur.fetchone()[0] == 0
 
 
 def test_apply_sweep_marks_skipped_on_failed_task(db) -> None:

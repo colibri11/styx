@@ -15,6 +15,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from styx import turn_state
+from styx.engine.causal_graph import causal_node_hash
 from styx.storage import migrate
 from styx.storage.queries import AgentScopedQueries, enqueue_llm_task
 from styx.workers.sweep.reinterpret_apply import run_reinterpret_apply_sweep
@@ -90,6 +91,46 @@ def _merged_result(prev_text: str = "old") -> dict:
     }
 
 
+def _seed_canonical_memory(
+    conn: psycopg.Connection, *, agent_id: str = "alpha", content: str = "old",
+) -> uuid.UUID:
+    memory_id = uuid.uuid4()
+    act_id = uuid.uuid4()
+    node_hash = causal_node_hash(
+        node_kind="act_residue", content=content, causal_role="choice",
+        predecessor_hashes=[],
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT set_config('styx.causal_operation','1',true)")
+        cur.execute(
+            "INSERT INTO cognitive_acts "
+            "(id,agent_id,host_key,status,completed_at) "
+            "VALUES (%s,%s,%s,'completed',clock_timestamp())",
+            (act_id, agent_id, f"test-{act_id}"),
+        )
+        cur.execute(
+            "INSERT INTO memories ("
+            "id,agent_id,role,visibility,kind,kind_src,content,embedding,"
+            "memory_domain,line_eligible,line_provenance,cognitive_act_id,"
+            "residue_ordinal,residue_reducer_version,residue_input_hash,"
+            "residue_causal_role,residue_confidence,residue_evidence,"
+            "residue_predecessors,residue_line_root_hash,causal_node_hash,"
+            "causal_node_kind,causal_payload_version,line_status) VALUES ("
+            "%s,%s,'summary','shared','note','subjective',%s,%s,"
+            "'subjective_trace',true,'validated_act_residue',%s,0,'test_v1',"
+            "%s,'choice',1.0,'[{\"source\":\"channel_output\","
+            "\"key\":\"assistant_response\"}]'::jsonb,'[]'::jsonb,%s,%s,"
+            "'act_residue','causal_node_v1','active')",
+            (
+                memory_id, agent_id, content,
+                "[" + ",".join(str(value) for value in ([1.0, 0.0] + [0.0] * 766)) + "]",
+                act_id, "a" * 64, "0" * 64, node_hash,
+            ),
+        )
+    conn.commit()
+    return memory_id
+
+
 # ── Fast-path skip when agent active ────────────────────────────────
 
 
@@ -154,6 +195,44 @@ def test_sweep_inserts_audit_row(db) -> None:
     assert row[0] == "прежний текст"
     assert row[1] == "merged content"
     assert float(row[2]) == 0.5
+
+
+def test_sweep_reinterprets_canonical_memory_as_new_immutable_node(db) -> None:
+    mid = _seed_canonical_memory(db)
+    app_id = _enqueue_pending(
+        db, "alpha", mid, task_status="done", task_result=_merged_result(),
+    )
+    summary = run_reinterpret_apply_sweep(db)
+    assert summary.applied == 1
+    assert summary.errors == 0
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT content,line_status,superseded_by FROM memories WHERE id=%s",
+            (mid,),
+        )
+        source = cur.fetchone()
+        assert source[0:2] == ("old", "superseded")
+        assert source[2] is not None
+        target_id = source[2]
+        cur.execute(
+            "SELECT content,line_provenance,line_status,causal_operation_id "
+            "FROM memories WHERE id=%s", (target_id,),
+        )
+        target = cur.fetchone()
+        assert target[0:3] == (
+            "merged content", "validated_transform", "active",
+        )
+        assert target[3] is not None
+        cur.execute(
+            "SELECT transform FROM memory_lineage WHERE agent_id='alpha' "
+            "AND source_memory_id=%s AND target_memory_id=%s ",
+            (mid, target_id),
+        )
+        assert cur.fetchone()[0] == "reinterpreted"
+        cur.execute(
+            "SELECT status FROM reinterpret_applications WHERE id=%s", (app_id,),
+        )
+        assert cur.fetchone()[0] == "applied"
 
 
 # ── Skip / mark_skipped paths ───────────────────────────────────────

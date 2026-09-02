@@ -389,7 +389,7 @@ class CognitionWillProjection(BaseModel):
     coverage_hash: str = Field(default="", max_length=64)
     causal_root_hash: str = Field(default="", max_length=64)
     causal_root_version: int = Field(default=0, ge=0)
-    causal_frontier: list[str] = Field(default_factory=list, max_length=4)
+    causal_frontier: list[str] = Field(default_factory=list, max_length=64)
     root_coverage_hash: str = Field(default="", max_length=64)
     root_count: int = Field(default=0, ge=0)
     covered_node_count: int = Field(default=0, ge=0)
@@ -1078,6 +1078,7 @@ class ExplainLifetimeResponse(_LlmWrappableResponse):
     decay: dict[str, Any] = Field(default_factory=dict)
     recall_history: list[dict[str, Any]] | None = None
     co_retrieval_links: list[dict[str, Any]] = Field(default_factory=list)
+    causal_lineage: dict[str, Any] | None = None
     computed_at: str
 
 

@@ -17,10 +17,14 @@ DSN_ENV = "STYX_TEST_DATABASE_URL"
 _STYX_DROP_STMTS = [
     # Act residue / causal carrier (wave 38) before its act/task parents.
     "DROP TABLE IF EXISTS cognitive_act_reductions CASCADE",
+    "DROP TABLE IF EXISTS memory_tombstones CASCADE",
+    "DROP TABLE IF EXISTS causal_operations CASCADE",
     "DROP FUNCTION IF EXISTS styx_validate_act_reduction_task() CASCADE",
     "DROP FUNCTION IF EXISTS styx_enforce_projection_readiness() CASCADE",
     "DROP FUNCTION IF EXISTS styx_immutable_observation_source() CASCADE",
     "DROP FUNCTION IF EXISTS styx_immutable_observation_presentation() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_immutable_causal_node() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_guard_causal_node_delete() CASCADE",
     # Cognitive continuity (wave 37) — child tables before memories.
     "DROP TABLE IF EXISTS memory_lineage CASCADE",
     "DROP TABLE IF EXISTS cognitive_presentations CASCADE",

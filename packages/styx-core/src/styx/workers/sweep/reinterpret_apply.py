@@ -27,6 +27,7 @@ from typing import Any
 import psycopg
 
 from styx import turn_state
+from styx.storage.causal_graph import apply_causal_transform
 from styx.storage.queries import AgentScopedQueries, list_subject_agents
 
 log = logging.getLogger(__name__)
@@ -163,6 +164,60 @@ def _dispatch_application(
     previous_embedding = [float(x) for x in task_result["previous_embedding"]]
     new_understanding_text = task_result.get("new_understanding_text", "")
     weight_applied = float(task_result["weight_applied"])
+
+    source_rows = queries.load_transform_source_states([memory_id])
+    if len(source_rows) != 1:
+        queries.mark_reinterpret_skipped(application_id)
+        summary.skipped += 1
+        return
+    source = source_rows[0]
+    if source["content"] != previous_text:
+        # The proposal was computed from another source snapshot.  Never apply
+        # it to either legacy or canonical memory under a changed premise.
+        queries.mark_reinterpret_skipped(application_id)
+        summary.skipped += 1
+        return
+    canonical = source["line_provenance"] in {
+        "validated_act_residue", "validated_transform",
+    }
+    if canonical:
+        if source["line_status"] != "active" or source["superseded_by"] is not None:
+            queries.mark_reinterpret_skipped(application_id)
+            summary.skipped += 1
+            return
+        operation = apply_causal_transform(
+            conn,
+            agent_id,
+            operation_key=f"reinterpret_application:{application_id}",
+            operation_kind="reinterpret",
+            source_memory_ids=[memory_id],
+            content=merged_text,
+            embedding=merged_embedding,
+            kind=source["kind"],
+            visibility=source["visibility"],
+            metadata={
+                "reinterpretation": {
+                    "application_id": application_id,
+                    "weight_applied": weight_applied,
+                }
+            },
+        )
+        queries.insert_memory_reinterpretation(
+            memory_id=memory_id,
+            previous_text=previous_text,
+            new_understanding_text=new_understanding_text,
+            merged_text=merged_text,
+            previous_embedding=previous_embedding,
+            merged_embedding=merged_embedding,
+            weight_applied=weight_applied,
+        )
+        queries.mark_reinterpret_applied(application_id)
+        log.info(
+            "reinterpret_apply: canonical operation=%s application=%s",
+            operation.operation_id, application_id,
+        )
+        summary.applied += 1
+        return
 
     rc = queries.apply_reinterpret_update(
         memory_id=memory_id,

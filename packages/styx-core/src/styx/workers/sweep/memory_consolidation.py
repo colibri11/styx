@@ -32,6 +32,7 @@ from styx.engine.memory_consolidation import (
     pick_consolidated_kind,
     pick_consolidated_visibility,
 )
+from styx.storage.causal_graph import apply_causal_transform
 from styx.storage.queries import (
     AgentScopedQueries,
     enqueue_llm_task,
@@ -268,11 +269,67 @@ def _dispatch_consolidation_application(
             queries.mark_consolidation_skipped(application_id)
             summary.skipped += 1
             return
-    source_kinds = list(task_result["source_kinds"])
-    source_visibility = list(task_result["source_visibility"])
+    frozen_ids = [uuid.UUID(str(value)) for value in row["source_ids"]]
+    if source_ids != frozen_ids:
+        log.warning(
+            "memory_consolidation_apply: proposal source coverage differs "
+            "from frozen application %s", application_id,
+        )
+        queries.mark_consolidation_skipped(application_id)
+        summary.skipped += 1
+        return
+    source_rows = queries.load_transform_source_states(frozen_ids)
+    if len(source_rows) != len(frozen_ids):
+        queries.mark_consolidation_skipped(application_id)
+        summary.skipped += 1
+        return
+    source_kinds = [source["kind"] for source in source_rows]
+    source_visibility = [source["visibility"] for source in source_rows]
 
     kind = pick_consolidated_kind(source_kinds)
     visibility = pick_consolidated_visibility(source_visibility)
+
+    canonical_flags = [
+        source["line_provenance"] in {
+            "validated_act_residue", "validated_transform",
+        }
+        for source in source_rows
+    ]
+    if any(canonical_flags):
+        # A mixed legacy/canonical merge has no single attested provenance
+        # boundary.  Wait for an explicit import/attestation policy instead of
+        # silently promoting legacy rows.
+        if not all(canonical_flags) or any(
+            source["line_status"] != "active"
+            or source["superseded_by"] is not None
+            for source in source_rows
+        ):
+            queries.mark_consolidation_skipped(application_id)
+            summary.skipped += 1
+            return
+        operation = apply_causal_transform(
+            conn,
+            agent_id,
+            operation_key=f"consolidation_application:{application_id}",
+            operation_kind="consolidate",
+            source_memory_ids=frozen_ids,
+            content=consolidated_text,
+            embedding=embedding,
+            kind=kind,
+            visibility=visibility,
+            metadata={
+                "consolidation": {
+                    "application_id": application_id,
+                    "source_count": len(frozen_ids),
+                }
+            },
+        )
+        new_memory_id = operation.target_memory_ids[0]
+        queries.mark_consolidation_applied(
+            application_id=application_id, new_memory_id=new_memory_id,
+        )
+        summary.applied += 1
+        return
 
     new_memory_id = queries.insert_consolidated_memory(
         content=consolidated_text,

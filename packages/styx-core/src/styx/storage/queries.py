@@ -17,7 +17,7 @@ import re
 import uuid
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 if TYPE_CHECKING:
     from styx.engine.auto_link import AutoLinkNeighbor
@@ -2233,7 +2233,6 @@ class AgentScopedQueries:
         self, *, task_id: uuid.UUID, memory_id: uuid.UUID
     ) -> int:
         """INSERT application (status='pending_sleep'). Не делает commit."""
-        self._assert_legacy_transform_sources([memory_id])
         sql = (
             "INSERT INTO reinterpret_applications "
             "(task_id, memory_id, agent_id, status) "
@@ -2244,15 +2243,12 @@ class AgentScopedQueries:
             return int(cur.fetchone()[0])
 
     def memory_exists(self, memory_id: uuid.UUID) -> bool:
-        """Light check for legacy reinterpret eligibility.
-
-        Canonical causal rows are intentionally reported unavailable until
-        reinterpret can atomically rewire their root/frontier (Wave 40).
-        """
+        """Light check for legacy or active canonical reinterpret eligibility."""
         sql = (
             "SELECT 1 FROM memories WHERE id = %s AND agent_id = %s "
-            "  AND line_provenance NOT IN "
-            "      ('validated_act_residue','validated_transform') LIMIT 1"
+            "  AND (line_provenance NOT IN "
+            "       ('validated_act_residue','validated_transform') "
+            "       OR line_status='active') LIMIT 1"
         )
         with self._conn.cursor() as cur:
             cur.execute(sql, (memory_id, self._agent_id))
@@ -2276,6 +2272,24 @@ class AgentScopedQueries:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, (self._agent_id,))
             return list(cur.fetchall())
+
+    def load_transform_source_states(
+        self, memory_ids: list[uuid.UUID]
+    ) -> list[dict]:
+        """Lock and return frozen-order state used to choose a safe writer."""
+        if not memory_ids:
+            return []
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id,content,kind,visibility,embedding,line_provenance,"
+                "line_status,superseded_by,causal_node_hash "
+                "FROM memories WHERE agent_id=%s AND id=ANY(%s) "
+                "ORDER BY id FOR UPDATE",
+                (self._agent_id, memory_ids),
+            )
+            rows = list(cur.fetchall())
+        by_id = {row["id"]: dict(row) for row in rows}
+        return [by_id[item] for item in memory_ids if item in by_id]
 
     def apply_reinterpret_update(
         self,
@@ -2401,8 +2415,9 @@ class AgentScopedQueries:
             "  AND superseded_by IS NULL "
             "  AND kind_src <> 'dialogue_consolidation_daily' "
             "  AND memory_domain = 'subjective_trace' AND line_eligible = true "
-            "  AND line_provenance NOT IN "
-            "      ('validated_act_residue','validated_transform') "
+            "  AND (line_provenance NOT IN "
+            "       ('validated_act_residue','validated_transform') "
+            "       OR line_status='active') "
             "  AND embedding IS NOT NULL "
             "ORDER BY created_at ASC"
         )
@@ -2419,7 +2434,6 @@ class AgentScopedQueries:
                 "memory_consolidation_applications.source_ids — минимум 2 "
                 f"(получено {len(source_ids)})"
             )
-        self._assert_legacy_transform_sources(source_ids)
         sql = (
             "INSERT INTO memory_consolidation_applications "
             "(task_id, agent_id, source_ids, status) "
@@ -2459,11 +2473,12 @@ class AgentScopedQueries:
             return []
         sql = (
             "SELECT id, content, kind, kind_src, visibility, memory_domain, line_eligible, "
-            "       superseded_by, embedding "
+            "       superseded_by, embedding,line_provenance,line_status,causal_node_hash "
             "  FROM memories "
             " WHERE id = ANY(%s) AND agent_id = %s "
-            "   AND line_provenance NOT IN "
-            "       ('validated_act_residue','validated_transform')"
+            "   AND (line_provenance NOT IN "
+            "        ('validated_act_residue','validated_transform') "
+            "        OR line_status='active')"
         )
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, (memory_ids, self._agent_id))
@@ -2951,6 +2966,9 @@ class AgentScopedQueries:
                 m.lifecycle, m.relevance, m.access_count,
                 m.last_accessed_at, m.unique_query_count,
                 m.recall_score_sum, m.usefulness,
+                m.line_provenance,m.line_status,m.causal_node_hash,
+                m.causal_node_kind,m.causal_payload_version,
+                m.causal_operation_id,
                 {cols},
                 lt.status     AS llm_task_status,
                 lt.created_at AS llm_task_created_at
@@ -2979,6 +2997,69 @@ class AgentScopedQueries:
             cur.execute(sql_pg, params)
             row = cur.fetchone()
         return dict(row) if row is not None else None
+
+    def explain_causal_lineage(
+        self, *, memory_id: uuid.UUID
+    ) -> dict[str, Any] | None:
+        """Content-free canonical operation/edge/tombstone coordinates."""
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT line_provenance,line_status,causal_node_hash,"
+                "causal_node_kind,causal_payload_version,causal_operation_id "
+                "FROM memories WHERE agent_id=%s AND id=%s",
+                (self._agent_id, memory_id),
+            )
+            node = cur.fetchone()
+            if node is None:
+                return None
+            operation = None
+            if node["causal_operation_id"] is not None:
+                cur.execute(
+                    "SELECT id,operation_kind,status,input_line_version,"
+                    "input_root_hash,output_line_version,output_root_hash,"
+                    "source_count,target_count,error_code,algorithm_name,"
+                    "algorithm_version FROM causal_operations "
+                    "WHERE agent_id=%s AND id=%s",
+                    (self._agent_id, node["causal_operation_id"]),
+                )
+                operation = cur.fetchone()
+            cur.execute(
+                "SELECT source_memory_id,target_memory_id,transform,"
+                "relation_version,source_node_hash,target_node_hash,"
+                "valid_from_line_version,valid_to_line_version,edge_hash,"
+                "operation_id FROM memory_lineage WHERE agent_id=%s "
+                "AND edge_provenance='validated' "
+                "AND (source_memory_id=%s OR target_memory_id=%s) ORDER BY id",
+                (self._agent_id, memory_id, memory_id),
+            )
+            edges = list(cur.fetchall())
+            cur.execute(
+                "SELECT operation_id,reason_code,removed_line_version,"
+                "causal_node_hash,content_hash,predecessor_hashes,"
+                "successor_hashes,rewire_hash,created_at "
+                "FROM memory_tombstones WHERE agent_id=%s AND memory_id=%s",
+                (self._agent_id, memory_id),
+            )
+            tombstone = cur.fetchone()
+
+        def serialise(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+            if row is None:
+                return None
+            return {
+                key: (
+                    value.isoformat() if hasattr(value, "isoformat")
+                    else str(value) if isinstance(value, uuid.UUID)
+                    else value
+                )
+                for key, value in dict(row).items()
+            }
+
+        return {
+            "node": serialise(node),
+            "operation": serialise(operation),
+            "edges": [serialise(edge) for edge in edges],
+            "tombstone": serialise(tombstone),
+        }
 
     def explain_decompose_rank(
         self,
@@ -3344,6 +3425,10 @@ class AgentScopedQueries:
             "dialogue_messages_count": dialogue_count,
             "total_storage_bytes": total_storage_bytes,
         }
+        from styx.storage.causal_graph import causal_graph_stats
+        agent_block["causal_graph"] = causal_graph_stats(
+            self._conn, self._agent_id
+        )
         global_block = {
             "total_memories": memories_count,
             "total_documents": documents_count,
@@ -3511,10 +3596,12 @@ def worker_load_memory_for_reinterpret(
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id, agent_id, content, embedding "
+            "SELECT id,agent_id,content,embedding,line_provenance,line_status,"
+            "kind,visibility,causal_node_hash "
             "  FROM memories WHERE id = %s "
-            "   AND line_provenance NOT IN "
-            "       ('validated_act_residue','validated_transform')",
+            "   AND (line_provenance NOT IN "
+            "        ('validated_act_residue','validated_transform') "
+            "        OR line_status='active')",
             (memory_id,),
         )
         row = cur.fetchone()

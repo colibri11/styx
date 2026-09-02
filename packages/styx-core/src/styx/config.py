@@ -202,6 +202,14 @@ class StyxConfig:
     memory_consolidation_cosine: float = 0.88
     memory_consolidation_min_size: int = 3
     memory_consolidation_max_size: int = 8
+    # Canonical forgetting is deliberately opt-in.  It only considers old,
+    # idle, low-relevance validated nodes with embeddings and a ready carrier.
+    causal_forgetting_enabled: bool = False
+    causal_forgetting_tick_s: float = 3600.0
+    causal_forgetting_min_age_days: int = 90
+    causal_forgetting_min_idle_days: int = 30
+    causal_forgetting_relevance_ceiling: float = 0.15
+    causal_forgetting_max_batch: int = 2
     # Reinterpret (волна 22). Explicit caller-side tool: HTTP route
     # /reinterpret + Hermes wrapper styx_reinterpret. Apply-sweeper
     # раз в 30s применяет результат под write-gate'ом. Cooldown 24h
@@ -397,6 +405,16 @@ class StyxConfig:
             blend_weight=self.reinterpret_blend_weight,
         )
 
+    def causal_forgetting_config(self) -> "CausalForgettingConfig":
+        from styx.workers.sweep.causal_forgetting import CausalForgettingConfig
+        return CausalForgettingConfig(
+            enabled=self.causal_forgetting_enabled,
+            min_age_days=self.causal_forgetting_min_age_days,
+            min_idle_days=self.causal_forgetting_min_idle_days,
+            relevance_ceiling=self.causal_forgetting_relevance_ceiling,
+            max_batch=self.causal_forgetting_max_batch,
+        )
+
 
 def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
     """Собрать конфиг из json + env. Кидает ValueError при отсутствии DSN."""
@@ -503,6 +521,12 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "memory_consolidation_cosine",
         "memory_consolidation_min_size",
         "memory_consolidation_max_size",
+        "causal_forgetting_enabled",
+        "causal_forgetting_tick_s",
+        "causal_forgetting_min_age_days",
+        "causal_forgetting_min_idle_days",
+        "causal_forgetting_relevance_ceiling",
+        "causal_forgetting_max_batch",
         "reinterpret_enabled",
         "reinterpret_apply_tick_s",
         "reinterpret_cooldown_s",
@@ -751,6 +775,28 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         ),
         memory_consolidation_max_size=int(
             merged.get("memory_consolidation_max_size", 8)
+        ),
+        causal_forgetting_enabled=bool(
+            merged.get("causal_forgetting_enabled", False)
+        ),
+        causal_forgetting_tick_s=max(
+            1.0, float(merged.get("causal_forgetting_tick_s", 3600.0))
+        ),
+        causal_forgetting_min_age_days=max(
+            1, int(merged.get("causal_forgetting_min_age_days", 90))
+        ),
+        causal_forgetting_min_idle_days=max(
+            1, int(merged.get("causal_forgetting_min_idle_days", 30))
+        ),
+        causal_forgetting_relevance_ceiling=max(
+            0.0,
+            min(
+                1.0,
+                float(merged.get("causal_forgetting_relevance_ceiling", 0.15)),
+            ),
+        ),
+        causal_forgetting_max_batch=max(
+            1, min(16, int(merged.get("causal_forgetting_max_batch", 2)))
         ),
         reinterpret_enabled=bool(merged.get("reinterpret_enabled", True)),
         reinterpret_apply_tick_s=float(
@@ -1264,6 +1310,32 @@ def _read_env() -> dict[str, Any]:
             int(os.environ["STYX_MEMORY_CONSOLIDATION_MAX_SIZE"])
             if os.environ.get("STYX_MEMORY_CONSOLIDATION_MAX_SIZE")
             else None
+        ),
+        "causal_forgetting_enabled": (
+            os.environ["STYX_CAUSAL_FORGETTING_ENABLED"].lower()
+            not in ("0", "false", "no")
+            if os.environ.get("STYX_CAUSAL_FORGETTING_ENABLED") is not None
+            else None
+        ),
+        "causal_forgetting_tick_s": (
+            float(os.environ["STYX_CAUSAL_FORGETTING_TICK_S"])
+            if os.environ.get("STYX_CAUSAL_FORGETTING_TICK_S") else None
+        ),
+        "causal_forgetting_min_age_days": (
+            int(os.environ["STYX_CAUSAL_FORGETTING_MIN_AGE_DAYS"])
+            if os.environ.get("STYX_CAUSAL_FORGETTING_MIN_AGE_DAYS") else None
+        ),
+        "causal_forgetting_min_idle_days": (
+            int(os.environ["STYX_CAUSAL_FORGETTING_MIN_IDLE_DAYS"])
+            if os.environ.get("STYX_CAUSAL_FORGETTING_MIN_IDLE_DAYS") else None
+        ),
+        "causal_forgetting_relevance_ceiling": (
+            float(os.environ["STYX_CAUSAL_FORGETTING_RELEVANCE_CEILING"])
+            if os.environ.get("STYX_CAUSAL_FORGETTING_RELEVANCE_CEILING") else None
+        ),
+        "causal_forgetting_max_batch": (
+            int(os.environ["STYX_CAUSAL_FORGETTING_MAX_BATCH"])
+            if os.environ.get("STYX_CAUSAL_FORGETTING_MAX_BATCH") else None
         ),
         "reinterpret_enabled": (
             os.environ["STYX_REINTERPRET_ENABLED"].lower() not in ("0", "false", "no")

@@ -11,10 +11,10 @@ Mirror к ``tests/integration/openclaw/test_openclaw_plugin.py``.
 - ``styx-daemon`` HTTP API — через ``psycopg`` напрямую к postgres :15432
   для верификации side-effects (memories writes, recall_events, etc.).
 
-Архитектурный смысл (Phase F волны 29): проверить что после реализации
-``StyxMemoryProvider.prefetch()`` (волна 29 Phase B) Hermes-агент
-**действительно использует Styx Locus** для inject через
-``/context/assemble``, а не только write-side через ``/sync_turn``.
+Архитектурный смысл: проверить, что Hermes получает один fenced cognition
+envelope через ``/cognition/preturn``, а не остаётся write-only. После Wave 37
+provider ``prefetch()`` намеренно пуст, чтобы не дублировать canonical
+``pre_llm_call`` snapshot.
 
 Skip-паттерн: при отсутствии ``STYX_TEST_DATABASE_URL`` пропускаем —
 docker стик не поднят.
@@ -129,12 +129,11 @@ def _count_styx_marker_leaks(database_url: str) -> int:
             return int(n)
 
 
-def _count_assemble_calls() -> int:
-    """Считает число POST /context/assemble в логах styx-daemon.
+def _count_preturn_calls() -> int:
+    """Считает число POST /cognition/preturn в логах styx-daemon.
 
-    `prefetch()` каждый turn делает один assemble call. Регрессия — если
-    Hermes перестанет звать prefetch (т.е. Hermes upstream API изменится
-    или MemoryProvider stub'нется обратно).
+    Canonical ``pre_llm_call`` делает один atomic preturn. Регрессия — если
+    Hermes перестанет вызывать Styx hook или вернётся двойной context path.
     """
     res = subprocess.run(
         [
@@ -148,7 +147,7 @@ def _count_assemble_calls() -> int:
         timeout=10,
         check=True,
     )
-    return res.stdout.count("POST /context/assemble")
+    return res.stdout.count("POST /cognition/preturn")
 
 
 # ─── fixtures ─────────────────────────────────────────────────────────
@@ -173,28 +172,23 @@ def test_hermes_plugin_loads_and_responds(database_url: str) -> None:
     assert out, "Hermes вернул пустой ответ"
 
 
-def test_prefetch_calls_context_assemble(database_url: str) -> None:
-    """Phase B invariant: каждый turn вызывает /context/assemble через
-    `StyxMemoryProvider.prefetch()`. Это главное доказательство что
-    Hermes реально подключён к Styx Locus, а не только write-only.
-    """
-    before = _count_assemble_calls()
+def test_pre_llm_hook_calls_cognition_preturn(database_url: str) -> None:
+    """Каждый turn получает canonical fenced preturn snapshot."""
+    before = _count_preturn_calls()
     _hermes_prompt(f"проба связи {uuid.uuid4().hex[:8]}")
-    # Hermes делает несколько assemble calls per turn (prefetch + on_pre_compress
-    # на boundary, обычно ≥1).
-    after = _count_assemble_calls()
+    after = _count_preturn_calls()
     assert after > before, (
-        f"prefetch() не вызвался: до={before}, после={after}. "
-        "Phase B (StyxMemoryProvider.prefetch) или Hermes runtime интеграция сломана."
+        f"cognition preturn не вызвался: до={before}, после={after}. "
+        "Styx pre_llm hook или Hermes runtime интеграция сломана."
     )
 
 
-def test_recall_through_prefetch_two_turns(database_url: str) -> None:
-    """End-to-end recall через Phase B prefetch path.
+def test_recall_through_cognition_preturn_two_turns(database_url: str) -> None:
+    """End-to-end recall через canonical cognition preturn path.
 
     Turn 1: записываем уникальный marker → sync_turn пишет в memories.
-    Turn 2: вопрос про marker → prefetch() вызывает /context/assemble →
-    salient_text возвращается с marker'ом → Hermes-агент видит и
+    Turn 2: вопрос про marker → pre_llm hook вызывает /cognition/preturn →
+    system_prompt_addition возвращается с marker'ом → Hermes-агент видит и
     цитирует.
     """
     marker = f"кодовое-слово-{uuid.uuid4().hex[:6]}"
@@ -205,7 +199,7 @@ def test_recall_through_prefetch_two_turns(database_url: str) -> None:
     # Дать sync_turn время записать в БД (background flush ~1s).
     time.sleep(2)
 
-    # Turn 2: recall через prefetch.
+    # Turn 2: recall через cognition preturn.
     out = _hermes_prompt("какое моё кодовое слово сегодня?")
     assert marker in out, (
         f"Hermes не вспомнил marker {marker!r} через prefetch path: {out!r}"

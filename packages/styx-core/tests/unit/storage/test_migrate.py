@@ -15,6 +15,7 @@ EXPECTED_TABLES = {
     "cognitive_consequences", "cognitive_presentations", "memory_lineage", "line_state",
     "will_projections",
     "cognitive_act_reductions",
+    "causal_operations", "memory_tombstones",
 }
 EXPECTED_INDEXES = {
     "sessions_agent_started_idx",
@@ -40,6 +41,10 @@ EXPECTED_INDEXES = {
     "cognitive_observations_source_sequence_uq",
     "cognitive_observations_pending_order_idx",
     "cognitive_observations_pending_correlation_idx",
+    "causal_operations_pending_idx",
+    "memory_lineage_edge_key_uq", "memory_lineage_active_edge_uq",
+    "memory_lineage_active_source_idx", "memory_lineage_active_target_idx",
+    "memory_tombstones_operation_idx",
 }
 
 
@@ -68,8 +73,9 @@ def test_migration_applies_to_empty_db(clean_db: str) -> None:
         "0005_documents_chunks.sql", "0006_chunks_fts.sql",
         "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
         "0009_cognitive_continuity.sql",
-        "0010_act_residue_carrier.sql",
-        "0011_durable_observations.sql",
+            "0010_act_residue_carrier.sql",
+            "0011_durable_observations.sql",
+            "0012_causal_rewiring.sql",
     ]
 
     with psycopg.connect(clean_db) as conn:
@@ -89,8 +95,9 @@ def test_migration_is_idempotent(clean_db: str) -> None:
         "0005_documents_chunks.sql", "0006_chunks_fts.sql",
         "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
         "0009_cognitive_continuity.sql",
-        "0010_act_residue_carrier.sql",
-        "0011_durable_observations.sql",
+            "0010_act_residue_carrier.sql",
+            "0011_durable_observations.sql",
+            "0012_causal_rewiring.sql",
     ]
     assert second == []
 
