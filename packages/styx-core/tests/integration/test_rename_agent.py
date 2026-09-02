@@ -58,12 +58,14 @@ def _seed_agent(conn: "psycopg.Connection", agent: str, *, n_memories: int = 2) 
         )
         expected["sessions"] = 1
 
+        memory_ids: list[uuid.UUID] = []
         for i in range(n_memories):
             cur.execute(
                 "INSERT INTO memories (agent_id, role, content) "
-                "VALUES (%s, 'summary', %s)",
+                "VALUES (%s, 'summary', %s) RETURNING id",
                 (agent, f"factum {agent} #{i}"),
             )
+            memory_ids.append(cur.fetchone()[0])
         expected["memories"] = n_memories
 
         cur.execute(
@@ -84,6 +86,49 @@ def _seed_agent(conn: "psycopg.Connection", agent: str, *, n_memories: int = 2) 
             (agent,),
         )
         expected["emotional_baseline"] = 1
+
+        # Wave 37: every new agent-scoped table is seeded. Composite FKs are
+        # deferred so schema-driven rename can update all rows in one tx.
+        act_id = uuid.uuid4()
+        cur.execute(
+            "INSERT INTO cognitive_acts "
+            "(id,agent_id,host_key,session_id,status) VALUES (%s,%s,%s,%s,'completed')",
+            (act_id, agent, f"host-{agent}", session_id),
+        )
+        expected["cognitive_acts"] = 1
+        cur.execute(
+            "INSERT INTO cognitive_actions(agent_id,act_id,ordinal,kind) "
+            "VALUES (%s,%s,0,'call')", (agent, act_id),
+        )
+        expected["cognitive_actions"] = 1
+        cur.execute(
+            "INSERT INTO cognitive_consequences(agent_id,act_id,ordinal,kind,content) "
+            "VALUES (%s,%s,0,'result','ok')", (agent, act_id),
+        )
+        expected["cognitive_consequences"] = 1
+        cur.execute(
+            "INSERT INTO cognitive_snapshots(token,agent_id,line_version,used_by_act_id) "
+            "VALUES (%s,%s,1,%s)", (f"snapshot-{agent}", agent, act_id),
+        )
+        expected["cognitive_snapshots"] = 1
+        cur.execute(
+            "INSERT INTO memory_lineage "
+            "(agent_id,target_memory_id,cognitive_act_id,transform) "
+            "VALUES (%s,%s,%s,'incorporated')",
+            (agent, memory_ids[0], act_id),
+        )
+        expected["memory_lineage"] = 1
+        # The memories trigger created the row and incremented its version.
+        cur.execute("SELECT version FROM line_state WHERE agent_id=%s", (agent,))
+        line_version = int(cur.fetchone()[0])
+        expected["line_state"] = 1
+        cur.execute(
+            "INSERT INTO will_projections "
+            "(agent_id,line_version,formed,source_count,source_hash) "
+            "VALUES (%s,%s,true,%s,%s)",
+            (agent, line_version, n_memories, f"hash-{agent}"),
+        )
+        expected["will_projections"] = 1
     conn.commit()
     return expected
 
@@ -126,6 +171,39 @@ def test_rename_moves_rows(migrated_db: str) -> None:
             assert _count(conn, table, "a") == 0, table
             assert _count(conn, table, "b") == n, table
             assert per_table[table] == n, table
+
+
+def test_same_session_uuid_has_two_owners_and_rename_preserves_them(
+    migrated_db: str,
+) -> None:
+    shared = uuid.uuid4()
+    with psycopg.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO sessions(id,agent_id) VALUES (%s,'a'),(%s,'b')",
+            (shared, shared),
+        )
+        cur.execute(
+            "INSERT INTO memories(agent_id,session_id,role,content) VALUES "
+            "('a',%s,'user','a raw'),('b',%s,'assistant','b raw')",
+            (shared, shared),
+        )
+        cur.execute(
+            "INSERT INTO cognitive_acts(agent_id,host_key,session_id,status) VALUES "
+            "('a','a-turn',%s,'completed'),('b','b-turn',%s,'completed')",
+            (shared, shared),
+        )
+        conn.commit()
+        run_rename_agent(conn=conn, old="a", new="c")
+        conn.commit()
+        cur.execute(
+            "SELECT agent_id,id FROM sessions WHERE id=%s ORDER BY agent_id", (shared,)
+        )
+        assert cur.fetchall() == [("b", shared), ("c", shared)]
+        cur.execute(
+            "SELECT agent_id,session_id FROM cognitive_acts "
+            "WHERE session_id=%s ORDER BY agent_id", (shared,)
+        )
+        assert cur.fetchall() == [("b", shared), ("c", shared)]
 
 
 # ── completeness (гард на будущие agent_id-таблицы) ─────────────────

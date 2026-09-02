@@ -1,23 +1,32 @@
 ---
 name: styx-ingest
-description: "Archive a document file (PDF, DOCX, XLSX, Markdown, plain text) into Styx via styx_ingest_document. Use when: (1) the user attached or pointed to a file on disk and asked you to read / use / index it, (2) a long external source needs to be searchable later through styx_search_archive, (3) you want chunks of a document to live alongside chunks of subjective memory for hybrid retrieval. NOT for: short pasted text that fits a single styx_store (≤2400 chars subjective material) or styx_ingest_experience (≤2400 chars pipeline payload). The ingested document does NOT appear in styx_recall — it lives in the archive only, queried explicitly through styx_search_archive. The original file stays on disk; Styx stores parsed text, chunks, and embeddings only."
+description: "Archive a document file (PDF, DOCX, XLSX, Markdown, plain text) into Styx via styx_ingest_document. Use when: (1) the user attached or pointed to a file on disk and asked you to read / use / index it, (2) a long external source needs to be searchable later through styx_search_archive, (3) you want chunks of a document to live alongside chunks of subjective memory for hybrid retrieval. NOT for: short pasted text that fits a single styx_store (≤2400 chars subjective material) or styx_ingest_experience (≤2400 chars pipeline payload). The document body does NOT appear in styx_recall — it lives in the archive and is queried through styx_search_archive. A successful first ingest also creates one short archival act-marker memory with memory_domain=external_evidence and line_eligible=false; deduplicated retries do not create another marker. The original file stays on disk; Styx stores parsed text, chunks, embeddings, and that bounded marker."
 ---
 
 # Styx Ingest (file → archive)
 
-Save a document file into the Styx archive. Conceptually this is **archival** not **memory**: the document does not enter the line of `я` (it is external material, not your subjective experience), but its chunks become searchable through `styx_search_archive`. Use this when the user shows you a file and the content is large or worth indexing for later hybrid retrieval.
+Save a document file into the Styx archive. In the Styx data model this is
+**external evidence**, not a subjective trace: its chunks become searchable
+through `styx_search_archive`, but storage alone does not make them
+`line_eligible`. This is an engineering boundary, not a claim about whether
+the surrounding system is a person or conscious.
 
 ## Why this is separate from `styx_store` and `styx_ingest_experience`
 
 | Tool | Channel | Effect on `recall` | Limit | Typical source |
 |---|---|---|---|---|
 | `styx_store` | subjective write | YES — inject in recall | ≤2400 chars (auto-routes longer) | LLM crystallised a fragment of trajectory |
-| `styx_ingest_experience` | pipeline write | YES — inject in recall | ≤2400 chars | Telegram/email/sensor pipeline |
-| `styx_ingest_document` | **file archive** | **NO — pull-only via search_archive** | up to ingest_doc_max_bytes (default 50 MiB) | User attached a PDF/DOCX/XLSX/MD/TXT |
+| `styx_ingest_experience` | external-evidence write | NO subjective recall merely by storage | ≤2400 chars | Telegram/email/sensor pipeline |
+| `styx_ingest_document` | **file archive** | **Body: NO — pull-only via search_archive; one external-evidence act marker is non-eligible** | up to ingest_doc_max_bytes (default 50 MiB) | User attached a PDF/DOCX/XLSX/MD/TXT |
 
-Concept ([IAmBook §V][iambook]): the *diary* records what passed through, the *line of `я`* records what became cause-of-choice. A document the user dropped on you is neither — it is external material. The right place is the archive: searchable when needed, not auto-injected into your geometry of input.
+The current conceptual sources are [IAmBook][iambook] and its applied
+continuation [IAmPhilosophyOfSilicon][silicon]. Styx implements their boundary
+with explicit domains: diary records what passed through, archive stores cited
+external material, and only validated subjective traces may enter the live
+line. These tables and gates are one implementation policy, not ontology.
 
-[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook_EN.md
+[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook.md
+[silicon]: https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md
 
 ## When to call `styx_ingest_document`
 
@@ -92,7 +101,11 @@ You can override the hash with an explicit `content_hash` if you know two differ
 7. Text is chunked (≤1600 chars per chunk with 320-char overlap) and each chunk is embedded.
 8. One `documents` row is INSERT'ed with `file_path`, `original_name`, `mime_type`, `size_bytes`, `content_hash`, and parser metadata (`page_count` / `sheet_names` / `paragraph_count` / `line_count`).
 9. Chunks are INSERT'ed in one batch with their embeddings.
-10. **No `memories` row is created.** The document is archival, not subjective.
+10. Exactly one short act-marker `memories` row is created for a successful
+    first ingest. It is `memory_domain=external_evidence` with
+    `line_eligible=false`, so it records that archival ingestion occurred but
+    cannot enter subjective recall/will. The document body remains only in
+    `documents` + `chunks`. A deduplicated retry creates no second marker.
 
 ## How to retrieve archived content
 
@@ -106,7 +119,11 @@ styx_search_archive({
 })
 ```
 
-`styx_recall` will **not** return chunks from ingested documents — that is by design. If the user asks "do you remember what was in the spec?", search the archive; if they ask "what did we decide about X?" — that is recall territory (subjective memory of decision).
+`styx_recall` will **not** return chunks or body text from ingested documents —
+that is by design. The archival act marker is external evidence and
+`line_eligible=false`, not a subjective summary of the document. If the user
+asks "what was in the spec?", search the archive; if they ask "what did we
+decide about X?" — that is recall territory (subjective memory of decision).
 
 ## Errors you may see
 

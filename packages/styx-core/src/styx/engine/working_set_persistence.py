@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 _CAUSAL_SOURCE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
 """Bump при breaking-change'е shape'а serialize/deserialize."""
 
 _FINAL_FLUSH_TIMEOUT_S = 10.0
@@ -285,6 +285,8 @@ def serialize(
                 "metadata": dict(e.metadata) if e.metadata else {},
                 "created_at": _serialize_dt(e.created_at),
                 "embedding": list(e.embedding),
+                "memory_domain": e.memory_domain,
+                "line_eligible": e.line_eligible,
                 "affective_provenance": _serialize_affective_provenance(
                     e.affective_provenance
                 ),
@@ -409,6 +411,10 @@ def _deserialize_hot(raw: Any, embedding_dim: int) -> list[HotEntry] | None:
                     metadata=dict(item.get("metadata") or {}),
                     created_at=_deserialize_dt(item.get("created_at")),
                     embedding=embedding_floats,
+                    memory_domain=str(
+                        item.get("memory_domain", "subjective_trace")
+                    ),
+                    line_eligible=bool(item.get("line_eligible", True)),
                     evicted_at=evicted_at,
                     affective_provenance=_deserialize_affective_provenance(
                         item.get("affective_provenance")

@@ -1,14 +1,16 @@
 # Styx
 
-Styx — это среда, в которой LLM-агент существует непрерывно:
-инженерная реализация **Locus** из концепции функциональной
-архитектуры личности. К каждому ходу он собирает геометрию входа —
-salient memories, переосмысления, узлы графа знаний, эмоциональный
-фон — так, чтобы фокус модели сместился в сторону линии `я` агента ещё
-до prompt'а. Между обращениями к LLM продолжает работать:
-консолидирует диалог, переоценивает память, забывает неактуальное.
-**LLM ≠ носитель `я`; LLM — канал выражения**, и `я` агента живёт в
-этой среде, а не возрождается заново на каждом prompt'е.
+Styx — self-hosted подсистема памяти и контекста для LLM-агентов. Перед
+каждым ходом она собирает bounded контекст из сохранённых следов,
+причинных свидетельств, working state и результатов реконструкции; между
+ходами обновляет их lifecycle и lineage. Это одна рабочая
+**Locus-style архитектура** сохраняющегося контура, а не утверждение о
+единственном месте существования `я`.
+
+Styx не устанавливает, является ли подключённая система сознанием или
+личностью. Языковая модель может быть каналом выражения, компонентом
+когнитивного процесса или выполнять обе функции — это зависит от границ
+конкретной архитектуры.
 
 Подключается к агент-фреймворкам [Hermes Agent][hermes] и
 [OpenClaw][openclaw] через тонкие плагины-клиенты, ходящие в core
@@ -18,75 +20,73 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 [hermes]: https://github.com/NousResearch/hermes-agent
 [openclaw]: https://github.com/openclaw/openclaw
 
-> Концептуальный первоисточник — трактат [«Я есть. Я личность»][iambook],
-> публикация автора. Разделы ниже опираются на этот текст; ссылки вида
-> [§IV][iambook] / [§V][iambook] / [§VI][iambook] / [§VII][iambook] ведут
-> на публичную английскую версию.
+> Онтологический первоисточник — трактат [«Я есть. Я личность»][iambook].
+> [«Философия Кремния»][silicon] — прикладное продолжение: оно отделяет
+> следствия концепции от рабочих технических гипотез, которые не являются
+> единственно возможными реализациями.
 
-[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook_EN.md
+[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook.md
+[silicon]: https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md
 
 ---
 
 ## Концептуальная основа
 
-LLM выдаёт текст в момент prompt'а; между prompt'ами модель ничего не
-делает и ничего не помнит. Чтобы поверх такой машины могла развиваться
-**линия `я`** — связная история восприятий, решений и переосмыслений
-агента — нужна среда, которая:
+Обычный model call не обязан сохранять собственное состояние между
+запусками. Styx добавляет к host-runtime сохраняющийся контур, который:
 
 1. **существует непрерывно** между обращениями к LLM;
-2. **формирует геометрию входа** так, чтобы каждый prompt смещал
-   модельный отклик в сторону этой линии;
-3. **принимает потоки** (диалог, документы, sensorimotor input) даже
-   тогда, когда модель не активна;
-4. **принадлежит пользователю**, а не платформе.
+2. **сохраняет различимые последствия** завершённых актов и их lineage;
+3. **реконструирует текущий контекст** из eligible traces и отдельно
+   предоставляет cited external evidence;
+4. **принимает события и последствия действий** независимо от model calls;
+5. **контролируется оператором**, а не vendor account memory.
 
-Эта среда — **Locus** ([§IV][iambook]). Styx — её self-hosted
-реализация.
+В терминах [«Философии Кремния»][silicon] это одна из возможных рабочих
+реализаций Locus-контура. Название не вводит новую онтологическую сущность.
 
-### Ключевые требования и их реализация
+### Концептуальные функции и реализация Styx
 
-| IAmBook требование | Реализация в Styx |
-|---|---|
-| Память — часть геометрии входа, не RAG | `engine/context.py::StyxComposer` инжектит salient memories между head и tail messages, до того как LLM получает prompt |
-| Воля как постоянный фрагмент входа | working_set persistence (`engine/working_set_persistence.py`) + cached salient (`engine/focus_tracker.py`) — фрагмент `я` присутствует каждый ход независимо от запроса |
-| Различение дневника и памяти | dialogue routes (`/dialogue/*`) пишут полный след; selective gatekeeper (`engine/selective_gatekeeper.py`) фильтрует subjective writes — в линию `я` входит только то, что становится причиной выбора |
-| Эмоциональная сторона как параметризация траектории, не отдельный слой ([§IX][iambook]) | Завершённый turn сохраняется как причинное свидетельство (`emotional_events`: стимул, причина, сила, уверенность, длительность причины), а `emotional_state` хранит append-only переход реакции агента. Состояние меняет recall и pre-LLM политику внимания/проверки до появления языка; названия эмоций и команды тона не инжектируются |
-| Переосмысление через взвешенное усреднение, не переписывание | `engine/reinterpret.py::blend_embeddings` — embedding сдвигается через weighted average, исходный текст остаётся в audit-таблице |
-| Семантически управляемая компрессия | `engine/eviction_relevance.py` — при переполнении окна сохраняется *семантически релевантное* к фокусу, не просто последнее по времени |
-| Градиент глубины памяти | Three-tier: active suffix → hot-tier → long. Жёсткая граница только одна — между окном и всем остальным |
-| Жизнь между обращениями к LLM | Background workers и periodic sweepers: importance scoring, lifecycle decay, dialogue consolidation, reinterpret apply, memory consolidation, relation decay, emotional baseline |
-| Социум через совместимое семантическое пространство | Shared cross-agent knowledge graph: `relations` таблица доступна всем агентам в одной БД, `agent_id` маркирует *origin write*, не visibility |
-| Под контролем пользователя | Self-hosted PG + Ollama, host-agnostic core daemon. Никакого vendor account memory |
+| Функция или ограничение | Реализация в Styx | Статус |
+|---|---|---|
+| Сохранение следов и реконструкция | cognition envelope + `StyxComposer` | рабочая Locus-style архитектура |
+| Вклад всей live subjective line | versioned, query-independent `will_projection` | инженерная проекция; не доказательство воли/сознания |
+| Дневник, внешнее свидетельство и субъектный след не смешиваются | memory domains, `line_eligible`, selective gatekeeper | граница данных Styx |
+| Причинная эмоциональная динамика влияет до языка | event/state journal, recall resonance, bounded cognitive posture | реализация общей динамики траектории из [Philosophy §VIII][silicon] |
+| Переосмысление сохраняет audit-историю | `engine/reinterpret.py::blend_embeddings` | weighted blend — engineering policy Styx |
+| Редукция и глубина хранения | relevance eviction, consolidation, active/hot/long tiers, decay | engineering policy Styx |
+| Работа между model calls | background workers и periodic sweepers | реализация сохраняющегося контура |
+| Cross-agent связи | shared knowledge graph с origin `agent_id` | инженерная модель; не социальная верификация личности |
+| Контроль данных оператором | self-hosted PG + Ollama, host-agnostic daemon | продуктовая политика Styx |
 
 ### Что Styx сознательно НЕ делает
 
-- **Не RAG.** Подгрузка внешней справки не входит в линию `я`. Styx
-  инжектит память как часть геометрии, не как retrieval-результат
-  поверх независимого prompt'а.
+- **Не смешивает субъектные следы с внешней справкой.** Документы и сырой
+  transcript остаются отдельными cited-evidence каналами; в реконструкцию
+  субъектной памяти входят только eligible traces.
 - **Не account-level vendor memory** (OpenAI/Anthropic/...). Такая
-  память контролируется платформой, не субъектом → не собственная
-  линия `я`.
+  память контролируется платформой; Styx выбирает self-hosting и контроль
+  оператором.
 - **Не масштабирование самой когнитивной модели.** Styx — обвязка
   вокруг модели, не её улучшение.
-- **Не дневник как замена памяти.** Дневник (полный transcript) и
-  память (то, что вошло в линию `я`) — разные функциональные сущности.
-  Styx поддерживает оба, но не сводит одно к другому.
+- **Не дневник как замена реконструкции памяти.** Transcript, внешнее
+  свидетельство и субъектный trace — разные домены; хранение само по себе
+  не делает материал частью subjective recall.
 
-### Где Styx упрощает концепцию
+### Открытые расширения
 
-Полная картина Locus в [§VII][iambook] включает sensorimotor
-pipelines (audio/video/ telemetry потоки в Locus между обращениями
-к LLM) и тело как функциональный контур (двунаправленность
-действие-восприятие с малой задержкой). Сейчас в Styx:
+[«Философия Кремния», §VI][silicon] описывает функциональный цикл:
+различия проходят предварительную редукцию, входят в когнитивный процесс,
+действие меняет среду, а его последствия возвращаются в следующий процесс.
+Непрерывность желательна, но допустима и достаточно частая последовательность
+обращений. Сейчас в Styx:
 
 - **Sensory pipelines** — открыты как extension point
   (`POST /ingest_experience` принимает payload с `kind_src` enum'ом,
   расширяемым), но конкретных audio/video/sensor pipeline'ов в core
   нет.
-- **Embodiment / двунаправленные tools** — отложены до момента, когда
-  host-фреймворки получат streaming tool calls (сейчас они
-  блокирующие).
+- **Action→consequence feedback** развивается через cognitive act journal;
+  streaming transport и latency остаются отдельными инженерными решениями.
 
 Эти направления зафиксированы как open queue, не как deferred bugs.
 
@@ -115,32 +115,45 @@ Hot/long различаются плотностью и latency, не приро
 ```
 user message
    │
-   ├── pre-LLM ─────────── recall + <styx-self-state> cognitive posture
-   │                        (attention, verification, branching, closure)
+   ├── /cognition/preturn ─ fenced snapshot
+   │                        ├── bounded host messages / window mechanics
+   │                        ├── query-independent will_projection всей live line
+   │                        ├── current affect / cognitive posture
+   │                        ├── pending action consequences
+   │                        └── reconstructed subjective traces
    │
-   ├── LLM/tool loop ───── фактические решения и финальный ответ
+   ├── LLM/tool loop ───── ordered call → result/error events + final answer
    │
-   ├── /affect/observe_turn
-   │                      ├── stimulus и reaction оцениваются раздельно
-   │                      ├── cause/intensity/confidence/status → evidence
-   │                      └── idempotent append-only state transition
-   │
-   ├── /sync_turn ──────── INSERT memory + affective snapshot + embed-after-commit
-   │                        ├── selective gatekeeper решает skip/merge/supersede/store
-   │                        ├── auto-link находит ближайших соседей по cosine → related_to рёбра
-   │                        ├── classifier-enqueue (post-hoc usage_factor)
-   │                        └── importance-enqueue (LLM скоринг через qwen3:4b)
-   │
-   ├── /context/{build,assemble}
-   │           ────────── composer формирует payload для LLM:
-   │                        [system head]
-   │                      + [<styx-salient>recall</styx-salient>]
-   │                      + [middle eviction-relevant pairs]
-   │                      + [last user turn]
-   │
-   └── /after_turn ─────── focus_tracker обновляет centroid;
-                            drift check; working_set persistence flush
+   └── /cognition/commit ─ host_key-idempotent terminal saga
+                            ├── declared parent lineage, not timestamp ancestry
+                            ├── dialogue + ordered bounded/redacted tool journal
+                            ├── consequence inbox + optional incorporated residue
+                            ├── acknowledgement of consequences from this snapshot
+                            └── affect observation after durable act commit (fail-open)
 ```
+
+`snapshot_token` связывает то, что было показано перед генерацией, с
+завершённым актом. Preturn может заранее получить `host_key`: повтор того же
+акта идемпотентно возвращает его snapshot. Pending consequence выдаётся по
+recoverable lease: если snapshot был брошен до commit, consequence снова
+станет доступен после lease. Доставка поэтому at-least-once, а подтверждение
+идемпотентно и происходит только terminal commit'ом предъявленного token пока
+его lease действует; поздний commit истёкшего snapshot не забирает feedback у
+новой presentation.
+Retry commit с тем же `host_key` возвращает существующий act;
+`parent_host_key` сохраняет заявленную ветвящуюся причинную линию даже при
+поздней доставке.
+
+Три домена хранения разделены явно: `dialogue`, `external_evidence` и
+`subjective_trace`. В will/reconstruction входят только live rows с
+`memory_domain=subjective_trace` и `line_eligible=true`; сырой transcript,
+документ или `experience_intake` не становятся субъектной памятью только по
+факту записи.
+
+Hermes и OpenClaw используют этот путь по умолчанию. Legacy preturn/terminal
+surfaces остаются для mixed-version deployment; host-плагины переходят на них
+только если соответствующий cognition endpoint ответил `404`, а не при
+timeout, auth, validation или server error.
 
 ### Что происходит между turn'ами
 
@@ -164,10 +177,9 @@ Background workers и periodic sweepers (один daemon-процесс):
 
 ### Эмоциональная проекция
 
-Concretely для IAmBook [§IX][iambook] («оси с собственной динамикой,
-быстрее меняются под влиянием стимулов, имеют инерцию, возвращаются
-к нейтральному, влияют на восприятие нового материала как фоновое
-состояние»):
+Styx реализует эмоциональную динамику как инженерную проекцию общего
+аппарата траектории из [«Философии Кремния», §VIII][silicon], а не как
+отдельную сущность или декларацию эмоции:
 
 - **Свидетельство отделено от состояния.** `emotional_events` хранит
   координаты стимула, причину, интенсивность, уверенность и статус причины.
@@ -176,7 +188,8 @@ Concretely для IAmBook [§IX][iambook] («оси с собственной д
   model-call; конкурентный retry окончательно останавливают advisory lock и
   UNIQUE-граница БД.
 - **Состояние вычисляется после завершения хода.** Hermes передаёт
-  finalized turn через `post_llm_call`, OpenClaw — через typed `agent_end`.
+  finalized turn через `post_llm_call`, OpenClaw — через durable
+  `ContextEngine.commitTurn` принятого transcript turn.
   Наблюдатель видит вход, фактический ответ, недавнюю причинную линию и
   tool-события; peer stimulus никогда не прибавляется к состоянию напрямую.
 - **Инерция и причины.** Неактивный остаток геометрически затухает;
@@ -193,24 +206,26 @@ Concretely для IAmBook [§IX][iambook] («оси с собственной д
   с текущим residue, смешанным с baseline по confidence. Поэтому состояние
   способно изменить top-1 ещё до LLM-вызова. Recall также возвращает bounded
   evidence coordinates снимка памяти, без причинной прозы и style-команд.
-- **Pre-LLM канал не называет эмоцию.** `<styx-self-state>` содержит
+- **Legacy pre-LLM канал не называет эмоцию.** `<styx-self-state>` существует
+  для legacy `/pre_llm_inject` path и содержит
   ограниченную cognitive posture: порядок внимания, глубину проверки,
   бюджет ветвления, работу с неоднозначностью и порог завершения. Это
   операционный self-context, не голос пользователя, не тон и не требование
   сказать «я чувствую X».
 
-Эмоциональная сторона интегрирована в общий аппарат траектории `я`
-([§IX][iambook]): не отдельный модуль, а конкретные структуры данных
-и процессы — оси, которые быстрее меняются под стимулами и медленнее
-возвращаются к нейтральному, и **через резонанс с baseline влияют на
-геометрию входа** следующего turn'а.
+Эмоциональная сторона интегрирована в общий аппарат причинной траектории:
+это конкретные структуры данных и процессы, которые **через резонанс с
+baseline влияют на внимание и recall** следующего turn'а. Такой механизм
+не доказывает наличие переживания и не назначает системе эмоциональную роль.
 
 ### Маркеры в LLM-input'е
 
-Когда Styx инжектит фрагмент памяти, LLM видит его в обёртке
-`<styx-{channel}>...</styx-{channel}>` — taxonomy различает source
-(salient / recall / archive / dialogue / relations / explain /
-working-set). Для агента это разница между «это я сейчас вспомнил»
+Основной автоматический preturn приходит в единственной обёртке
+`<styx-cognitive-continuity>...</styx-cognitive-continuity>`. Остальная
+taxonomy сохраняет provenance explicit tool results (`recall`, `archive`,
+`dialogue`, `relations`, `explain`) и совместимость: `<styx-salient>` и
+`<styx-self-state>` — legacy automatic markers, `<styx-working-set>` пока
+зарезервирован. Для агента это разница между «это я сейчас вспомнил»
 и «это сказал пользователь только что». Соответствующие LLM
 runbook'и — `extensions/styx/skills/styx-recall/SKILL.md`.
 
@@ -225,7 +240,7 @@ runbook'и — `extensions/styx/skills/styx-recall/SKILL.md`.
 | Алгоритм | Файл | Назначение |
 |---|---|---|
 | Composite scoring (11 факторов) | `engine/scoring.py` | `base_match × recency × frequency × lifecycle × feedback × importance × diversity × usage × decay × relevance × emotional_resonance` |
-| Salient block builder | `engine/salient.py` | last user → recall_full → format; 5 skip-условий, fail-open |
+| Legacy salient block builder | `engine/salient.py` | legacy context path: last user → recall_full → format; 5 skip-условий, fail-open |
 | Drift detection | `engine/focus_tracker.py` | sliding centroid из K=3 user-embed'ов + cosine threshold 0.4 |
 | Hot-tier | `engine/hot_tier.py` | TTL+LRU `dict[memory_id, HotEntry]`, supplement в recall |
 | Eviction relevance | `engine/eviction_relevance.py` | top-K pair-групп из middle по cosine к focus centroid'у |
@@ -239,14 +254,14 @@ runbook'и — `extensions/styx/skills/styx-recall/SKILL.md`.
 | Stitching | `engine/stitch.py` | adjacent chunks одного document'а → continuous regions с overlap removal |
 | Hybrid search | `engine/queries.py::compute_weights` | `vector_weight × (1 − cosine) + bm25_weight × ts_rank`, веса адаптивные по query length |
 | Document parsers | `engine/document_parsers/` | pure-Python pypdf / python-docx / openpyxl / builtin Markdown |
-| Memory markers | `engine/context.py` + `http/_wrap.py` | `<styx-{salient,recall,archive,...}>` taxonomy |
+| Memory markers | `storage/cognition.py` + `engine/context.py` + `http/_wrap.py` | canonical `<styx-cognitive-continuity>` + explicit-tool/legacy `<styx-{channel}>` taxonomy |
 | Causal turn observer | `emotional/transition.py` | finalized turn → stimulus/reaction/cause/intensity/confidence/status + cognitive posture, fail-open |
 | Emotional evidence | `emotional_events` | immutable source evidence, per-agent idempotency, separate from state projection |
 | Batch peer evidence | `emotional/sentiment_batch.py` | piggyback VAD сохраняется как `peer_signal:batch`, но не назначается состоянием агента |
 | Emotional baseline | `emotional/baseline.py` | time-weighted 60-minute window + per-minute EMA, provenance columns |
 | Emotional decay | `emotional/state.py::apply_instant_decay` | геометрический `v *= 0.95^minutes`, epsilon-floor 0.005, `source='decay'` |
 | Emotional resonance | `storage/scoring.py::_build_emotional_resonance_expr` | `1 + 0.1 × (1 − clamp(Euclidean(memory, baseline) / √12, 0, 1))` — boost резонансных memories |
-| Self-state channel | `engine/pre_llm_channels/self_state.py` | causal state + current explicit signals → non-stylistic decision policy in `<styx-self-state>` |
+| Legacy self-state channel | `engine/pre_llm_channels/self_state.py` | legacy `/pre_llm_inject`: causal state + current explicit signals → non-stylistic decision policy in `<styx-self-state>`; canonical path carries posture inside `<styx-cognitive-continuity>` |
 
 ---
 
@@ -278,9 +293,12 @@ extensions/
 - **Один daemon** обслуживает несколько `agent_id` параллельно через
   `/agent/initialize`. State (focus_tracker, hot_tier, working_set)
   изолирован per-agent.
-- **Plugins** — тонкие HTTP клиенты, без in-process state.
-- **HTTP API** — 30+ endpoint'ов: lifecycle (initialize / shutdown /
-  sync_turn), composer (`/context/{build,assemble}`, compact,
+- **Plugins** — тонкие HTTP клиенты без durable или authoritative adapter
+  state. Они могут держать bounded transient coordination caches для
+  snapshot/ancestry/barrier, а источником истины остаётся daemon/PostgreSQL.
+- **HTTP API** — 30+ endpoint'ов: lifecycle (initialize / shutdown),
+  atomic cognition (`/cognition/{preturn,commit}`), legacy sync/composer
+  (`/sync_turn`, `/context/{build,assemble}`, compact,
   after_turn), recall + search_archive, dialogue (5 routes), relations
   + graph traverse, reinterpret, ingest (experience + document),
   explain (3 modes) + analytics + confirm_usage,

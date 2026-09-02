@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 import hashlib
 import threading
+import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,6 +34,38 @@ _CLIENT: "StyxCoreClient | None" = None
 _LOCK = threading.Lock()
 _TURN_KEYS: dict[str, str] = {}
 _TURN_CONTENT_KEYS: dict[tuple[str, str], list[str]] = {}
+_PRETURN_BY_ACT: "OrderedDict[tuple[str, str], tuple[str | None, float]]" = OrderedDict()
+_ACT_COORDINATES: "OrderedDict[tuple[str, str], tuple[str | None, str | None, float]]" = OrderedDict()
+_LAST_ACT_KEYS: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
+_COMMITTED_ACT_KEYS: "OrderedDict[str, float]" = OrderedDict()
+
+_SNAPSHOT_TTL_S = 120.0
+_STATE_TTL_S = 30.0 * 60.0
+_MAX_ACT_STATE = 2_048
+
+
+def _prune_act_state(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    for key, (_snapshot, touched_at) in list(_PRETURN_BY_ACT.items()):
+        if current - touched_at > _SNAPSHOT_TTL_S:
+            _PRETURN_BY_ACT.pop(key, None)
+    for key, (_parent, _snapshot, touched_at) in list(_ACT_COORDINATES.items()):
+        if current - touched_at > _STATE_TTL_S:
+            _ACT_COORDINATES.pop(key, None)
+    for key, (_act_key, touched_at) in list(_LAST_ACT_KEYS.items()):
+        if current - touched_at > _STATE_TTL_S:
+            _LAST_ACT_KEYS.pop(key, None)
+    for key, touched_at in list(_COMMITTED_ACT_KEYS.items()):
+        if current - touched_at > _STATE_TTL_S:
+            _COMMITTED_ACT_KEYS.pop(key, None)
+    for mapping in (
+        _PRETURN_BY_ACT,
+        _ACT_COORDINATES,
+        _LAST_ACT_KEYS,
+        _COMMITTED_ACT_KEYS,
+    ):
+        while len(mapping) > _MAX_ACT_STATE:
+            mapping.popitem(last=False)
 
 
 def _bounded_text(value: str, limit: int) -> str:
@@ -86,6 +120,78 @@ def clear_session() -> None:
         _CLIENT = None
         _TURN_KEYS.clear()
         _TURN_CONTENT_KEYS.clear()
+        _PRETURN_BY_ACT.clear()
+        _ACT_COORDINATES.clear()
+        _LAST_ACT_KEYS.clear()
+        _COMMITTED_ACT_KEYS.clear()
+
+
+def remember_preturn_snapshot(
+    session_id: str, snapshot_token: str | None, *, act_key: str | None = None
+) -> None:
+    """Remember a fence only when Hermes exposed its physical turn key.
+
+    An unkeyed FIFO can attach a cancelled preturn to a later act, so it is
+    intentionally discarded rather than guessed.
+    """
+    with _LOCK:
+        if not act_key:
+            return
+        now = time.monotonic()
+        _prune_act_state(now)
+        coordinate = (session_id or "", act_key)
+        _PRETURN_BY_ACT.pop(coordinate, None)
+        _PRETURN_BY_ACT[coordinate] = (snapshot_token, now)
+        _prune_act_state(now)
+
+
+def declare_act(session_id: str, act_key: str) -> tuple[str | None, str | None]:
+    """Return stable parent/snapshot coordinates for a terminal retry.
+
+    Host order, not timestamps or response text, establishes ancestry.  The
+    declaration is retained even after a failed HTTP attempt so a later turn
+    still names the physical act it actually followed.
+    """
+    with _LOCK:
+        now = time.monotonic()
+        _prune_act_state(now)
+        session = session_id or ""
+        coordinate = (session, act_key)
+        existing = _ACT_COORDINATES.pop(coordinate, None)
+        if existing is not None:
+            parent, snapshot, _ = existing
+            _ACT_COORDINATES[coordinate] = (parent, snapshot, now)
+            return parent, snapshot
+        parent_entry = _LAST_ACT_KEYS.get(session)
+        parent = parent_entry[0] if parent_entry is not None else None
+        snapshot_entry = _PRETURN_BY_ACT.pop(coordinate, None)
+        snapshot = snapshot_entry[0] if snapshot_entry is not None else None
+        _ACT_COORDINATES[coordinate] = (parent, snapshot, now)
+        _LAST_ACT_KEYS.pop(session, None)
+        _LAST_ACT_KEYS[session] = (act_key, now)
+        _prune_act_state(now)
+        return parent, snapshot
+
+
+def mark_cognition_committed(act_key: str) -> None:
+    with _LOCK:
+        now = time.monotonic()
+        _prune_act_state(now)
+        _COMMITTED_ACT_KEYS.pop(act_key, None)
+        _COMMITTED_ACT_KEYS[act_key] = now
+        _prune_act_state(now)
+
+
+def cognition_committed(act_key: str | None) -> bool:
+    if act_key is None:
+        return False
+    with _LOCK:
+        _prune_act_state()
+        touched_at = _COMMITTED_ACT_KEYS.pop(act_key, None)
+        if touched_at is None:
+            return False
+        _COMMITTED_ACT_KEYS[act_key] = time.monotonic()
+        return True
 
 
 def remember_turn_key(

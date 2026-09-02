@@ -36,7 +36,7 @@ def test_recall_full_updates_last_accessed_at(db) -> None:
         cur.execute(
             "INSERT INTO memories "
             "  (agent_id, role, content, embedding, last_accessed_at) "
-            "VALUES (%s, 'user', %s, %s::vector, "
+            "VALUES (%s, 'summary', %s, %s::vector, "
             "        now() - interval '7 days') RETURNING id",
             (
                 agent,

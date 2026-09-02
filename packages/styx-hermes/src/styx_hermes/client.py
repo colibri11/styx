@@ -174,7 +174,7 @@ class StyxCoreClient:
             {
                 "agent_id": agent_id,
                 "session_id": session_id,
-                "messages": messages,
+                "messages": messages or [],
                 "token_budget": token_budget,
             },
             timeout=self._long_timeout,
@@ -202,6 +202,76 @@ class StyxCoreClient:
                 "platform": platform,
                 "extra": extra or {},
             },
+        )
+
+    def cognition_preturn(
+        self,
+        agent_id: str,
+        *,
+        host_key: str | None = None,
+        session_id: str | None = None,
+        messages: list[dict[str, Any]] | None = None,
+        query: str | None = None,
+        token_budget: int | None = None,
+        model: str | None = None,
+        platform: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build one fenced pre-cognitive envelope for a Hermes turn."""
+        return self._post(
+            "/cognition/preturn",
+            {
+                "agent_id": agent_id,
+                "host_key": host_key,
+                "session_id": session_id,
+                "messages": messages or [],
+                "query": query,
+                "token_budget": token_budget,
+                "model": model,
+                "platform": platform,
+                "extra": extra or {},
+            },
+            timeout=self._long_timeout,
+        )
+
+    def cognition_commit(
+        self,
+        agent_id: str,
+        *,
+        session_id: str | None,
+        host_key: str,
+        parent_host_key: str | None,
+        snapshot_token: str | None,
+        status: str,
+        user_message: str,
+        assistant_response: str,
+        conversation_history: list[dict[str, Any]] | None = None,
+        tool_events: list[dict[str, Any]] | None = None,
+        consequences: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        platform: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Commit the finalized channel projection under stable host lineage."""
+        return self._post(
+            "/cognition/commit",
+            {
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "host_key": host_key,
+                "parent_host_key": parent_host_key,
+                "snapshot_token": snapshot_token,
+                "status": status,
+                "user_message": user_message,
+                "assistant_response": assistant_response,
+                "conversation_history": conversation_history or [],
+                "tool_events": tool_events or [],
+                "consequences": consequences or [],
+                "model": model,
+                "platform": platform,
+                "extra": extra or {},
+            },
+            timeout=self._affect_timeout,
         )
 
     def observe_affective_turn(

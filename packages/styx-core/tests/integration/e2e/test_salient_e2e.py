@@ -2,7 +2,7 @@
 
 Pipeline:
 1. Поднимаем StyxMemoryCore — он configure'ит salient_bridge.
-2. sync_turn × N через РЕАЛЬНЫЙ Ollama (embeddinggemma пишет векторы).
+2. memory_store × N через РЕАЛЬНЫЙ Ollama (embeddinggemma пишет векторы).
 3. Создаём StyxContextEngine, вызываем compress() с messages
    содержащим тематически близкий last user.
 4. Проверяем: salient message с маркером в output; в content'е
@@ -84,7 +84,7 @@ def test_compress_injects_recalled_memory_into_active_suffix(
 ) -> None:
     """Главный сценарий волны 9: compress() сам инжектит relevant memory.
 
-    Записываем 3 разных темы через sync_turn, затем compress'им messages
+    Записываем 3 разных subjective traces, затем compress'им messages
     у которых last user — про одну из тем. Salient block должен:
     - присутствовать в output (один user-role message с SALIENT_MARKER);
     - содержать что-то из записанной memory (или хотя бы вернуть
@@ -93,19 +93,16 @@ def test_compress_injects_recalled_memory_into_active_suffix(
     from styx.engine.salient import SALIENT_MARKER
 
     p, sid, _ = styx_stack
-    p.sync_turn(
-        "Расскажи про embedding-модели Ollama для Styx.",
-        "Используем embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
+    p.memory_store(
+        content="Styx использует embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
         session_id=sid,
     )
-    p.sync_turn(
-        "А по миграциям что?",
-        "Мигрировали схему с pg18 + pgvector, миграция 0002 — port из memorybox.",
+    p.memory_store(
+        content="Схема Styx мигрирована на pg18 + pgvector.",
         session_id=sid,
     )
-    p.sync_turn(
-        "Как тестируется retrieval?",
-        "Через FakeEmbeddingClient на хосте и реальный Ollama в Docker.",
+    p.memory_store(
+        content="Retrieval тестируется через FakeEmbeddingClient и реальный Ollama.",
         session_id=sid,
     )
 
@@ -147,9 +144,8 @@ def test_compress_first_n_byte_stable_across_turns(styx_stack) -> None:
     from styx.engine.transport import compute_prefix_digest
 
     p, sid, _ = styx_stack
-    p.sync_turn(
-        "Стабильный prefix важен для prompt cache.",
-        "Принято, держим первые 3 message неизменными.",
+    p.memory_store(
+        content="Стабильный prefix важен для prompt cache и остаётся неизменным.",
         session_id=sid,
     )
 

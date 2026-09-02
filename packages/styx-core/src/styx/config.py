@@ -47,6 +47,11 @@ class StyxConfig:
     # фактический ответ/решения и сохраняет stimulus отдельно от reaction.
     affective_transition_enabled: bool = True
     affective_transition_timeout_s: float = 8.0
+    # Atomic cognitive envelope bounds (wave 37).  These cap data returned to
+    # host adapters independently of their own transport limits.
+    cognition_recall_limit: int = 8
+    cognition_pending_limit: int = 16
+    cognition_snapshot_lease_s: float = 60.0
     # Baseline tick (волна 7d). EMA α=0.98 над окном 60min, периодически.
     emotional_tick_interval_s: float = 60.0
     # Recall classifier (волна 7c). Минимальная длина assistant-ответа,
@@ -419,6 +424,9 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "sentiment_timeout_s",
         "affective_transition_enabled",
         "affective_transition_timeout_s",
+        "cognition_recall_limit",
+        "cognition_pending_limit",
+        "cognition_snapshot_lease_s",
         "emotional_tick_interval_s",
         "classifier_min_assistant_length",
         "classifier_max_recall_events_per_turn",
@@ -570,6 +578,15 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         ),
         affective_transition_timeout_s=float(
             merged.get("affective_transition_timeout_s", 8.0)
+        ),
+        cognition_recall_limit=max(
+            1, min(8, int(merged.get("cognition_recall_limit", 8)))
+        ),
+        cognition_pending_limit=max(
+            1, min(16, int(merged.get("cognition_pending_limit", 16)))
+        ),
+        cognition_snapshot_lease_s=max(
+            1.0, min(3600.0, float(merged.get("cognition_snapshot_lease_s", 60.0)))
         ),
         emotional_tick_interval_s=float(
             merged.get("emotional_tick_interval_s", 60.0)
@@ -868,6 +885,18 @@ def _read_env() -> dict[str, Any]:
             float(os.environ["STYX_AFFECTIVE_TRANSITION_TIMEOUT_S"])
             if os.environ.get("STYX_AFFECTIVE_TRANSITION_TIMEOUT_S")
             else None
+        ),
+        "cognition_recall_limit": (
+            int(os.environ["STYX_COGNITION_RECALL_LIMIT"])
+            if os.environ.get("STYX_COGNITION_RECALL_LIMIT") else None
+        ),
+        "cognition_pending_limit": (
+            int(os.environ["STYX_COGNITION_PENDING_LIMIT"])
+            if os.environ.get("STYX_COGNITION_PENDING_LIMIT") else None
+        ),
+        "cognition_snapshot_lease_s": (
+            float(os.environ["STYX_COGNITION_SNAPSHOT_LEASE_S"])
+            if os.environ.get("STYX_COGNITION_SNAPSHOT_LEASE_S") else None
         ),
         "emotional_tick_interval_s": (
             float(os.environ["STYX_EMOTIONAL_TICK_INTERVAL_S"])

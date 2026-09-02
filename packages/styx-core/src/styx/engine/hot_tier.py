@@ -61,6 +61,8 @@ class HotEntry:
     created_at: Any
     embedding: list[float]
     evicted_at: float
+    memory_domain: str = "subjective_trace"
+    line_eligible: bool = True
     affective_provenance: MemoryAffectiveProvenance | None = None
 
 
@@ -122,6 +124,8 @@ def put_many(agent_id: str, hits: list[MemoryHit]) -> None:
             metadata=hit.metadata,
             created_at=hit.created_at,
             embedding=list(hit.embedding),
+            memory_domain=hit.memory_domain,
+            line_eligible=hit.line_eligible,
             affective_provenance=hit.affective_provenance,
             evicted_at=now,
         )
@@ -154,6 +158,8 @@ def scan_candidates(
             expired.append(entry_id)
             continue
         if not _passes_snapshot(entry, snapshot):
+            continue
+        if entry.memory_domain != "subjective_trace" or not entry.line_eligible:
             continue
         cosine = _cosine(query_vector, entry.embedding)
         if cosine < min_score:
@@ -262,6 +268,8 @@ def _to_hit(entry: HotEntry, cosine: float) -> MemoryHit:
         score=cosine,
         match_score=cosine,
         embedding=list(entry.embedding),
+        memory_domain=entry.memory_domain,
+        line_eligible=entry.line_eligible,
         affective_provenance=entry.affective_provenance,
     )
 

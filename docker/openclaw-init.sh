@@ -6,12 +6,6 @@
 #
 # - gateway.{mode,bind,controlUi}: gateway не стартует без mode=local +
 #   allowed origins. Restore при любых правках через Control UI.
-# - agents.defaults.model.primary: ollama/qwen3:4b-local (LAN Ollama).
-#   В Phase A-D было zai/glm-5.1 через z.ai, но (1) z.ai
-#   unreachable из контейнера в текущем стике, (2) embedded
-#   `agent --local` потом использует этот же config. Ollama проверена.
-# - models.providers.ollama.baseUrl: переопределение default
-#   http://127.0.0.1:11434 на http://ollama:11434 (docker extra_hosts).
 # - plugins.slots.contextEngine = "styx": exclusive слот, отключает
 #   Pi legacy ContextEngine.
 # - plugins.entries.styx.{enabled,config.*}: daemonUrl, httpToken,
@@ -25,60 +19,32 @@
 
 set -eu
 
-CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-/home/node/.openclaw}"
+CONFIG_DIR="${OPENCLAW_STATE_DIR:-${OPENCLAW_CONFIG_DIR:-/home/node/.openclaw}}"
 mkdir -p "$CONFIG_DIR"
 
 STYX_DAEMON_URL_BOOT="${STYX_DAEMON_URL:-http://styx-daemon:8788}"
 STYX_HTTP_TOKEN_BOOT="${STYX_HTTP_TOKEN:-test-token-do-not-use-in-prod}"
 
-cleanup_legacy_meta_stamp() {
-  node -e '
-const fs = require("node:fs");
-const path = process.env.OPENCLAW_CONFIG_DIR
-  ? `${process.env.OPENCLAW_CONFIG_DIR}/openclaw.json`
-  : "/home/node/.openclaw/openclaw.json";
-if (!fs.existsSync(path)) process.exit(0);
-const config = JSON.parse(fs.readFileSync(path, "utf8"));
-if (config.meta && typeof config.meta === "object") {
-  delete config.meta.lastTouchedAt;
-  if (Object.keys(config.meta).length === 0) delete config.meta;
-}
-fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
-'
-}
-
-# Сначала очистить stamp от предыдущего запуска, иначе новый config-set сам
-# откажется читать уже невалидный для текущей схемы файл.
-cleanup_legacy_meta_stamp
-
 echo "[openclaw-init] applying bootstrap config…"
-# Phase E choice: primary LLM = zai/glm-5.1.
-#
-# Изначально пробовали ollama/qwen3:4b-local (LAN Ollama гарантированно
-# доступна), но все локальные модели в нашей Ollama (qwen3:4b-local,
-# bge-m3, embeddinggemma) имеют capabilities=["completion"] или
-# ["embedding"] — НЕТ tool-calling capability hint в metadata. OpenClaw
-# embedded agent посылает 16 styx_* tool schemas, Ollama отклоняет
-# запрос: 400 "registry.ollama.ai/library/qwen3:4b-local does not
-# support tools".
-#
-# z.ai (GLM) — tools-capable из коробки + reachable из контейнера
-# (404/401 от api.z.ai/v1/models = network OK, gen Phase A-D гипотеза
-# unreachable z.ai была неверной — мы имели configuration issue, не
-# network). ZAI_API_KEY мостится из GLM_API_KEY в compose (см. comment
-# в openclaw-gateway service).
-#
-# Чтобы переключиться обратно на Ollama для caching/offline сценариев:
-# нужна tools-capable модель в Ollama (qwen3:14b/llama3.3 etc).
+# Базовый compatibility lane намеренно не выбирает provider/model. В
+# OpenClaw 2026.8.2 ZAI поставляется отдельным provider package; принудительный
+# zai/glm здесь делал чистый официальный image неработоспособным.
+# Штатный config writer сохраняет JSON5/$include semantics и выполняет schema
+# validation. Эти unsets мигрируют только test-stack state старой линии.
+unset_if_present() {
+  if node /app/dist/index.js config get "$1" >/dev/null 2>&1; then
+    node /app/dist/index.js config unset "$1"
+  fi
+}
+unset_if_present plugins.entries.zai
+unset_if_present agents.defaults.model.primary
+unset_if_present plugins.entries.styx.hooks
 node /app/dist/index.js config set --batch-json "[
   {\"path\":\"gateway.mode\",\"value\":\"local\"},
   {\"path\":\"gateway.bind\",\"value\":\"lan\"},
   {\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[\"http://localhost:18789\",\"http://127.0.0.1:18789\"]},
-  {\"path\":\"agents.defaults.model.primary\",\"value\":\"zai/glm-5.1\"},
   {\"path\":\"plugins.slots.contextEngine\",\"value\":\"styx\"},
   {\"path\":\"plugins.entries.styx.enabled\",\"value\":true},
-  {\"path\":\"plugins.entries.styx.hooks.allowConversationAccess\",\"value\":true},
-  {\"path\":\"plugins.entries.styx.hooks.timeouts.agent_end\",\"value\":30000},
   {\"path\":\"plugins.entries.styx.config.daemonUrl\",\"value\":\"${STYX_DAEMON_URL_BOOT}\"},
   {\"path\":\"plugins.entries.styx.config.httpToken\",\"value\":\"${STYX_HTTP_TOKEN_BOOT}\"},
   {\"path\":\"plugins.entries.styx.config.agentMapping\",\"value\":{\"*\":\"auto\"}},
@@ -87,11 +53,16 @@ node /app/dist/index.js config set --batch-json "[
   {\"path\":\"plugins.entries.styx.config.ownsCompaction\",\"value\":true}
 ]"
 
-# openclaw:latest на переходе конфиг-схем может записать служебный
-# meta.lastTouchedAt старым config-set writer'ом, а gateway уже валидирует
-# новой схемой и отказывается стартовать. Удаляем только этот неоперационный
-# stamp; содержательные meta-ключи, если они появятся, сохраняются.
-cleanup_legacy_meta_stamp
+# Context-engine capability requires explicit consent in current OpenClaw.
+node /app/dist/index.js plugins enable styx --accept-capabilities
+
+# v2026.8.2 migrates legacy workspace/session setup markers through doctor.
+# Record completion in the persistent test state so ordinary restarts stay fast.
+MIGRATION_MARKER="$CONFIG_DIR/.styx-openclaw-2026.8.2-migrated"
+if [ ! -f "$MIGRATION_MARKER" ]; then
+  node /app/dist/index.js doctor --fix --non-interactive --yes
+  touch "$MIGRATION_MARKER"
+fi
 
 echo "[openclaw-init] starting gateway on :18789"
 exec node /app/dist/index.js gateway --bind lan --port 18789

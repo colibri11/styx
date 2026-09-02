@@ -26,7 +26,7 @@ if (lockRootVersion !== expected) {
 
 const packageJson = documents[0];
 const packageLock = documents[1];
-const minimumOpenClaw = ">=2026.5.3";
+const minimumOpenClaw = ">=2026.8.2";
 const metadataMinimums = [
   packageJson?.openclaw?.compat?.pluginApi,
   packageJson?.peerDependencies?.openclaw,
@@ -37,8 +37,8 @@ if (metadataMinimums.some((value) => value !== minimumOpenClaw)) {
     `OpenClaw minimum mismatch: expected ${minimumOpenClaw}, got ${metadataMinimums.join(", ")}`,
   );
 }
-if (packageJson?.openclaw?.compat?.minGatewayVersion !== "2026.5.3") {
-  throw new Error("OpenClaw gateway minimum must be 2026.5.3");
+if (packageJson?.openclaw?.compat?.minGatewayVersion !== "2026.8.2") {
+  throw new Error("OpenClaw gateway minimum must be 2026.8.2");
 }
 
 const lockedOpenClaw = packageLock?.packages?.["node_modules/openclaw"]?.version;

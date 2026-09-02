@@ -35,6 +35,7 @@ from styx.http import registry
 from styx.http.app import create_app
 from styx.providers.memory import StyxMemoryCore
 from styx.storage import migrate
+from styx.storage.cognition import ensure_will_projection, strict_reconstruction
 
 
 pytestmark = pytest.mark.skipif(
@@ -203,7 +204,8 @@ def _act_marker_memory(dsn: str, memory_id: str) -> dict:
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT content, kind, kind_src, role, archive_ref "
+                "SELECT content, kind, kind_src, role, archive_ref, "
+                "       memory_domain, line_eligible "
                 "FROM memories WHERE id = %s",
                 (memory_id,),
             )
@@ -211,6 +213,7 @@ def _act_marker_memory(dsn: str, memory_id: str) -> dict:
     return {
         "content": row[0], "kind": row[1], "kind_src": row[2],
         "role": row[3], "archive_ref": row[4],
+        "memory_domain": row[5], "line_eligible": row[6],
     }
 
 
@@ -255,8 +258,16 @@ def test_ingest_plaintext(stack) -> None:
     assert "положил в архив" in marker["content"]
     assert "sample.txt" in marker["content"]
     assert marker["kind"] == "note"
-    assert marker["kind_src"] == "subjective_tail"
+    assert marker["kind_src"] == "experience_intake"
+    assert marker["memory_domain"] == "external_evidence"
+    assert marker["line_eligible"] is False
     assert marker["archive_ref"]["id"] == body["document_id"]
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        will = ensure_will_projection(conn, agent)
+        recalled = strict_reconstruction(conn, agent, [1.0, *([0.0] * 767)])
+    assert will["formed"] is False
+    assert will["source_count"] == 0
+    assert recalled == []
 
 
 def test_ingest_markdown(stack) -> None:

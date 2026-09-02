@@ -14,6 +14,7 @@ from styx.http.routes import (
     agent_state as agent_state_route,
     analytics as analytics_route,
     confirm_usage as confirm_usage_route,
+    cognition as cognition_route,
     context as context_route,
     dialogue as dialogue_route,
     explain as explain_route,
@@ -58,6 +59,7 @@ def create_app(config: StyxConfig) -> FastAPI:
     app.include_router(context_route.router)
     app.include_router(pre_llm_route.router)
     app.include_router(affect_route.router)
+    app.include_router(cognition_route.router)
     app.include_router(agent_state_route.router)
     app.include_router(memory_store_route.router)
     app.include_router(relations_route.router)

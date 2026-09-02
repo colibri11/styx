@@ -291,14 +291,8 @@ def test_ingest_document_unsupported_extension(tmp_path: Path) -> None:
         )
 
 
-def test_ingest_document_creates_act_marker_tail() -> None:
-    """Defect-fix A: file-ingest создаёт tail-memory с маркером акта
-    архивации — НЕ обрезок содержания (IAmBook §V).
-
-    tail-memory: kind='note', kind_src='subjective_tail', role='summary'
-    (все валидны под CHECK constraint'ы memories). content — маркер
-    акта: «я положил в архив документ ...», без содержания документа.
-    """
+def test_ingest_document_marker_is_external_and_not_line_eligible() -> None:
+    """File-ingest audit marker never becomes a subjective trace."""
     queries = _StubQueries()
     embedder = _StubEmbedder()
     ingest_document(
@@ -311,8 +305,10 @@ def test_ingest_document_creates_act_marker_tail() -> None:
     assert len(queries.inserted_memories) == 1
     mem = queries.inserted_memories[0]
     assert mem["kind"] == "note"
-    assert mem["kind_src"] == "subjective_tail"
+    assert mem["kind_src"] == "experience_intake"
     assert mem["role"] == "summary"
+    assert mem["memory_domain"] == "external_evidence"
+    assert mem["line_eligible"] is False
     # content — маркер акта.
     assert "положил в архив" in mem["content"]
     assert "sample.txt" in mem["content"]

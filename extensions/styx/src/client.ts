@@ -190,6 +190,104 @@ export type AffectObserveTurnResponse = {
   reason?: string | null;
 };
 
+export type CognitionPreturnRequest = {
+  agent_id: string;
+  host_key?: string | null;
+  session_id?: string | null;
+  messages: Array<{
+    role: "system" | "user" | "assistant" | "tool";
+    content: string;
+    name?: string | null;
+    tool_call_id?: string | null;
+  }>;
+  query?: string | null;
+  token_budget?: number | null;
+  model?: string | null;
+  platform?: string | null;
+  extra?: Record<string, string | Record<string, unknown>>;
+};
+
+export type SyncTurnRequest = {
+  agent_id: string;
+  session_id?: string | null;
+  user_content?: string;
+  assistant_content?: string;
+  tool_calls?: Array<Record<string, unknown>> | null;
+  idempotency_key?: string | null;
+};
+
+export type SyncTurnResponse = {
+  memory_ids: string[];
+  recall_event_ids: string[];
+};
+
+export type CognitionPreturnResponse = {
+  messages: Array<Record<string, unknown>>;
+  line_version: number;
+  snapshot_token: string;
+  will_projection: {
+    formed: boolean;
+    technical_projection: true;
+    line_version: number;
+    source_count: number;
+    source_hash: string;
+    supports: Array<Record<string, unknown>>;
+    computation_version: string;
+  };
+  affect?: Record<string, unknown> | null;
+  reconstruction: {
+    traces: Array<Record<string, unknown>>;
+    query_used: boolean;
+    embed_available: boolean;
+  };
+  pending_consequences: Array<Record<string, unknown>>;
+  system_prompt_addition?: string | null;
+};
+
+export type CognitionToolEvent = {
+  kind: "call" | "result" | "error";
+  tool_event_id: string;
+  name: string;
+  content: string;
+  metadata: Record<string, string>;
+};
+
+export type CognitionCommitRequest = {
+  agent_id: string;
+  host_key: string;
+  parent_host_key?: string | null;
+  session_id?: string | null;
+  snapshot_token?: string | null;
+  snapshot_policy?: "explicit" | "latest_session";
+  parent_policy?: "explicit" | "latest_session";
+  status: "completed" | "failed";
+  user_message: string;
+  assistant_response: string;
+  conversation_history: Array<Record<string, unknown>>;
+  tool_events: CognitionToolEvent[];
+  consequences: Array<{
+    kind: string;
+    content: string;
+    incorporate: boolean;
+    line_eligible?: boolean;
+    memory_kind?: "fact" | "episode" | "decision" | "concept" | "note";
+    metadata: Record<string, string>;
+  }>;
+  model?: string | null;
+  platform?: string | null;
+  extra?: Record<string, string>;
+};
+
+export type CognitionCommitResponse = {
+  act_id: string;
+  duplicate: boolean;
+  committed: boolean;
+  line_version: number;
+  acknowledged_consequences: number;
+  consequence_ids: string[];
+  memory_ids: string[];
+};
+
 // ── memory_store (волна 17) ──────────────────────────────────────────────
 
 export type MemoryStoreRequest = {
@@ -663,6 +761,18 @@ export type StyxClient = {
     body: AffectObserveTurnRequest,
     options?: StyxRequestOptions,
   ) => Promise<AffectObserveTurnResponse>;
+  cognitionPreturn: (
+    body: CognitionPreturnRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<CognitionPreturnResponse>;
+  cognitionCommit: (
+    body: CognitionCommitRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<CognitionCommitResponse>;
+  syncTurn: (
+    body: SyncTurnRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SyncTurnResponse>;
   // tools (Phase D)
   memoryStore: (body: MemoryStoreRequest) => Promise<MemoryStoreResponse>;
   recall: (body: RecallRequest) => Promise<RecallResponse>;
@@ -829,6 +939,9 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     contextCompact: (body) => postCall("/context/compact", body),
     contextAfterTurn: (body) => postCall("/context/after_turn", body),
     affectObserveTurn: (body, options) => postCall("/affect/observe_turn", body, options),
+    cognitionPreturn: (body, options) => postCall("/cognition/preturn", body, options),
+    cognitionCommit: (body, options) => postCall("/cognition/commit", body, options),
+    syncTurn: (body, options) => postCall("/sync_turn", body, options),
     // tools
     memoryStore: (body) => postCall("/memory_store", body),
     recall: (body) => postCall("/recall", body),

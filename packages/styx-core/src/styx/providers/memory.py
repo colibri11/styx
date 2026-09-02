@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -803,6 +804,7 @@ class StyxMemoryCore:
         content: str,
         session_id: uuid.UUID | None,
         idempotency_key: str | None = None,
+        cognitive_act_id: uuid.UUID | None = None,
     ) -> list[tuple[uuid.UUID, str]]:
         """Вставить реплику дневника, разрезав её при необходимости.
 
@@ -860,6 +862,7 @@ class StyxMemoryCore:
                 content=content,
                 session_id=session_id,
                 metadata=_metadata(0, 1),
+                cognitive_act_id=cognitive_act_id,
             )
             return [(mid, content)]
 
@@ -871,6 +874,7 @@ class StyxMemoryCore:
                 content=part_text,
                 session_id=session_id,
                 metadata=_metadata(idx, len(parts)),
+                cognitive_act_id=cognitive_act_id,
             )
             out.append((mid, part_text))
         log.info(
@@ -3281,6 +3285,432 @@ class StyxMemoryCore:
             ),
             "transcript": outcome.transcript,
         })
+
+    # -- cognitive continuity envelope (wave 37) -----------------------
+
+    def cognition_preturn(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        host_key: str | None = None,
+        query: str | None = None,
+        session_id: str | None = None,
+        token_budget: int | None = None,
+        model: str | None = None,
+        platform: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build one fenced pre-generation view of line, affect and recall.
+
+        Will is a query-independent technical projection.  Recall failure is
+        isolated from it, so an empty/short query or embed outage cannot erase
+        an already formed line.
+        """
+        if self._conn is None or self._queries is None:
+            raise RuntimeError("cognition_preturn called before initialize")
+
+        normalized: list[dict[str, Any]] = []
+        for item in messages[:256]:
+            role = item.get("role")
+            if role not in {"system", "user", "assistant", "tool"}:
+                continue
+            message: dict[str, Any] = {
+                "role": role,
+                "content": str(item.get("content", ""))[:20_000],
+            }
+            if item.get("name") is not None:
+                message["name"] = str(item["name"])[:256]
+            if item.get("tool_call_id") is not None:
+                message["tool_call_id"] = str(item["tool_call_id"])[:256]
+            normalized.append(message)
+
+        if token_budget is not None:
+            # Deterministic window mechanics: stable system frame plus the
+            # newest complete messages fitting the caller's budget.
+            def _estimate(item: dict[str, Any]) -> int:
+                return max(1, len(item.get("content", "")) // 4) + 8
+
+            indexed = list(enumerate(normalized))
+            system_items = [(index, item) for index, item in indexed if item["role"] == "system"]
+            used = sum(_estimate(item) for _, item in system_items)
+            kept = list(system_items)
+            for index, item in reversed(indexed):
+                if item["role"] == "system":
+                    continue
+                cost = _estimate(item)
+                if kept and used + cost > token_budget:
+                    continue
+                kept.append((index, item))
+                used += cost
+            normalized = [item for _, item in sorted(kept, key=lambda pair: pair[0])]
+
+        effective_query = (query or "").strip()
+        if not effective_query:
+            for item in reversed(normalized):
+                if item["role"] == "user" and item["content"].strip():
+                    effective_query = item["content"].strip()
+                    break
+
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "messages": normalized,
+                    "query": effective_query,
+                    "session_id": session_id,
+                    "token_budget": token_budget,
+                    "model": model,
+                    "platform": platform,
+                    "extra": extra or {},
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        query_vector: list[float] | None = None
+        if effective_query and self._embedding is not None:
+            try:
+                query_vector = self._embedding.embed(effective_query)
+            except Exception as exc:  # noqa: BLE001 - reconstruction fail-open
+                log.warning("cognition_preturn recall embed unavailable: %s", exc)
+
+        from styx.storage.cognition import (
+            build_system_prompt_addition,
+            complete_snapshot_response,
+            ensure_will_projection,
+            load_snapshot_replay,
+            lock_agent_line,
+            present_pending_consequences,
+            record_snapshot,
+            strict_reconstruction,
+        )
+
+        snapshot_token = uuid.uuid4().hex
+        target_session = _coerce_session_id(session_id) if session_id else self._session_id
+        with self._write_lock:
+            if self._conn is None:
+                raise RuntimeError("provider shut down mid-cognition_preturn")
+            with self._guarded_write("cognition_preturn"):
+                if target_session is not None:
+                    self._queries.upsert_session(target_session)
+                replay = load_snapshot_replay(
+                    self._conn, self._agent_id, host_key, request_hash,
+                    session_id=target_session,
+                )
+                if replay is not None:
+                    self._conn.commit()
+                    return replay
+                lock_agent_line(self._conn, self._agent_id)
+                will = ensure_will_projection(self._conn, self._agent_id)
+                traces = strict_reconstruction(
+                    self._conn, self._agent_id, query_vector,
+                    limit=(self._config.cognition_recall_limit if self._config else 8),
+                )
+                snapshot_token = record_snapshot(
+                    self._conn, self._agent_id, snapshot_token, will["line_version"],
+                    session_id=target_session,
+                    host_key=host_key,
+                    request_hash=request_hash,
+                    lease_seconds=(
+                        self._config.cognition_snapshot_lease_s if self._config else 60.0
+                    ),
+                )
+                pending = present_pending_consequences(
+                    self._conn, self._agent_id, snapshot_token,
+                    limit=(self._config.cognition_pending_limit if self._config else 16),
+                )
+                state = read_last_state_record(self._conn, self._agent_id)
+                lifecycle = read_active_cause_lifecycle(self._conn, self._agent_id)
+                affect: dict[str, Any] | None = None
+                prior = _observer_prior_context(state, lifecycle) if state is not None else {}
+                causes = prior.get("causes", [])
+                from styx.engine.pre_llm_channels.self_state import (
+                    project_cognitive_posture,
+                )
+                current_event: dict[str, Any] = {"user_message": effective_query}
+                nested_event: dict[str, Any] = {}
+                raw_current_event = (extra or {}).get("current_event")
+                if isinstance(raw_current_event, dict):
+                    nested_event = raw_current_event
+                elif isinstance(raw_current_event, str):
+                    try:
+                        parsed_event = json.loads(raw_current_event)
+                    except (TypeError, json.JSONDecodeError):
+                        parsed_event = None
+                    if isinstance(parsed_event, dict):
+                        nested_event = parsed_event
+                for key in (
+                    "goal", "current_goal", "task", "constraints", "conflicts",
+                    "risk", "urgency",
+                ):
+                    value = nested_event.get(key)
+                    if value in (None, "", [], {}):
+                        value = (extra or {}).get(key)
+                    if value not in (None, "", [], {}):
+                        current_event[key] = value
+                posture_projection = project_cognitive_posture(
+                    vector=state.vector if state is not None else None,
+                    observed_at=state.at if state is not None else None,
+                    confidence=state.confidence if state is not None else None,
+                    raw_causes=list(causes),
+                    current_event=current_event,
+                    min_norm=(self._config.self_state_min_norm if self._config else 0.2),
+                    max_age_s=(self._config.self_state_max_age_s if self._config else 900.0),
+                )
+                posture = (
+                    dict(posture_projection.get("decision_policy", {}))
+                    if posture_projection is not None else {}
+                )
+                if state is not None or posture:
+                    affect = {
+                        "state_id": state.id if state is not None else None,
+                        "at": state.at if state is not None else None,
+                        "vad": ({
+                            "valence": state.vector.valence,
+                            "arousal": state.vector.arousal,
+                            "dominance": state.vector.dominance,
+                        } if state is not None else None),
+                        "confidence": state.confidence if state is not None else None,
+                        "causes": causes,
+                        "cognitive_posture": posture,
+                    }
+
+                prompt = build_system_prompt_addition(
+                    will=will,
+                    cognitive_posture=posture,
+                    pending=pending,
+                    traces=traces,
+                )
+                public_will = {
+                    key: value for key, value in will.items() if key != "embedding"
+                }
+                response = {
+                    "messages": normalized,
+                    "line_version": will["line_version"],
+                    "snapshot_token": snapshot_token,
+                    "will_projection": public_will,
+                    "affect": affect,
+                    "reconstruction": {
+                        "traces": traces,
+                        "query_used": bool(effective_query),
+                        "embed_available": query_vector is not None,
+                    },
+                    "pending_consequences": pending,
+                    "system_prompt_addition": prompt,
+                }
+                # Both the first response and every retry use the same JSON
+                # representation; datetimes cannot drift between Python and
+                # PostgreSQL decoding on replay.
+                frozen = json.loads(json.dumps(
+                    response,
+                    ensure_ascii=False,
+                    default=lambda value: value.isoformat(),
+                ))
+                complete_snapshot_response(
+                    self._conn, self._agent_id, snapshot_token, frozen
+                )
+                self._conn.commit()
+                return frozen
+
+    def cognition_commit(
+        self,
+        *,
+        host_key: str,
+        parent_host_key: str | None = None,
+        session_id: str | None = None,
+        snapshot_token: str | None = None,
+        snapshot_policy: str = "explicit",
+        parent_policy: str = "explicit",
+        status: str = "completed",
+        user_message: str = "",
+        assistant_response: str = "",
+        conversation_history: list[dict[str, Any]] | None = None,
+        tool_events: list[dict[str, Any]] | None = None,
+        consequences: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        platform: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Commit a finalized act, diary, journals and explicit residue saga."""
+        if self._conn is None or self._queries is None:
+            raise RuntimeError("cognition_commit called before initialize")
+        host_key = host_key.strip()
+        if not host_key or len(host_key) > 512:
+            raise ValueError("host_key must contain 1..512 characters")
+
+        actions = [dict(item) for item in (tool_events or [])[:64]]
+        declared = [dict(item) for item in (consequences or [])[:32]]
+        journal_consequences = list(declared)
+        for action in actions:
+            if action.get("kind") in {"result", "error"}:
+                journal_consequences.append({
+                    "kind": f"tool_{action['kind']}",
+                    "content": str(action.get("content", ""))[:8000],
+                    "metadata": {
+                        "tool_event_id": str(action.get("tool_event_id", ""))[:256],
+                        "name": str(action.get("name", ""))[:256],
+                    },
+                    "incorporate": False,
+                })
+        # Preserve all declared consequences plus every allowed result/error.
+        # HTTP bounds make the combined journal finite: 32 + 64 = 96.
+        journal_consequences = journal_consequences[:96]
+
+        from styx.storage.cognition import (
+            redact_journal_metadata,
+            redact_journal_text,
+        )
+        actions = [
+            {
+                **item,
+                "content": redact_journal_text(item.get("content", "")),
+                "metadata": redact_journal_metadata(item.get("metadata", {})),
+            }
+            for item in actions
+        ]
+        journal_consequences = [
+            {
+                **item,
+                "content": redact_journal_text(item.get("content", "")),
+                "metadata": redact_journal_metadata(item.get("metadata", {})),
+            }
+            for item in journal_consequences
+        ]
+
+        embedded: dict[int, list[float] | None] = {}
+        for index, consequence in enumerate(journal_consequences):
+            if not consequence.get("incorporate"):
+                continue
+            vector = None
+            if self._embedding is not None:
+                try:
+                    vector = self._embedding.embed(str(consequence.get("content", ""))[:2400])
+                except Exception as exc:  # noqa: BLE001 - trace survives NULL vector
+                    log.warning("cognition_commit residue embed unavailable: %s", exc)
+            embedded[index] = vector
+
+        from styx.storage.cognition import (
+            commit_cognitive_act,
+            current_line_version,
+            lock_agent_line,
+        )
+
+        raw_session = _coerce_session_id(session_id) if session_id else self._session_id
+        target_session = raw_session
+        memory_ids: list[str] = []
+        with self._write_lock:
+            if self._conn is None or self._queries is None:
+                raise RuntimeError("provider shut down mid-cognition_commit")
+            with self._guarded_write("cognition_commit"):
+                lock_agent_line(self._conn, self._agent_id)
+                input_version = current_line_version(self._conn, self._agent_id)
+                if target_session is not None:
+                    self._queries.upsert_session(target_session)
+                result = commit_cognitive_act(
+                    self._conn,
+                    self._agent_id,
+                    host_key=host_key,
+                    parent_host_key=parent_host_key,
+                    session_id=target_session,
+                    snapshot_token=snapshot_token,
+                    status=status,
+                    input_line_version=input_version,
+                    channel_input={"history": conversation_history or []},
+                    channel_output={
+                        "user_message": user_message,
+                        "assistant_response": assistant_response,
+                    },
+                    actions=actions,
+                    consequences=journal_consequences,
+                    metadata={"model": model, "platform": platform, "extra": extra or {}},
+                    snapshot_policy=snapshot_policy,
+                    parent_policy=parent_policy,
+                )
+                if result.duplicate:
+                    duplicate_line_version = current_line_version(
+                        self._conn, self._agent_id
+                    )
+                    self._conn.commit()
+                    return {
+                        "act_id": str(result.act_id),
+                        "duplicate": True,
+                        "committed": True,
+                        "line_version": duplicate_line_version,
+                        "acknowledged_consequences": result.acknowledged_count,
+                        "consequence_ids": [str(value) for value in result.consequence_ids],
+                        "memory_ids": [],
+                    }
+
+                if not self._queries.find_sync_turn_message_parts(host_key):
+                    if user_message:
+                        self._insert_message_parts(
+                            role="user", content=user_message,
+                            session_id=target_session, idempotency_key=host_key,
+                            cognitive_act_id=result.act_id,
+                        )
+                    if assistant_response:
+                        self._insert_message_parts(
+                            role="assistant", content=assistant_response,
+                            session_id=target_session, idempotency_key=host_key,
+                            cognitive_act_id=result.act_id,
+                        )
+
+                for index, consequence in enumerate(journal_consequences):
+                    if not consequence.get("incorporate"):
+                        continue
+                    eligible = bool(consequence.get("line_eligible", False))
+                    memory_id = self._queries.insert_memory(
+                        role="summary",
+                        content=str(consequence.get("content", ""))[:2400],
+                        kind=str(consequence.get("memory_kind", "episode")),
+                        kind_src="subjective",
+                        session_id=target_session,
+                        embedding=embedded.get(index),
+                        metadata={
+                            **dict(consequence.get("metadata") or {}),
+                            "cognitive_host_key": host_key,
+                            "residue_kind": consequence.get("kind"),
+                        },
+                        memory_domain=(
+                            "subjective_trace" if eligible else "external_evidence"
+                        ),
+                        line_eligible=eligible,
+                        cognitive_act_id=result.act_id,
+                    )
+                    memory_ids.append(str(memory_id))
+                line_version = current_line_version(self._conn, self._agent_id)
+                self._conn.commit()
+
+        # Affect is a coordinate of this act, never the will projection.  It is
+        # deliberately outside the durable saga: evaluator failure cannot lose
+        # the act, and the legacy endpoint deduplicates on this same host key.
+        if not result.duplicate:
+            try:
+                self.observe_affective_turn(
+                    idempotency_key=host_key,
+                    turn_id=host_key,
+                    session_id=session_id,
+                    user_message=user_message,
+                    assistant_response=assistant_response,
+                    conversation_history=conversation_history or [],
+                    tool_events=[a for a in actions if a.get("kind") in {"call", "result"}],
+                    model=model,
+                    platform=platform,
+                    extra=extra,
+                )
+            except Exception as exc:  # noqa: BLE001 - explicit fail-open seam
+                log.warning("cognition_commit affect observer failed: %s", exc)
+
+        return {
+            "act_id": str(result.act_id),
+            "duplicate": False,
+            "committed": True,
+            "line_version": line_version,
+            "acknowledged_consequences": result.acknowledged_count,
+            "consequence_ids": [str(value) for value in result.consequence_ids],
+            "memory_ids": memory_ids,
+        }
 
     # -- setup wizard ----------------------------------------------------
 

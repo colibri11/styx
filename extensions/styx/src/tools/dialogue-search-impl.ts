@@ -1,7 +1,7 @@
 // Реализация styx_dialogue_search: HTTP POST /dialogue/search.
 
 import { jsonResult } from "openclaw/plugin-sdk/core";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentToolResult } from "openclaw/plugin-sdk/tool-results";
 
 import { deriveOpenclawAgentIdFromTool } from "./agent-id.js";
 import { fmtErr } from "../client.js";

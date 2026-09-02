@@ -386,6 +386,94 @@ def _decision_policy(
     }
 
 
+def project_cognitive_posture(
+    *,
+    vector: EmotionalVector | None,
+    observed_at: _dt.datetime | None,
+    confidence: float | None,
+    raw_causes: list[Any],
+    current_event: dict[str, Any],
+    min_norm: float,
+    max_age_s: float,
+    now: _dt.datetime | None = None,
+) -> dict[str, Any] | None:
+    """Pure shared policy for inherited inertia plus the current event."""
+    current = _current_event_coordinates(current_event)
+    current_now = now or _dt.datetime.now(tz=_dt.timezone.utc)
+    structured_causes, cause_summary = _structured_causes(raw_causes, now=current_now)
+    active = any(item.get("cause_active") is True for item in structured_causes)
+
+    selected_vector: EmotionalVector | None = None
+    selected_at: _dt.datetime | None = None
+    if vector is not None and observed_at is not None:
+        norm = math.sqrt(vector.valence ** 2 + vector.arousal ** 2 + vector.dominance ** 2)
+        if norm >= min_norm:
+            candidate_at = observed_at
+            if candidate_at.tzinfo is None:
+                candidate_at = candidate_at.replace(tzinfo=_dt.timezone.utc)
+            age_s = max(0.0, (current_now - candidate_at).total_seconds())
+            if age_s <= max_age_s or active:
+                selected_vector = vector
+                selected_at = candidate_at
+            else:
+                log.warning(
+                    "self_state: last state age=%.0fs > self_state_max_age_s=%.0fs "
+                    "- inherited cause excluded; styx-worker may not be applying "
+                    "emotional_tick decay",
+                    age_s,
+                    max_age_s,
+                )
+
+    has_current_signal = bool(current["explicit_signals"] or current["host_context_fields"])
+    if selected_vector is None and not has_current_signal:
+        return None
+
+    inherited: dict[str, Any] | None = None
+    if selected_vector is not None and selected_at is not None:
+        inherited = {
+            "source": "emotional_state:last",
+            "observed_at": selected_at.isoformat(),
+            "age_s": round(max(0.0, (current_now - selected_at).total_seconds()), 3),
+            "coordinates": {
+                "valence": round(float(selected_vector.valence), 6),
+                "arousal": round(float(selected_vector.arousal), 6),
+                "dominance": round(float(selected_vector.dominance), 6),
+            },
+            "intensity": round(
+                min(
+                    1.0,
+                    math.sqrt(
+                        selected_vector.valence ** 2
+                        + selected_vector.arousal ** 2
+                        + selected_vector.dominance ** 2
+                    ) / math.sqrt(3.0),
+                ),
+                6,
+            ),
+            "confidence": confidence,
+            "confidence_basis": (
+                "causal_turn_observation"
+                if confidence is not None
+                else "legacy_state_has_no_confidence_coordinate"
+            ),
+            "cause_active": active if structured_causes else None,
+            "causal_contributions": structured_causes,
+            "causal_contributions_summary": cause_summary,
+        }
+
+    return {
+        "kind": "cognitive_posture",
+        "version": 1,
+        "causal_coordinates": {"inherited": inherited, "current_event": current},
+        "decision_policy": _decision_policy(
+            selected_vector,
+            current,
+            list((inherited or {}).get("causal_contributions", [])),
+            list(cause_summary["aggregate_posture_conflicts"]),
+        ),
+    }
+
+
 def channel_self_state(
     handle: ChannelHandle, hermes_kwargs: dict[str, Any]
 ) -> str | None:
@@ -393,9 +481,6 @@ def channel_self_state(
     if not handle.self_state_enabled:
         return None
 
-    current_event = _current_event_coordinates(hermes_kwargs)
-    vector: EmotionalVector | None = None
-    at: _dt.datetime | None = None
     rich_record = None
     connection = getattr(handle.queries, "_conn", None)
     lock_context = handle.write_lock if handle.write_lock is not None else nullcontext()
@@ -426,95 +511,17 @@ def channel_self_state(
             log.warning("self_state: get_last_emotional_state failed: %s", exc)
             entry = None
 
-    now = _dt.datetime.now(tz=_dt.timezone.utc)
-    raw_causes = list(rich_record.causal_context) if rich_record else []
-    structured_causes, cause_summary = _structured_causes(raw_causes, now=now)
-    has_unexpired_active_cause = any(
-        item.get("cause_active") is True for item in structured_causes
+    vector, observed_at = entry if entry is not None else (None, None)
+    payload = project_cognitive_posture(
+        vector=vector,
+        observed_at=observed_at,
+        confidence=rich_record.confidence if rich_record else None,
+        raw_causes=list(rich_record.causal_context) if rich_record else [],
+        current_event=hermes_kwargs,
+        min_norm=handle.self_state_min_norm,
+        max_age_s=handle.self_state_max_age_s,
     )
-    if entry is not None:
-        candidate, candidate_at = entry
-        norm = math.sqrt(
-            candidate.valence ** 2
-            + candidate.arousal ** 2
-            + candidate.dominance ** 2
-        )
-        if norm >= handle.self_state_min_norm:
-            if candidate_at.tzinfo is None:
-                candidate_at = candidate_at.replace(tzinfo=_dt.timezone.utc)
-            age_s = max(0.0, (now - candidate_at).total_seconds())
-            if (
-                age_s > handle.self_state_max_age_s
-                and not has_unexpired_active_cause
-            ):
-                log.warning(
-                    "self_state: last state age=%.0fs > "
-                    "self_state_max_age_s=%.0fs - inherited cause excluded; "
-                    "styx-worker may not be applying emotional_tick decay",
-                    age_s,
-                    handle.self_state_max_age_s,
-                )
-            else:
-                vector = candidate
-                at = candidate_at
-
-    has_current_signal = bool(
-        current_event["explicit_signals"] or current_event["host_context_fields"]
-    )
-    if vector is None and not has_current_signal:
+    if payload is None:
         return None
-
-    inherited: dict[str, Any] | None = None
-    if vector is not None and at is not None:
-        causes = structured_causes
-        inherited = {
-            "source": "emotional_state:last",
-            "observed_at": at.isoformat(),
-            "age_s": round(max(0.0, (now - at).total_seconds()), 3),
-            "coordinates": {
-                "valence": round(float(vector.valence), 6),
-                "arousal": round(float(vector.arousal), 6),
-                "dominance": round(float(vector.dominance), 6),
-            },
-            "intensity": round(
-                min(
-                    1.0,
-                    math.sqrt(
-                        vector.valence ** 2
-                        + vector.arousal ** 2
-                        + vector.dominance ** 2
-                    )
-                    / math.sqrt(3.0),
-                ),
-                6,
-            ),
-            "confidence": rich_record.confidence if rich_record else None,
-            "confidence_basis": (
-                "causal_turn_observation"
-                if rich_record and rich_record.confidence is not None
-                else "legacy_state_has_no_confidence_coordinate"
-            ),
-            "cause_active": (
-                any(item.get("cause_active") is True for item in causes)
-                if causes else None
-            ),
-            "causal_contributions": causes,
-            "causal_contributions_summary": cause_summary,
-        }
-
-    payload = {
-        "kind": "cognitive_posture",
-        "version": 1,
-        "causal_coordinates": {
-            "inherited": inherited,
-            "current_event": current_event,
-        },
-        "decision_policy": _decision_policy(
-            vector,
-            current_event,
-            list((inherited or {}).get("causal_contributions", [])),
-            list(cause_summary["aggregate_posture_conflicts"]),
-        ),
-    }
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f'<styx-self-state version="1">{encoded}</styx-self-state>'

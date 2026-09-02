@@ -28,7 +28,7 @@ def _seed(
     agent_id: str,
     content: str,
     embed_client: FakeEmbeddingClient,
-    role: str = "user",
+    role: str = "summary",
     kind: str = "episode",
 ) -> uuid.UUID:
     sid = uuid.uuid4()
@@ -209,7 +209,7 @@ def test_format_recall_text_renders_memories(conn: psycopg.Connection) -> None:
     text = format_recall_text(result)
     assert "hello world" in text
     assert "score=" in text
-    assert "role=user" in text
+    assert "role=summary" in text
 
 
 def test_recall_exposes_only_structured_bounded_affective_provenance(
@@ -249,7 +249,7 @@ def test_recall_exposes_only_structured_bounded_affective_provenance(
             " emotional_context_arousal, emotional_context_dominance, "
             " emotional_context_state_id, emotional_context_at, "
             " emotional_context_confidence, emotional_context_causes) "
-            "VALUES (%s, 'assistant', 'structured evidence memory', %s, "
+            "VALUES (%s, 'summary', 'structured evidence memory', %s, "
             " -0.2, 0.4, 0.1, %s, %s, 0.75, %s)",
             (
                 agent,
@@ -329,8 +329,8 @@ def _seed_affective_pair(
             "(agent_id, role, content, embedding, "
             " emotional_context_valence, emotional_context_arousal, "
             " emotional_context_dominance) VALUES "
-            "(%s, 'user', 'positive-context', %s, 0.8, 0.4, 0.3), "
-            "(%s, 'user', 'negative-context', %s, -0.8, -0.4, -0.3) "
+            "(%s, 'summary', 'positive-context', %s, 0.8, 0.4, 0.3), "
+            "(%s, 'summary', 'negative-context', %s, -0.8, -0.4, -0.3) "
             "RETURNING id",
             (agent_id, vec, agent_id, vec),
         )

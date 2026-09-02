@@ -2,7 +2,7 @@
 
 Pipeline:
 1. Поднимаем StyxMemoryCore — он configure'ит salient_bridge + focus_tracker.
-2. sync_turn × N через РЕАЛЬНЫЙ Ollama (embeddinggemma пишет векторы).
+2. memory_store × N через РЕАЛЬНЫЙ Ollama (embeddinggemma пишет векторы).
 3. Создаём StyxContextEngine, вызываем compress() с messages последовательно
    на стабильной теме → salient block идентичен (cache hit).
 4. Резкая смена темы → drift сработал → salient block разный (cache invalidate).
@@ -82,14 +82,12 @@ def test_stable_topic_caches_salient_across_turns(styx_stack) -> None:
     from styx.engine.salient import SALIENT_MARKER
 
     p, sid, _ = styx_stack
-    p.sync_turn(
-        "Расскажи про embedding-модели Ollama для Styx.",
-        "Используем embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
+    p.memory_store(
+        content="Styx использует embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
         session_id=sid,
     )
-    p.sync_turn(
-        "А по миграциям что?",
-        "Мигрировали схему с pg18 + pgvector, миграция 0002 — port из memorybox.",
+    p.memory_store(
+        content="Схема Styx мигрирована на pg18 + pgvector.",
         session_id=sid,
     )
 
@@ -140,14 +138,12 @@ def test_drift_invalidates_salient_cache(styx_stack) -> None:
     from styx.engine.salient import SALIENT_MARKER
 
     p, sid, _ = styx_stack
-    p.sync_turn(
-        "Расскажи про embedding-модели Ollama для Styx.",
-        "Используем embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
+    p.memory_store(
+        content="Styx использует embeddinggemma:300m-qat-q8_0, dim=768, multilingual.",
         session_id=sid,
     )
-    p.sync_turn(
-        "Расскажи про солнечное затмение.",
-        "Солнечное затмение — астрономическое явление: Луна заслоняет Солнце.",
+    p.memory_store(
+        content="Солнечное затмение — астрономическое явление: Луна заслоняет Солнце.",
         session_id=sid,
     )
 
@@ -224,9 +220,8 @@ def test_drift_disabled_via_env_falls_back_to_fresh_each_turn(
         assert salient_bridge.get_handle("alpha") is not None
         assert focus_tracker.get_state("alpha") is None
 
-        p.sync_turn(
-            "Долгое запоминаемое сообщение про embedding-модели Ollama для Styx.",
-            "Принял запись про embeddinggemma multilingual 768-dim.",
+        p.memory_store(
+            content="Долгая субъективная запись про embeddinggemma multilingual 768-dim для Styx.",
             session_id=sid,
         )
 

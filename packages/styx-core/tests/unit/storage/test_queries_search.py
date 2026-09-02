@@ -65,11 +65,11 @@ def _unit_vec(*nonzero: tuple[int, float], dim: int = 768) -> list[float]:
 def test_search_similar_returns_top_k_by_similarity(conn: psycopg.Connection) -> None:
     q = AgentScopedQueries(conn, agent_id="alpha")
 
-    a = _seed(conn, agent_id="alpha", role="user", content="apples and pears",
+    a = _seed(conn, agent_id="alpha", role="summary", content="apples and pears",
               embedding=_unit_vec((0, 1.0)))
-    b = _seed(conn, agent_id="alpha", role="user", content="orthogonal topic",
+    b = _seed(conn, agent_id="alpha", role="summary", content="orthogonal topic",
               embedding=_unit_vec((1, 1.0)))
-    c = _seed(conn, agent_id="alpha", role="user", content="opposite vector",
+    c = _seed(conn, agent_id="alpha", role="summary", content="opposite vector",
               embedding=_unit_vec((0, -1.0)))
     conn.commit()
 
@@ -84,9 +84,9 @@ def test_search_similar_returns_top_k_by_similarity(conn: psycopg.Connection) ->
 
 def test_search_similar_excludes_other_agents(conn: psycopg.Connection) -> None:
     """Application-level WHERE по agent_id — соблюдение N1 (decisions §17.1)."""
-    _seed(conn, agent_id="alpha", role="user", content="alpha-text",
+    _seed(conn, agent_id="alpha", role="summary", content="alpha-text",
           embedding=_unit_vec((0, 1.0)))
-    _seed(conn, agent_id="beta", role="user", content="beta-text",
+    _seed(conn, agent_id="beta", role="summary", content="beta-text",
           embedding=_unit_vec((0, 1.0)))
     conn.commit()
 
@@ -117,11 +117,33 @@ def test_search_similar_excludes_null_embedding(conn: psycopg.Connection) -> Non
     assert hits == []
 
 
+def test_search_similar_excludes_raw_dialogue(conn: psycopg.Connection) -> None:
+    """Raw user/assistant turns are evidence, not subjective continuity."""
+    q = AgentScopedQueries(conn, agent_id="dialogue-only")
+    _seed(
+        conn,
+        agent_id="dialogue-only",
+        role="user",
+        content="raw user turn",
+        embedding=_unit_vec((0, 1.0)),
+    )
+    _seed(
+        conn,
+        agent_id="dialogue-only",
+        role="assistant",
+        content="raw assistant turn",
+        embedding=_unit_vec((0, 1.0)),
+    )
+    conn.commit()
+
+    assert q.search_similar(query_vector=_unit_vec((0, 1.0)), limit=5) == []
+
+
 def test_search_similar_excludes_superseded(conn: psycopg.Connection) -> None:
     q = AgentScopedQueries(conn, agent_id="delta")
-    a = _seed(conn, agent_id="delta", role="user", content="superseded",
+    a = _seed(conn, agent_id="delta", role="summary", content="superseded",
               embedding=_unit_vec((0, 1.0)))
-    b = _seed(conn, agent_id="delta", role="user", content="current",
+    b = _seed(conn, agent_id="delta", role="summary", content="current",
               embedding=_unit_vec((0, 1.0)))
     with conn.cursor() as cur:
         cur.execute(
@@ -138,9 +160,9 @@ def test_search_similar_excludes_superseded(conn: psycopg.Connection) -> None:
 def test_search_similar_hybrid_with_query_text(conn: psycopg.Connection) -> None:
     """С query_text — base_match включает BM25 ветку через content_tsv."""
     q = AgentScopedQueries(conn, agent_id="epsilon")
-    _seed(conn, agent_id="epsilon", role="user", content="apples pears bananas",
+    _seed(conn, agent_id="epsilon", role="summary", content="apples pears bananas",
           embedding=_unit_vec((0, 1.0)))
-    _seed(conn, agent_id="epsilon", role="user", content="completely orthogonal text",
+    _seed(conn, agent_id="epsilon", role="summary", content="completely orthogonal text",
           embedding=_unit_vec((1, 1.0)))
     conn.commit()
 
@@ -155,7 +177,7 @@ def test_search_similar_hybrid_with_query_text(conn: psycopg.Connection) -> None
 
 def test_search_similar_include_embedding(conn: psycopg.Connection) -> None:
     q = AgentScopedQueries(conn, agent_id="zeta")
-    _seed(conn, agent_id="zeta", role="user", content="x",
+    _seed(conn, agent_id="zeta", role="summary", content="x",
           embedding=_unit_vec((0, 1.0), (5, 0.5)))
     conn.commit()
 
@@ -170,7 +192,7 @@ def test_search_similar_include_embedding(conn: psycopg.Connection) -> None:
 
 def test_search_similar_no_embedding_default(conn: psycopg.Connection) -> None:
     q = AgentScopedQueries(conn, agent_id="eta")
-    _seed(conn, agent_id="eta", role="user", content="x",
+    _seed(conn, agent_id="eta", role="summary", content="x",
           embedding=_unit_vec((0, 1.0)))
     conn.commit()
 
@@ -180,14 +202,14 @@ def test_search_similar_no_embedding_default(conn: psycopg.Connection) -> None:
 
 def test_search_similar_returns_metadata(conn: psycopg.Connection) -> None:
     q = AgentScopedQueries(conn, agent_id="theta")
-    _seed(conn, agent_id="theta", role="assistant", content="x",
+    _seed(conn, agent_id="theta", role="summary", content="x",
           embedding=_unit_vec((0, 1.0)), kind="decision")
     conn.commit()
 
     hits = q.search_similar(query_vector=_unit_vec((0, 1.0)), limit=5)
     h = hits[0]
     assert h.kind == "decision"
-    assert h.role == "assistant"
+    assert h.role == "summary"
     assert isinstance(h.metadata, dict)
 
 

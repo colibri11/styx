@@ -4,7 +4,7 @@
 // `tools/agent-id.ts::deriveOpenclawAgentIdFromTool` (per-call tool ctx)
 // использовали одну и ту же логику и одно и то же regex'ы — без drift'а.
 //
-// Format'ы соответствуют OpenClaw 2026.5.7 (`dist/session-key-*.js`):
+// Format'ы соответствуют OpenClaw 2026.8.2 (`src/routing/session-key.ts`):
 //
 //   sessionKey  := `agent:<agentId>:<rest>`
 //   agentDir    := `${stateDir}/agents/<agentId>/agent`  (или legacy `${stateDir}/agents/<agentId>`)

@@ -1,4 +1,4 @@
-"""OpenClaw plugin integration tests (волна 26 Phase E).
+"""OpenClaw plugin integration tests against the current Docker runtime.
 
 Запускаются host-side (или внутри hermes-styx как обычные integration
 tests). Обращаются к docker-стику `docker/docker-compose.test.yml`:
@@ -6,19 +6,16 @@ tests). Обращаются к docker-стику `docker/docker-compose.test.ym
 - `openclaw-cli` (sidecar для CLI-команд) — через `docker compose exec`
   (subprocess) — `plugins inspect styx --runtime --json` для lifecycle
   проверок и `agent --message ... --local` для real chat round-trip.
-- `styx-daemon` HTTP API — через `httpx` на `http://127.0.0.1:8788`
-  (порт expose'нут в compose) — для верификации side-effects (записи
-  в memories через ContextEngine.ingest).
+- PostgreSQL — для проверки durable ContextEngine.commitTurn side effects.
 
 Skip-паттерн идентичен другим integration tests: при отсутствии
 `STYX_TEST_DATABASE_URL` тесты пропускаются (значит стик не поднят, нет
 смысла дёргать docker compose).
 
 Архитектурный смысл (Phase E из `.design/openclaw-plugin-v1.md`):
-проверяем, что plugin не просто **регистрируется** (это тестировалось
-вручную в Phase A-D через `plugins inspect`), а **участвует в реальном
-turn'е** OpenClaw агента — `ContextEngine.ingest` пишет в Styx PG, на
-следующем turn assemble() поднимает то что записано.
+Базовый compose provider-neutral, поэтому LLM round-trip тесты запускаются
+только при явном STYX_OPENCLAW_LLM_E2E=1. Lifecycle/runtime проверки
+всегда работают без внешнего provider.
 """
 
 from __future__ import annotations
@@ -85,6 +82,8 @@ def _docker_exec(
     full = [
         "docker",
         "compose",
+        "--env-file",
+        ".env",
         "-f",
         "docker/docker-compose.test.yml",
         "exec",
@@ -105,7 +104,7 @@ def _docker_exec(
 def _inspect_plugin_runtime() -> dict:
     """`openclaw plugins inspect styx --runtime --json` → dict.
 
-    Реальный shape (openclaw 2026.5.7):
+    Реальный shape (OpenClaw 2026.8.2):
         {
           "workspaceDir": "...",
           "plugin": {
@@ -180,6 +179,10 @@ def test_plugin_capability_registered() -> None:
     info = _inspect_plugin_runtime()
     plugin = info.get("plugin", {})
     assert plugin.get("id") == "styx", f"plugin id mismatch: {plugin!r}"
+    assert plugin.get("packageVersion") == "0.3.0"
+    assert plugin.get("builtWithOpenClawVersion") == "2026.8.2"
+    assert plugin.get("hookNames") == []
+    assert info.get("diagnostics") == []
     assert plugin.get("activated") is True, (
         f"plugin not activated: activated={plugin.get('activated')}, "
         f"activationReason={plugin.get('activationReason')!r}, "
@@ -245,6 +248,21 @@ def test_context_engine_slot_active() -> None:
     )
 
 
+def test_post_upgrade_doctor_is_clean() -> None:
+    """Current OpenClaw finds no plugin drift after the upgrade."""
+    res = _docker_exec(
+        "openclaw-cli",
+        "node",
+        "/app/dist/index.js",
+        "doctor",
+        "--post-upgrade",
+        "--json",
+        timeout=30.0,
+    )
+    payload = json.loads(res.stdout)
+    assert payload.get("findings") == []
+
+
 # ─── e2e chat round-trip через `agent --local` ────────────────────────
 
 
@@ -256,10 +274,15 @@ def database_url() -> str:
     return url
 
 
-def test_chat_turn1_writes_to_styx_memories(database_url: str) -> None:
-    """Real chat round-trip: `openclaw agent --local` отрабатывает,
-    embedded agent ходит в z.ai/glm-5.1 и получает ответ, ContextEngine
-    записывает user+assistant turn в Styx memories.
+@pytest.mark.skipif(
+    os.environ.get("STYX_OPENCLAW_LLM_E2E") != "1",
+    reason=(
+        "provider-neutral lane; set STYX_OPENCLAW_LLM_E2E=1 "
+        "with a configured provider"
+    ),
+)
+def test_chat_turn1_commits_cognitive_act(database_url: str) -> None:
+    """Optional real chat round-trip commits the accepted logical turn.
 
     M3 (strict assert на write): после fix'а в plugin (Phase E) memories
     действительно растут — assert'им delta строго.
@@ -274,7 +297,7 @@ def test_chat_turn1_writes_to_styx_memories(database_url: str) -> None:
     # convention — `target` используется как derived part session key;
     # uuid делает прогон idempotent.
     #
-    # Phase E observation: OpenClaw 2026.5.x в `agent --local` НЕ
+    # OpenClaw CLI в `agent --local` НЕ
     # пробрасывает `--session-id` в lifecycle sessionId. CLI-флаг
     # используется для assemble-pre-LLM, но runtime генерирует свой
     # session_id для ingest. Фильтр по session_id нерелевантен —
@@ -285,7 +308,7 @@ def test_chat_turn1_writes_to_styx_memories(database_url: str) -> None:
     target = f"+1555555{uuid.uuid4().int % 10000:04d}"
     message = f"Phase E e2e test {marker}. Просто скажи hi одним предложением."
 
-    before_memories = _count_table(database_url, "memories", content_marker=marker)
+    before_acts = _count_cognitive_acts(database_url, marker)
 
     res = _docker_exec(
         "openclaw-cli",
@@ -322,7 +345,7 @@ def test_chat_turn1_writes_to_styx_memories(database_url: str) -> None:
             f"  stdout (first 500 chars): {res.stdout[:500]}"
         )
 
-    # Schema (openclaw 2026.5.7 с --to/--session-id):
+    # Schema (OpenClaw 2026.8.2 с --to/--session-id):
     #   { meta: {agentMeta: {model, ...}, ...}, payloads: [{text, mediaUrl}] }
     payloads = payload.get("payloads", [])
     assert payloads, (
@@ -337,66 +360,23 @@ def test_chat_turn1_writes_to_styx_memories(database_url: str) -> None:
         f"  meta: {payload.get('meta')}"
     )
 
-    # M3 strict: ContextEngine.afterTurn вызвал /context/ingest_batch с
-    # tail последнего turn'а (см. plugin-side fix Phase E). Должен быть
-    # минимум +1 memory с marker'ом — это user-message, который шёл с
-    # текстом from this test. Проверка через ILIKE %marker% работает
-    # независимо от того под какой session_id runtime пишет.
-    after_memories = _count_table(database_url, "memories", content_marker=marker)
-    assert after_memories >= before_memories + 1, (
-        f"memories с marker={marker!r}: "
-        f"{before_memories} → {after_memories}; ожидали ≥+1 "
-        f"(user-message с текстом теста). "
-        f"ContextEngine.afterTurn не вызвал /context/ingest_batch?"
+    after_acts = _count_cognitive_acts(database_url, marker)
+    assert after_acts >= before_acts + 1, (
+        f"cognitive_acts с marker={marker!r}: "
+        f"{before_acts} → {after_acts}; ожидали ≥+1 accepted commitTurn"
     )
 
 
-def _count_table(
-    database_url: str,
-    table: str,
-    session_id: str | None = None,
-    content_marker: str | None = None,
-) -> int:
-    """COUNT(*) с опциональным фильтром по session_id и/или
-    подстроке content (для memories).
-
-    S5: whitelist таблиц — table-name приходит в f-string SQL, поэтому
-    защищаемся от ошибок (опечаток / accidental SQL injection если в
-    тесте проедет user-input в этот аргумент). Допустимые таблицы
-    зафиксированы в schema (см. schema/0002_*.sql).
-
-    M5: фильтр для chat-тестов нужен — иначе параллельные writes от
-    Hermes pytest battery (тот же стик) дадут flake.
-
-    Phase E observation: OpenClaw 2026.5.x в `agent --local` сам
-    генерирует runtime sessionId (DEFAULT_AGENT_ID=main → собственный
-    UUID), игнорируя `--session-id` CLI flag для actual lifecycle
-    sessionId. Поэтому первый assemble идёт с CLI session_id (где user
-    появляется), а ingest_batch для assistant идёт с runtime session_id.
-    Фильтрация по `content_marker` (UUID-фрагмент в сообщении) даёт
-    надёжный способ найти оба event'а одного chat-вызова.
-    """
-    assert table in {"sessions", "memories"}, (
-        f"_count_table: неразрешённое имя таблицы {table!r}; "
-        f"допустимы только sessions/memories"
-    )
-    clauses: list[str] = []
-    args: list[object] = []
-    if session_id is not None:
-        clauses.append("session_id = %s")
-        args.append(session_id)
-    if content_marker is not None:
-        assert table == "memories", (
-            "content_marker применим только к memories"
-        )
-        clauses.append("content ILIKE %s")
-        args.append(f"%{content_marker}%")
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+def _count_cognitive_acts(database_url: str, marker: str) -> int:
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT count(*)::int FROM {table}{where}", args)
-            (n,) = cur.fetchone()
-            return int(n)
+            cur.execute(
+                "SELECT count(*)::int FROM cognitive_acts "
+                "WHERE channel_input::text ILIKE %s",
+                (f"%{marker}%",),
+            )
+            (count,) = cur.fetchone()
+            return int(count)
 
 
 def _count_table_styx_leak(database_url: str) -> int:
@@ -409,7 +389,7 @@ def _count_table_styx_leak(database_url: str) -> int:
     — backwards-compat для historical persist'нутых данных. Эти теги
     — exclusive marker, ничего другого их не пишет; присутствие в
     memories означает что assembled view или tool result утёк в
-    afterTurn / ingest_batch.
+    accepted commitTurn projection.
     """
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
@@ -422,18 +402,21 @@ def _count_table_styx_leak(database_url: str) -> int:
             return int(n)
 
 
-def test_chat_two_turns_same_session(database_url: str) -> None:
+@pytest.mark.skipif(
+    os.environ.get("STYX_OPENCLAW_LLM_E2E") != "1",
+    reason=(
+        "provider-neutral lane; set STYX_OPENCLAW_LLM_E2E=1 "
+        "with a configured provider"
+    ),
+)
+def test_chat_two_turns_same_session_commit_twice(database_url: str) -> None:
     """Два последовательных embedded turn'а в одной session.
 
     Проверяет что:
       - openclaw-cli может прогонять несколько turn'ов подряд
         (state shared volume сохраняет sessions/workspace);
-      - ContextEngine.assemble не падает на turn 2 (если turn 1 что-то
-        записал, assemble попробует восстановить — должен корректно
-        обрабатывать любое состояние Styx PG, включая пустое);
-      - после двух turn'ов в session_id есть строго больше memories
-        чем после одного (M3 strict — afterTurn вызывается на каждом
-        turn'е, не один раз глобально).
+      - ContextEngine.assemble не падает на turn 2;
+      - каждый принятый turn фиксируется отдельным durable commitTurn.
 
     M6: session_id и target — uuid per invocation.
     """
@@ -452,8 +435,8 @@ def test_chat_two_turns_same_session(database_url: str) -> None:
     msg1 = f"Phase E turn1-marker-{marker1} — поздоровайся коротко."
     msg2 = f"Phase E turn2-marker-{marker2} — скажи 'OK turn2 received'."
 
-    before1 = _count_table(database_url, "memories", content_marker=marker1)
-    before2 = _count_table(database_url, "memories", content_marker=marker2)
+    before1 = _count_cognitive_acts(database_url, marker1)
+    before2 = _count_cognitive_acts(database_url, marker2)
 
     res1 = _docker_exec(
         "openclaw-cli",
@@ -477,7 +460,7 @@ def test_chat_two_turns_same_session(database_url: str) -> None:
         f"Turn 1 failed: stderr={res1.stderr[:1000]}"
     )
 
-    after_turn1_m1 = _count_table(database_url, "memories", content_marker=marker1)
+    after_turn1_m1 = _count_cognitive_acts(database_url, marker1)
 
     res2 = _docker_exec(
         "openclaw-cli",
@@ -501,7 +484,7 @@ def test_chat_two_turns_same_session(database_url: str) -> None:
         f"Turn 2 failed: stderr={res2.stderr[:1000]}"
     )
 
-    after_turn2_m2 = _count_table(database_url, "memories", content_marker=marker2)
+    after_turn2_m2 = _count_cognitive_acts(database_url, marker2)
 
     # Оба turn'а получили ответ от LLM (см. shape в test_chat_turn1_*).
     p1 = json.loads(res1.stdout)
@@ -511,32 +494,27 @@ def test_chat_two_turns_same_session(database_url: str) -> None:
     assert text1, f"Turn 1: payloads[0].text пустой; meta={p1.get('meta')}"
     assert text2, f"Turn 2: payloads[0].text пустой; meta={p2.get('meta')}"
 
-    # M3 strict: каждый turn пишет user-message со своим marker'ом.
-    # marker1 появляется только после turn 1, marker2 — только после
-    # turn 2 (если afterTurn действительно вызвал /context/ingest_batch
-    # на каждом turn'е).
+    # Каждый marker должен появиться в своём accepted cognitive act.
     assert after_turn1_m1 >= before1 + 1, (
-        f"После turn 1: memories с marker1={marker1!r} "
+        f"После turn 1: cognitive_acts с marker1={marker1!r} "
         f"{before1} → {after_turn1_m1}; ожидали ≥+1. "
-        f"ContextEngine.afterTurn не вызвал ingest_batch на turn 1?"
+        f"commitTurn не зафиксировал turn 1?"
     )
     assert after_turn2_m2 >= before2 + 1, (
-        f"После turn 2: memories с marker2={marker2!r} "
+        f"После turn 2: cognitive_acts с marker2={marker2!r} "
         f"{before2} → {after_turn2_m2}; ожидали ≥+1. "
-        f"ContextEngine.afterTurn не вызвал ingest_batch на turn 2 "
-        f"(возможный regression — afterTurn fired только on first turn)."
+        f"commitTurn не зафиксировал turn 2."
     )
 
     # Волна 26.5 (defensive markers): salient block оборачивается в
     # <styx>...</styx>. Эти теги ВСТАВЛЯЮТСЯ только в assembled view
-    # для LLM, и НЕ должны попадать в memories. ContextEngine.afterTurn
-    # пишет original messages (rawMessages slice от last user) — там
-    # никогда не было salient'а. Защитный assert: проверяем что в
+    # для LLM, и НЕ должны попадать в accepted turn projection. Защитный
+    # assert: проверяем что в
     # memories нет ни одной content-строки с <styx> или </styx>.
     leaked = _count_table_styx_leak(database_url)
     assert leaked == 0, (
         f"Найдено {leaked} memories с <styx> тегами в content. "
-        f"Salient block утёк в memories → bug в afterTurn / ingest_batch "
+        f"Salient block утёк в memories → bug в commitTurn projection "
         f"(должен брать только original user/assistant messages, не "
         f"assembled view)."
     )
@@ -547,7 +525,7 @@ def test_anonymous_session_no_writes(database_url: str) -> None:
     Styx ничего не пишет.
 
     План был передать sessionKey в legacy/alias формате через
-    `--session-id <bare-string>`, но OpenClaw 2026.5.x в `agent --local`
+    `--session-id <bare-string>`, но OpenClaw CLI в `agent --local`
     встраивает default agent context (DEFAULT_AGENT_ID="main") и через
     factoryCtx.agentDir = `${stateDir}/agents/main/agent` — даже если
     sessionKey передан без `agent:`-prefix'а, `deriveOpenclawAgentId`
@@ -562,7 +540,7 @@ def test_anonymous_session_no_writes(database_url: str) -> None:
     OpenClaw добавит "anonymous" agent CLI flag.
     """
     pytest.skip(
-        "OpenClaw 2026.5.x всегда добавляет default 'main' agent context в "
+        "OpenClaw CLI всегда добавляет default 'main' agent context в "
         "`agent --local` (через factoryCtx.agentDir); anonymous поток через "
         "CLI недостижим без runtime-flag. Логика anonymous-passthrough "
         "покрыта unit-тестами на TS-стороне (deriveOpenclawAgentId)."

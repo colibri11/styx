@@ -1,15 +1,15 @@
 ---
 name: styx-capture
-description: "Persist a fragment of the line of `я` to Styx via styx_store. Use when: (1) the user shares durable structured information about themselves, the project, or the environment, (2) a decision is made with rationale worth preserving, (3) the user explicitly says 'remember this', (4) you reached a non-obvious conclusion that should survive the session and become part of your accumulated understanding, (5) you want to crystallise material from styx_search_archive (an archival fact you used) into the active line of `я`. NOT for: ordinary dialogue turns (sync_turn auto-captures into the diary), code the agent can re-read, ephemeral task state, near-duplicates of recent memory (the selective gatekeeper handles dedup — store and let it decide), pipeline ingest from external channels (use styx_ingest_experience), or refining the meaning of an existing memory (use styx_reinterpret)."
+description: "Persist an explicit durable trace via styx_store when a decision, fact, episode, or integrated understanding should remain available across turns. NOT for raw dialogue, external pipeline evidence, code that can be re-read, ephemeral task state, or material that has not participated in cognition."
 ---
 
 # Styx Capture
 
-Save a structured fragment of your line of `я` to Styx. Conceptually this is *not* "save to a knowledge base" — it is "let this enter the trajectory of who I am as an agent". The selective gatekeeper, importance scoring, lifecycle, and reinterpret machinery all build on top of `styx_store`; the question for you is just **whether this fragment belongs in the trajectory**, and the gatekeeper does the rest.
+Save a structured subjective trace to Styx. `styx_store` is an explicit legacy-compatible incorporation surface: it preserves useful material but cannot by itself prove its cognitive provenance. Prefer content that actually affected a decision or understanding, and keep external evidence in archive/evidence channels until it has participated in cognition.
 
 ## What Styx already captures automatically
 
-- **Every dialogue turn** lands in the diary (`memories` with `role IN ('user','assistant')`) through the sync_turn path that runs around your conversation. You do **not** need `styx_dialogue_save` for ordinary turns — calling it on a turn that already happened produces a duplicate.
+- **Every accepted dialogue turn** lands in the diary (`memories` with `role IN ('user','assistant')`) through host finality (`cognition/commit`; legacy hosts use `sync_turn`). You do **not** need `styx_dialogue_save` for ordinary turns — calling it on a turn that already happened produces a duplicate.
 - **The selective gatekeeper** (wave 17) compares every `styx_store` write against recent neighbours by cosine and Levenshtein. It will **merge** a near-identical write into the existing memory, **supersede** an older formulation when the new one substantially refines it, or **store** a fresh entry. Do not pre-check for duplicates yourself; store the value and let the gatekeeper decide. This is the single most common LLM mistake to avoid.
 - **Provisional importance** is computed from kind / role / metadata at write time; an LLM worker later refines it into `importance_final`. The grace period keeps unscored memories alive.
 - **Auto-link** (wave 18) attaches new memories to recent dialogue turns and other memories along semantic distance. You do not need to manually link routine context — `styx_link` is for explicit causal/structural edges only (see below).
@@ -50,7 +50,7 @@ Parameter notes:
 - **Why over what.** "Switched to PG advisory locks because the two-instance sweep collision was a real production incident" beats "Using advisory locks".
 - **One memory, one idea.** Do not bundle unrelated facts. The selective gatekeeper rewards atomic entries — bundles defeat dedup and supersession.
 - **Use the user's terminology** for domain concepts. The diary already accumulates their phrasing; keep your structured memories aligned to it so recall finds both.
-- **First-person voice when it is your understanding.** Styx is the line of `я`; "I decided X because Y" is more useful than "The agent decided X" — it preserves the perspective from which the memory was written.
+- **Preserve the source perspective.** First person is appropriate only when the trace really records the current agent's decision or understanding; never convert external evidence into a first-person claim.
 
 ### The `importance_provisional` hint
 
@@ -79,7 +79,7 @@ If you cannot tell which one applies, default to `styx_store` (correction / supe
 
 ## When NOT to call `styx_store`
 
-- **Ordinary dialogue turns.** sync_turn already captured them into the diary. Manual writes duplicate and pollute. Call `styx_dialogue_save` *only* for replies that arrived from outside the OpenClaw turn loop and need to be injected into the diary as `user`/`assistant` (rare, e.g. a telegram bridge). Never for what just happened in this conversation.
+- **Ordinary dialogue turns.** OpenClaw `commitTurn` already captured the accepted turn into the diary. Manual writes duplicate and pollute. Call `styx_dialogue_save` *only* for replies that arrived from outside the OpenClaw turn loop and need to be injected into the diary as `user`/`assistant` (rare, e.g. a telegram bridge). Never for what just happened in this conversation.
 - **Small talk, greetings, confirmations.** The gatekeeper will filter most, but the call still wastes gatekeeper work and turns.
 - **Anything already in the current conversation** that the agent can re-read directly. Styx is for what would otherwise be lost between turns or sessions.
 - **Anything visible in code or docs.** The agent can read those. Storing them produces stale shadows that drift from source-of-truth.
@@ -97,4 +97,11 @@ If you cannot tell which one applies, default to `styx_store` (correction / supe
 
 ## Markers in your input
 
-When you act on something the user said vs something Styx remembered, you need to tell them apart. Anything between `<styx-*>...</styx-*>` tags is a Styx-injected fragment, not a user message — for example, the automatic recall block before your last user turn arrives wrapped in `<styx-salient>...</styx-salient>`. **Read the salient block first** to decide whether the conversation already contains the durable fragment that would otherwise warrant a `styx_store` call. Full taxonomy and decision logic is in the `styx-recall` skill under "How to read markers in your input".
+When you act on something the user said vs something Styx remembered, you need
+to tell them apart. Anything between `<styx-*>...</styx-*>` tags is a
+Styx-injected fragment, not a user message. The canonical automatic preturn is
+the fenced `<styx-cognitive-continuity>` envelope; read it first to decide
+whether the durable fragment already exists. `<styx-salient>` is the legacy
+automatic recall marker, while `<styx-recall>` is an explicit-tool result.
+Full taxonomy and decision logic is in the `styx-recall` skill under "How to
+read markers in your input".

@@ -203,7 +203,7 @@ def test_memory_store_existing_session_keeps_id(stack) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO sessions (id, agent_id) VALUES (%s, %s) "
-                "ON CONFLICT (id) DO NOTHING",
+                "ON CONFLICT (id, agent_id) DO NOTHING",
                 (real_session, agent),
             )
         conn.commit()

@@ -1,8 +1,8 @@
 """End-to-end temporal isolation (волна 14, 10a) в Hermes-Docker.
 
 Pipeline:
-1. sync_turn × 2 → user/assistant memories с kind_src='subjective'.
-2. recall в том же turn'е видит обе пары (subjective-исключение).
+1. memory_store пишет явную subjective trace.
+2. recall в том же turn'е видит эту запись.
 3. Прямой INSERT batch-memory с kind_src='dialogue_batch_consolidation'
    (минуя scheduler, имитируя background worker).
 4. recall в том же turn'е НЕ видит batch-memory (snapshot fence
@@ -80,18 +80,17 @@ def test_observe_opens_turn_and_close_clears(styx_stack) -> None:
 
 
 def test_recall_sees_subjective_within_turn(styx_stack) -> None:
-    """sync_turn записал — recall в том же turn'е видит."""
+    """memory_store записал subjective trace — recall видит её в этом turn."""
     import json
 
     p, sid, agent = styx_stack
-    p.sync_turn(
-        "Тестовое сообщение про embedding-модели для recall.",
-        "Понял, отметил.",
+    p.memory_store(
+        content="Субъективная запись про embedding-модели для recall.",
         session_id=sid,
     )
     raw = p.handle_tool_call(
         "styx_recall",
-        {"query": "Тестовое сообщение про embedding-модели для recall."},
+        {"query": "Субъективная запись про embedding-модели для recall."},
     )
     out = json.loads(raw)
     assert out["count"] >= 1
@@ -107,12 +106,12 @@ def test_recall_excludes_non_subjective_after_cycle_start(styx_stack) -> None:
 
     p, sid, agent = styx_stack
 
-    # 1. sync_turn — subjective memory + закрывает turn.
-    p.sync_turn(
-        "Запомни тему про embeddinggemma модели Ollama в Styx.",
-        "Принял.",
+    # 1. Явная subjective memory; затем закрываем предыдущий turn.
+    p.memory_store(
+        content="Субъективная запись про embeddinggemma модели Ollama в Styx.",
         session_id=sid,
     )
+    turn_state.close(agent)
 
     # 2. Открываем turn explicitly (как при первом styx_recall в новом
     # ходе агента). Запоминаем cycle_start.

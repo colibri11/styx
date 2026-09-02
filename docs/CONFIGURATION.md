@@ -68,7 +68,7 @@
 | `STYX_DRIFT_THRESHOLD` | `0.4` | Cosine ниже = drift detected. |
 | `STYX_FOCUS_WINDOW_SIZE` | `3` | K последних user-embed'ов в sliding centroid'е. |
 
-## Pre-LLM inject (Hermes hook)
+## Legacy pre-LLM inject compatibility
 
 | Var | Default | Назначение |
 |---|---|---|
@@ -76,6 +76,14 @@
 | `STYX_SELF_STATE_ENABLED` | on | `=0` отключает только self_state channel. |
 | `STYX_SELF_STATE_MIN_NORM` | `0.2` | Норма causal residue, ниже которой унаследованное состояние не создаёт cognitive posture само по себе. |
 | `STYX_SELF_STATE_MAX_AGE_S` | `900.0` | Максимальный возраст активного residue для inject'а — safety net на случай мёртвого `styx-worker`; текущие явные сигналы хода всё равно учитываются. |
+
+## Cognitive continuity
+
+| Var | Default | Назначение |
+|---|---|---|
+| `STYX_COGNITION_RECALL_LIMIT` | `8` | Максимум live eligible subjective traces в reconstruction одного fenced preturn; clamp 1..8. |
+| `STYX_COGNITION_PENDING_LIMIT` | `16` | Максимум pending consequences, арендуемых одним snapshot; clamp 1..16. |
+| `STYX_COGNITION_SNAPSHOT_LEASE_S` | `60.0` | Lease snapshot/presentation в секундах; clamp 1..3600. Same-act retry по `host_key` использует тот же snapshot. После abandoned preturn и expiry непризнанные consequences снова доступны для at-least-once delivery; commit ack идемпотентен. |
 
 ## Causal affect / emotional baseline
 
@@ -249,6 +257,12 @@
 | `STYX_EXPLAIN_API_ENABLED` | on | `=0` → все 5 observability routes отвечают 503. |
 
 ## Memory markers (taxonomy)
+
+Canonical automatic preturn использует фиксированную обёртку
+`<styx-cognitive-continuity>` для всего fenced envelope. Таблица ниже —
+настраиваемые explicit-tool channels и compatibility taxonomy;
+`<styx-salient>` и `<styx-self-state>` относятся к legacy automatic paths,
+а не к primary Wave 37 contract.
 
 | Var | Default | Назначение |
 |---|---|---|

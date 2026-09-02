@@ -98,3 +98,24 @@ def test_clear_idempotent() -> None:
     _agent_session.clear_session()
     _agent_session.clear_session()  # повторный — без ошибки
     assert _agent_session.get_session() is None
+
+
+def test_unkeyed_and_stale_snapshots_do_not_attach_to_next_act(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(_agent_session.time, "monotonic", lambda: now)
+    _agent_session.remember_preturn_snapshot("s", "unkeyed")
+    _agent_session.remember_preturn_snapshot(
+        "s", "stale", act_key="hermes:s:old"
+    )
+    now += _agent_session._SNAPSHOT_TTL_S + 1
+    assert _agent_session.declare_act("s", "hermes:s:new") == (None, None)
+    # Even declaring the old act after expiry cannot recover/rebind its fence.
+    assert _agent_session.declare_act("s", "hermes:s:old") == (
+        "hermes:s:new", None
+    )
+
+
+def test_declare_act_retry_keeps_original_parent_after_later_act() -> None:
+    assert _agent_session.declare_act("s", "act-1") == (None, None)
+    assert _agent_session.declare_act("s", "act-2") == ("act-1", None)
+    assert _agent_session.declare_act("s", "act-1") == (None, None)

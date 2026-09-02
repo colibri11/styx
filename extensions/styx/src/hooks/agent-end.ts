@@ -1,10 +1,11 @@
-// Typed `agent_end` hook — the only OpenClaw surface that captures a
-// finalized dialogue turn and submits it for causal affect observation.
+// Legacy typed `agent_end` adapter plus shared bounded message/tool projection.
+// Current OpenClaw v2026.8.2 does not register this hook: accepted finality is
+// owned by ContextEngine.commitTurn and its durable host outbox.
 //
 // ContextEngine.afterTurn is not a finality guarantee: a host may invoke it
 // between model/tool-loop iterations.  `agent_end` is emitted after the loop
 // settles and therefore prevents intermediate assistant/tool-call messages
-// from becoming diary entries or affect evidence.
+// from becoming duplicate diary entries or partial cognitive acts.
 
 import { createHash } from "node:crypto";
 
@@ -13,11 +14,17 @@ import {
 } from "../agent-id-shared.js";
 import {
   fmtErr,
+  StyxHttpError,
   type StyxClient,
   type StyxLogger,
   type StyxMessage,
 } from "../client.js";
 import { interceptDocumentAttachments } from "../media-attachments.js";
+import {
+  normalizeIdentifier,
+  openclawHostKey,
+  runOrTurnIdentity,
+} from "../identifiers.js";
 import {
   TerminalTurnBarrier,
   terminalScopeKey,
@@ -36,6 +43,7 @@ export type AgentEndHookEvent = {
 
 export type AgentEndHookContext = {
   runId?: string;
+  turnId?: string;
   agentId?: string;
   sessionKey?: string;
   sessionId?: string;
@@ -59,7 +67,7 @@ export type AgentEndHookParams = {
 
 export const MAX_SOURCE_MESSAGES = 256;
 export const MAX_HISTORY_MESSAGES = 24;
-export const MAX_TOOL_EVENTS = 32;
+export const MAX_TOOL_EVENTS = 64;
 export const MAX_CONTENT_PARTS = 128;
 export const MAX_HISTORY_CONTENT_CHARS = 4_000;
 export const MAX_TOOL_EVENT_CONTENT_CHARS = 4_000;
@@ -218,16 +226,18 @@ export function buildConversationHistory(
 export function buildToolEvents(
   turnMessages: unknown[],
 ): Array<{
-  kind: "call" | "result";
-  tool_call_id: string;
+  kind: "call" | "result" | "error";
+  tool_event_id: string;
   name: string;
   content: string;
+  metadata: Record<string, string>;
 }> {
   const events: Array<{
-    kind: "call" | "result";
-    tool_call_id: string;
+    kind: "call" | "result" | "error";
+    tool_event_id: string;
     name: string;
     content: string;
+    metadata: Record<string, string>;
   }> = [];
 
   for (const message of boundedSource(turnMessages)) {
@@ -245,12 +255,13 @@ export function buildToolEvents(
           : {};
         events.push({
           kind: "call",
-          tool_call_id: bounded(call["id"], 256),
+          tool_event_id: normalizeIdentifier(call["id"], 256),
           name: bounded(fn["name"] ?? call["name"], 256),
           content: bounded(
             fn["arguments"] ?? call["arguments"],
             MAX_TOOL_EVENT_CONTENT_CHARS,
           ),
+          metadata: {},
         });
       }
 
@@ -264,15 +275,17 @@ export function buildToolEvents(
         if (part["type"] !== "toolCall") continue;
         events.push({
           kind: "call",
-          tool_call_id: bounded(part["id"], 256),
+          tool_event_id: normalizeIdentifier(part["id"], 256),
           name: bounded(part["name"], 256),
           content: bounded(part["arguments"], MAX_TOOL_EVENT_CONTENT_CHARS),
+          metadata: {},
         });
       }
     } else if (role === "tool" || role === "toolResult") {
       events.push({
-        kind: "result",
-        tool_call_id: bounded(
+        kind: message["isError"] === true || message["is_error"] === true
+          ? "error" : "result",
+        tool_event_id: normalizeIdentifier(
           message["tool_call_id"] ?? message["toolCallId"],
           256,
         ),
@@ -281,6 +294,7 @@ export function buildToolEvents(
           message["content"],
           MAX_TOOL_EVENT_CONTENT_CHARS,
         ),
+        metadata: {},
       });
     }
   }
@@ -290,10 +304,10 @@ export function buildToolEvents(
 function identifierFingerprint(message: Record<string, unknown>): string | null {
   const identity = {
     role: message["role"],
-    id: message["id"] ?? message["messageId"] ?? null,
-    turnId: message["turnId"] ?? null,
-    responseId: message["responseId"] ?? null,
-    timestamp: message["timestamp"] ?? null,
+    id: normalizeIdentifier(message["id"] ?? message["messageId"], 256) || null,
+    turnId: normalizeIdentifier(message["turnId"], 256) || null,
+    responseId: normalizeIdentifier(message["responseId"], 256) || null,
+    timestamp: normalizeIdentifier(message["timestamp"], 64) || null,
   };
   if (identity.id == null && identity.turnId == null &&
       identity.responseId == null && identity.timestamp == null) return null;
@@ -312,10 +326,11 @@ export function deriveTurnIdentity(
   ctx: AgentEndHookContext,
   turnMessages: Array<Record<string, unknown>>,
 ): string | null {
-  const runId = asString(event.runId || ctx.runId).trim();
-  if (runId) return `run:${runId}`;
-  const turnId = asString(event.turnId).trim();
-  if (turnId) return `turn:${turnId}`;
+  const physicalIdentity = runOrTurnIdentity(
+    event.runId || ctx.runId,
+    event.turnId || ctx.turnId,
+  );
+  if (physicalIdentity) return physicalIdentity;
 
   const fingerprints = turnMessages
     .slice(-MAX_SOURCE_MESSAGES)
@@ -328,10 +343,6 @@ export function deriveTurnIdentity(
     .update(fingerprints.join("\0"))
     .digest("hex");
   return `messages:${digest}`;
-}
-
-function canonicalTurnId(identity: string): string {
-  return createHash("sha256").update(identity).digest("hex");
 }
 
 function rememberBounded(set: Set<string>, value: string): void {
@@ -354,11 +365,13 @@ export function createAgentEndHook(params: AgentEndHookParams): AgentEndHookHand
     params.terminalWorkBudgetMs ?? TERMINAL_WORK_BUDGET_MS,
   );
   const bootstrapped = new Set<string>();
-  const observed = new Set<string>();
-  const ingested = new Set<string>();
+  const committed = new Set<string>();
+  const legacyCompleted = new Set<string>();
+  const legacyAffectCompleted = new Set<string>();
+  const legacyDiaryCompleted = new Set<string>();
 
   return function agentEnd(event, ctx) {
-    if (!event.success || !Array.isArray(event.messages)) return;
+    if (!Array.isArray(event.messages)) return;
     const openclawAgentId = deriveOpenclawAgentId(ctx);
     if (openclawAgentId === null) return;
 
@@ -372,11 +385,19 @@ export function createAgentEndHook(params: AgentEndHookParams): AgentEndHookHand
       return;
     }
 
+    const sessionId = normalizeIdentifier(ctx.sessionId, 256);
     const scope = terminalScopeKey(
-      openclawAgentId,
-      ctx.sessionId,
-      ctx.sessionKey,
+      normalizeIdentifier(openclawAgentId, 256),
+      sessionId,
+      normalizeIdentifier(ctx.sessionKey, 256),
     );
+    // Declare the physical act before any awaited resolve/bootstrap work.
+    // Even an early host-adapter failure therefore remains the predecessor of
+    // the next act, and re-delivery gets identical coordinates.
+    const hostKey = openclawHostKey(identity);
+    const turnId = hostKey.slice("openclaw:".length);
+    const completionKey = `${scope}\0${identity}`;
+    const declared = terminalBarrier.declareAct(scope, identity, hostKey);
     return terminalBarrier.track(scope, identity, async () => {
       const deadlineAt = Date.now() + terminalWorkBudgetMs;
       const withinDeadline = async <T>(
@@ -403,19 +424,20 @@ export function createAgentEndHook(params: AgentEndHookParams): AgentEndHookHand
           if (timer !== undefined) clearTimeout(timer);
         }
       };
-      // Re-delivery after a completed single-flight is a no-op when both
-      // durable operations already succeeded.
-      if (observed.has(identity) && ingested.has(identity)) return;
+      // Re-delivery after a completed single-flight is a no-op.
+      if (committed.has(completionKey) || legacyCompleted.has(completionKey)) return;
 
     let agentId: string;
     try {
-      agentId = await withinDeadline(() => resolveAgentId(openclawAgentId));
+      agentId = normalizeIdentifier(
+        await withinDeadline(() => resolveAgentId(openclawAgentId)),
+        256,
+      );
     } catch (err) {
       logger.warn?.(`[styx] agent_end resolveAgentId failed: ${fmtErr(err)}`);
       return;
     }
 
-    const sessionId = asString(ctx.sessionId);
     const bootstrapKey = `${agentId}::${sessionId}`;
     if (!bootstrapped.has(bootstrapKey)) {
       try {
@@ -458,31 +480,93 @@ export function createAgentEndHook(params: AgentEndHookParams): AgentEndHookHand
         .join("\n"),
       MAX_ASSISTANT_RESPONSE_CHARS,
     );
-    const turnId = canonicalTurnId(identity);
+    const history = buildConversationHistory(event.messages);
+    const toolEvents = buildToolEvents(turnMessages);
 
-    if (!observed.has(identity) && userMessage.trim() && assistantResponse.trim()) {
-      try {
-        const observation = await withinDeadline((signal) => client.affectObserveTurn({
+    try {
+      const result = await withinDeadline((signal) => client.cognitionCommit({
           agent_id: agentId,
-          idempotency_key: `openclaw:${turnId}`,
-          turn_id: turnId,
+          host_key: declared.actKey,
+          parent_host_key: declared.parentActKey,
           session_id: sessionId || null,
+          snapshot_token: declared.snapshotToken,
+          status: event.success ? "completed" : "failed",
           user_message: userMessage,
           assistant_response: assistantResponse,
-          conversation_history: buildConversationHistory(event.messages),
-          tool_events: buildToolEvents(turnMessages),
-          model: asString(ctx.modelId) || null,
+          conversation_history: history,
+          tool_events: toolEvents,
+          consequences: [],
+          model: normalizeIdentifier(ctx.modelId, 512) || null,
           platform: "openclaw",
+          extra: {
+            projection_scope: "finalized_channel_output",
+            run_id: normalizeIdentifier(event.runId ?? ctx.runId, 256),
+            duration_ms: typeof event.durationMs === "number"
+              ? String(event.durationMs) : "",
+            terminal_error: bounded(event.error, 1_000),
+          },
         }, { signal }));
-        if (observation.accepted) {
-          rememberBounded(observed, identity);
-        } else {
-          logger.warn?.(
-            `[styx] affect observation not accepted: ${observation.reason ?? "unknown"}`,
-          );
+      if (result.committed || result.duplicate) {
+        rememberBounded(committed, completionKey);
+      }
+    } catch (err) {
+      if (err instanceof StyxHttpError && err.status === 404) {
+        // Mixed-version deployment only. Affect and diary are independent:
+        // failure in one phase cannot suppress the other, and successful
+        // phases remain locally duplicate-safe on a partial retry.
+        const affectRequired = Boolean(
+          event.success && userMessage.trim() && assistantResponse.trim(),
+        );
+        let affectDone = !affectRequired || legacyAffectCompleted.has(completionKey);
+        if (!affectDone) {
+          try {
+            await withinDeadline((signal) => client.affectObserveTurn({
+              agent_id: agentId,
+              idempotency_key: hostKey,
+              turn_id: turnId,
+              session_id: sessionId || null,
+              user_message: userMessage,
+              assistant_response: assistantResponse,
+              conversation_history: history,
+              tool_events: toolEvents
+                .filter((item) => item.kind !== "error")
+                .map((item) => ({
+                  kind: item.kind as "call" | "result",
+                  tool_call_id: item.tool_event_id,
+                  name: item.name,
+                  content: item.content,
+                })),
+              model: normalizeIdentifier(ctx.modelId, 512) || null,
+              platform: "openclaw",
+            }, { signal }));
+            rememberBounded(legacyAffectCompleted, completionKey);
+            affectDone = true;
+          } catch (affectErr) {
+            logger.warn?.(`[styx] terminal legacy affect failed: ${fmtErr(affectErr)}`);
+          }
         }
-      } catch (err) {
-        logger.warn?.(`[styx] affect observation failed: ${fmtErr(err)}`);
+
+        const diaryRequired = dialogueMessages.length > 0;
+        let diaryDone = !diaryRequired || legacyDiaryCompleted.has(completionKey);
+        if (!diaryDone) {
+          try {
+            await withinDeadline((signal) => client.syncTurn({
+              agent_id: agentId,
+              session_id: sessionId || null,
+              user_content: userMessage,
+              assistant_content: assistantResponse,
+              tool_calls: toolEvents,
+              idempotency_key: hostKey,
+            }, { signal }));
+            rememberBounded(legacyDiaryCompleted, completionKey);
+            diaryDone = true;
+          } catch (diaryErr) {
+            logger.warn?.(`[styx] terminal legacy diary failed: ${fmtErr(diaryErr)}`);
+          }
+        }
+        if (affectDone && diaryDone) rememberBounded(legacyCompleted, completionKey);
+      } else {
+        logger.warn?.(`[styx] cognition commit failed: ${fmtErr(err)}`);
       }
     }
 
@@ -507,21 +591,6 @@ export function createAgentEndHook(params: AgentEndHookParams): AgentEndHookHand
       }
     }
 
-    // Affect must be committed first so these diary rows snapshot the state
-    // caused by this turn. A retry can independently repair failed ingestion.
-    if (!ingested.has(identity) && dialogueMessages.length > 0) {
-      try {
-        await withinDeadline((signal) => client.contextIngestBatch({
-          agent_id: agentId,
-          session_id: sessionId || null,
-          messages: dialogueMessages,
-          idempotency_key: `openclaw:${turnId}:dialogue`,
-        }, { signal }));
-        rememberBounded(ingested, identity);
-      } catch (err) {
-        logger.warn?.(`[styx] agent_end ingest_batch failed: ${fmtErr(err)}`);
-      }
-    }
     });
   };
 }

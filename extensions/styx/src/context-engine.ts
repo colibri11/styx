@@ -4,7 +4,7 @@
 // ## Соответствие OpenClaw context-engine SDK
 //
 // Lifecycle params типизированы по фактическому контракту OpenClaw
-// 2026.5.7 (`dist/plugin-sdk/src/context-engine/types.d.ts`):
+// 2026.8.2 (`src/context-engine/types.ts`):
 //
 //   bootstrap({sessionId, sessionKey?, sessionFile})
 //   ingest({sessionId, sessionKey?, message, isHeartbeat?})
@@ -31,17 +31,14 @@
 // assemble возвращает messages без изменений. У такого потока нет
 // дополнительной памяти из Styx — только то, что runtime уже положил
 // в контекст (актуальная задача, статические системные данные). Это
-// соответствует IAmBook §IV: Locus принадлежит конкретному агенту-как-
-// личности; нет имени → нет линии `я` → нет Styx-обвязки.
+// Без подтверждённого agent scope нельзя безопасно выбрать изолированную
+// память; это техническая граница tenancy, не утверждение о личности.
 //
-// ## Phase C — assemble + compact + afterTurn
-//
-// Phase B сделал bootstrap/ingest/ingestBatch/dispose. Phase C добавляет
-// HTTP вызовы для assemble (через /context/assemble → StyxComposer
-// head+tail+salient), compact (через /context/compact → memory_
-// consolidation sweep) и afterTurn (drift check + sweep ticks). Stub'ы
-// удалены.
+// OpenClaw 2026.8.2 принимает durable turn через ContextEngine.commitTurn.
+// assemble создаёт session-fenced cognitive snapshot; commitTurn атомарно
+// связывает его с принятым logical turn и допускает restart-safe retries.
 
+import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
 import {
   parseAgentIdFromAgentDir,
   parseAgentIdFromSessionKey,
@@ -53,6 +50,24 @@ import {
   type StyxMessage,
 } from "./client.js";
 import { interceptDocumentAttachments } from "./media-attachments.js";
+import { fetchCanonicalPreturn } from "./cognition-preturn.js";
+import {
+  normalizeIdentifier,
+  openclawHostKey,
+} from "./identifiers.js";
+import { boundedPreturnMessages } from "./hooks/before-prompt-build.js";
+import {
+  bounded,
+  buildConversationHistory,
+  buildToolEvents,
+  extractBoundedMessageContent,
+  extractFinalTurnMessages,
+  MAX_ASSISTANT_RESPONSE_CHARS,
+  MAX_HISTORY_CONTENT_CHARS,
+  MAX_HISTORY_MESSAGES,
+  MAX_SOURCE_MESSAGES,
+  MAX_USER_MESSAGE_CHARS,
+} from "./hooks/agent-end.js";
 
 export type ResolveAgentId = (openclawAgentId: string) => Promise<string>;
 
@@ -97,7 +112,7 @@ function extractMessages(params: LifecycleParams): StyxMessage[] {
  * pi-agent-core / OpenClaw используют расширенный shape: `content` может
  * быть либо string, либо array of content parts:
  *   [{type:'text', text:'...'}, {type:'image', url:'...'}, ...]
- * (см. @mariozechner/pi-agent-core).
+ * (см. OpenClaw plugin-sdk AgentMessage).
  *
  * Styx core хранит plain string. Для multimodal turn'а склеиваем текст
  * всех `text`-частей через '\n' — image/audio/tool-call parts в memories
@@ -151,6 +166,25 @@ export function deriveOpenclawAgentId(
   params: LifecycleParams,
   ctx: Record<string, unknown>,
 ): string | null {
+  const directTarget = params["sessionTarget"];
+  if (directTarget && typeof directTarget === "object") {
+    const direct = normalizeIdentifier(
+      (directTarget as Record<string, unknown>)["agentId"],
+      256,
+    );
+    if (direct) return direct;
+  }
+  const runtimeContext = params["runtimeContext"];
+  if (runtimeContext && typeof runtimeContext === "object") {
+    const sessionTarget = (runtimeContext as Record<string, unknown>)["sessionTarget"];
+    if (sessionTarget && typeof sessionTarget === "object") {
+      const direct = normalizeIdentifier(
+        (sessionTarget as Record<string, unknown>)["agentId"],
+        256,
+      );
+      if (direct) return direct;
+    }
+  }
   const fromSession = parseAgentIdFromSessionKey(asString(params["sessionKey"]));
   if (fromSession) return fromSession;
   // Fallback: распознаём `${stateDir}/agents/<agentId>/agent` или
@@ -159,7 +193,9 @@ export function deriveOpenclawAgentId(
 }
 
 export function createStyxContextEngine(params: StyxContextEngineParams) {
-  const { client, ctx, logger, resolveAgentId, ownsCompaction } = params;
+  const {
+    client, ctx, logger, resolveAgentId, ownsCompaction,
+  } = params;
 
   // (agentId, sessionId) ⇒ уже bootstrap'нули в core. Защищает от
   // повторных bootstrap при ingest, если runtime не зовёт engine.bootstrap
@@ -186,7 +222,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
     }
     let agentId: string;
     try {
-      agentId = await resolveAgentId(openclawAgentId);
+      agentId = normalizeIdentifier(await resolveAgentId(openclawAgentId), 256);
     } catch (err) {
       // Одноаргументный формат — OpenClaw createPluginLogger глотает
       // второй arg, err тонул silent'но и маскировал ingest faults
@@ -218,12 +254,19 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
     info: {
       id: "styx",
       name: "Styx",
+      version: "0.3.0",
       ownsCompaction,
+      acceptedHostParams: ["sessionTarget", "runtimeSettings", "runtimeContext"],
+      transcriptSemantics: {
+        currentTurnFence: "before-current-turn-entry-v1" as const,
+        turnAdvancementIdempotency: "atomic-idempotent-v1" as const,
+      },
+      turnMaintenanceMode: "background" as const,
     },
 
     async bootstrap(opts: LifecycleParams) {
       const openclawAgentId = deriveOpenclawAgentId(opts, ctx);
-      const sessionId = extractSessionId(opts);
+      const sessionId = normalizeIdentifier(extractSessionId(opts), 256);
       const agentId = await ensureAgentForCall(openclawAgentId, sessionId);
       // BootstrapResult contract: {bootstrapped, importedMessages?, reason?}.
       return {
@@ -234,85 +277,14 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       };
     },
 
-    async ingest(opts: LifecycleParams) {
-      if (Boolean(opts["isHeartbeat"])) {
-        return { ingested: false };
-      }
-      const message = opts["message"];
-      if (!message || typeof message !== "object") {
-        return { ingested: false };
-      }
-      const openclawAgentId = deriveOpenclawAgentId(opts, ctx);
-      const sessionId = extractSessionId(opts);
-      const agentId = await ensureAgentForCall(openclawAgentId, sessionId);
-      if (agentId === null) {
-        return { ingested: false };
-      }
-      const m = message as Record<string, unknown>;
-      // Defect-fix A: документы-вложения single-message ingest'а тоже
-      // уходят documents-каналом, а не turn-каналом как текст.
-      const [intercepted] = await interceptDocumentAttachments(
-        [
-          {
-            role: asString(m["role"], "user"),
-            content: extractMessageContent(m["content"]),
-          },
-        ],
-        agentId,
-        client,
-        logger,
-      );
-      try {
-        const resp = await client.contextIngest({
-          agent_id: agentId,
-          session_id: sessionId || null,
-          message: {
-            role: asString(intercepted["role"], "user"),
-            content: asString(intercepted["content"], ""),
-          },
-          is_heartbeat: false,
-        });
-        return { ingested: resp.ingested };
-      } catch (err) {
-        logger.warn?.(`[styx] ingest failed: ${fmtErr(err)}`);
-        return { ingested: false };
-      }
+    async ingest(_opts: LifecycleParams) {
+      // Durable accepted turns are owned by commitTurn. This method remains a
+      // compatibility no-op so host lifecycle fallbacks cannot double-write.
+      return { ingested: false };
     },
 
-    async ingestBatch(opts: LifecycleParams) {
-      if (Boolean(opts["isHeartbeat"])) {
-        return { ingestedCount: 0 };
-      }
-      let messages = extractMessages(opts);
-      if (messages.length === 0) {
-        return { ingestedCount: 0 };
-      }
-      const openclawAgentId = deriveOpenclawAgentId(opts, ctx);
-      const sessionId = extractSessionId(opts);
-      const agentId = await ensureAgentForCall(openclawAgentId, sessionId);
-      if (agentId === null) {
-        return { ingestedCount: 0 };
-      }
-      // Defect-fix A: документы-вложения turn'а уходят
-      // documents-каналом (/ingest_document), а в turn-текст идёт
-      // только ссылка — документ не едет turn-каналом как текст.
-      messages = (await interceptDocumentAttachments(
-        messages as Array<Record<string, unknown>>,
-        agentId,
-        client,
-        logger,
-      )) as StyxMessage[];
-      try {
-        const resp = await client.contextIngestBatch({
-          agent_id: agentId,
-          session_id: sessionId || null,
-          messages,
-        });
-        return { ingestedCount: resp.ingested_count };
-      } catch (err) {
-        logger.warn?.(`[styx] ingest_batch failed: ${fmtErr(err)}`);
-        return { ingestedCount: 0 };
-      }
+    async ingestBatch(_opts: LifecycleParams) {
+      return { ingestedCount: 0 };
     },
 
     async assemble(opts: LifecycleParams) {
@@ -326,13 +298,11 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
         : [];
       const styxMessages = extractMessages(opts);
       const openclawAgentId = deriveOpenclawAgentId(opts, ctx);
-      const sessionId = extractSessionId(opts);
+      const sessionId = normalizeIdentifier(extractSessionId(opts), 256);
 
       // Anonymous поток (нет связанного Styx agent'а) — pure passthrough.
-      // По концепции (IAmBook §IV) Locus формируется только для линии
-      // `я` конкретного агента; runtime передаёт сюда messages в виде
-      // как оно есть, и engine ничего не добавляет (никаких salient
-      // injections, никакого recall из чужих memories).
+      // Без agent scope нельзя безопасно выбрать tenant. Runtime получает
+      // исходные messages без Styx-инъекций и без доступа к чужим traces.
       if (openclawAgentId === null) {
         return {
           messages: rawMessages,
@@ -349,38 +319,46 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       }
 
       try {
-        const resp = await client.contextAssemble({
+        const request = {
           agent_id: agentId,
           session_id: sessionId || null,
-          messages: rawMessages,
-          token_budget:
-            typeof opts["tokenBudget"] === "number"
-              ? (opts["tokenBudget"] as number)
-              : null,
-          available_tools: extractAvailableTools(opts),
-          citations_mode: asString(opts["citationsMode"]) || null,
-          model: asString(opts["model"]) || null,
-          prompt: asString(opts["prompt"]) || null,
+          messages: boundedPreturnMessages(rawMessages),
+          query: bounded(opts["prompt"], 20_000) || null,
+          // OpenClaw owns windowing and may retry the same logical prompt on a
+          // fallback model. Keep the cognitive envelope stable across attempts.
+          token_budget: null,
+          model: null,
+          platform: "openclaw",
+          extra: {},
+        };
+        const resp = await fetchCanonicalPreturn(client, request);
+        const memoryAddition = buildMemorySystemPromptAddition({
+          availableTools: opts["availableTools"] instanceof Set
+            ? (opts["availableTools"] as Set<string>)
+            : new Set<string>(),
+          citationsMode: typeof opts["citationsMode"] === "string"
+            ? opts["citationsMode"] as never
+            : undefined,
         });
+        const additions = [memoryAddition, resp.system_prompt_addition]
+          .filter((value): value is string => Boolean(value?.trim()));
         const out: {
           messages: Array<Record<string, unknown>>;
           estimatedTokens: number;
           systemPromptAddition?: string;
           promptAuthority?: "assembled" | "preassembly_may_overflow";
         } = {
-          messages: resp.messages,
-          estimatedTokens: resp.estimated_tokens,
+          // Preserve exact OpenClaw AgentMessage objects, including tool calls,
+          // multimodal parts and provider metadata. Styx only adds context.
+          messages: rawMessages,
+          estimatedTokens: roughTokenEstimate(styxMessages),
         };
-        if (resp.system_prompt_addition) {
-          out.systemPromptAddition = resp.system_prompt_addition;
-        }
-        if (resp.prompt_authority === "assembled" ||
-            resp.prompt_authority === "preassembly_may_overflow") {
-          out.promptAuthority = resp.prompt_authority;
+        if (additions.length > 0) {
+          out.systemPromptAddition = additions.join("\n\n");
         }
         return out;
       } catch (err) {
-        logger.warn?.(`[styx] assemble failed (passthrough): ${fmtErr(err)}`);
+        logger.warn?.(`[styx] canonical preturn failed (passthrough): ${fmtErr(err)}`);
         return {
           messages: rawMessages,
           estimatedTokens: roughTokenEstimate(styxMessages),
@@ -388,9 +366,124 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
       }
     },
 
+    async commitTurn(opts: LifecycleParams) {
+      if (Boolean(opts["isHeartbeat"])) {
+        return { status: "committed" as const };
+      }
+      const advancementKey = normalizeIdentifier(opts["advancementKey"], 384);
+      if (!advancementKey) {
+        throw new Error("OpenClaw commitTurn has no advancementKey");
+      }
+      const runtimeTarget = opts["sessionTarget"];
+      const target = runtimeTarget && typeof runtimeTarget === "object"
+        ? runtimeTarget as Record<string, unknown>
+        : {};
+      const callerSessionId = normalizeIdentifier(opts["sessionId"], 256);
+      const targetSessionId = normalizeIdentifier(target["sessionId"], 256);
+      const callerSessionKey = normalizeIdentifier(opts["sessionKey"], 256);
+      const targetSessionKey = normalizeIdentifier(target["sessionKey"], 256);
+      if (callerSessionId && targetSessionId && callerSessionId !== targetSessionId) {
+        throw new Error("OpenClaw commitTurn sessionTarget conflicts with sessionId");
+      }
+      if (callerSessionKey && targetSessionKey && callerSessionKey !== targetSessionKey) {
+        throw new Error("OpenClaw commitTurn sessionTarget conflicts with sessionKey");
+      }
+      const sessionId = targetSessionId || callerSessionId;
+      const openclawAgentId = normalizeIdentifier(target["agentId"], 256)
+        || deriveOpenclawAgentId({
+          ...opts,
+          sessionKey: targetSessionKey || callerSessionKey,
+        }, ctx);
+      const sessionKeyAgentId = parseAgentIdFromSessionKey(
+        targetSessionKey || callerSessionKey,
+      );
+      if (
+        openclawAgentId && sessionKeyAgentId
+        && openclawAgentId !== sessionKeyAgentId
+      ) {
+        throw new Error("OpenClaw commitTurn sessionTarget conflicts with agent identity");
+      }
+      const agentId = await ensureAgentForCall(openclawAgentId, sessionId);
+      if (agentId === null) {
+        throw new Error("Styx agent cannot be resolved for durable commitTurn");
+      }
+
+      const acceptedMessages = Array.isArray(opts["messages"])
+        ? opts["messages"] as unknown[]
+        : [];
+      const turnMessages = extractFinalTurnMessages(acceptedMessages);
+      const dialogue: StyxMessage[] = [];
+      for (const message of turnMessages.slice(-MAX_SOURCE_MESSAGES)) {
+        const role = message["role"];
+        if (role !== "user" && role !== "assistant") continue;
+        const limit = role === "user"
+          ? MAX_USER_MESSAGE_CHARS
+          : MAX_ASSISTANT_RESPONSE_CHARS;
+        const content = extractBoundedMessageContent(message["content"], limit);
+        if (content) dialogue.push({ role, content });
+      }
+      const userMessage = bounded(
+        dialogue.filter((message) => message.role === "user")
+          .slice(-MAX_HISTORY_MESSAGES)
+          .map((message) => bounded(message.content, MAX_HISTORY_CONTENT_CHARS))
+          .join("\n"),
+        MAX_USER_MESSAGE_CHARS,
+      );
+      const assistantResponse = bounded(
+        dialogue.filter((message) => message.role === "assistant")
+          .slice(-MAX_HISTORY_MESSAGES)
+          .map((message) => bounded(message.content, MAX_HISTORY_CONTENT_CHARS))
+          .join("\n"),
+        MAX_ASSISTANT_RESPONSE_CHARS,
+      );
+      const admission = opts["admission"] && typeof opts["admission"] === "object"
+        ? opts["admission"] as Record<string, unknown>
+        : {};
+      const terminal = opts["terminal"] && typeof opts["terminal"] === "object"
+        ? opts["terminal"] as Record<string, unknown>
+        : {};
+      const result = await client.cognitionCommit({
+        agent_id: agentId,
+        host_key: openclawHostKey(advancementKey),
+        session_id: sessionId || null,
+        snapshot_policy: "latest_session",
+        parent_policy: "latest_session",
+        status: "completed",
+        user_message: userMessage,
+        assistant_response: assistantResponse,
+        conversation_history: buildConversationHistory(acceptedMessages),
+        tool_events: buildToolEvents(turnMessages),
+        consequences: [],
+        model: null,
+        platform: "openclaw",
+        extra: {
+          projection_scope: "accepted_durable_turn",
+          logical_turn_id: bounded(admission["logicalTurnId"], 256),
+          admission_entry_id: bounded(admission["entryId"], 256),
+          admission_generation: bounded(admission["generation"], 64),
+          terminal_entry_id: bounded(terminal["entryId"], 256),
+          terminal_generation: bounded(terminal["generation"], 64),
+        },
+      });
+
+      // Document archival is independent from causal advancement. A failure
+      // must not keep OpenClaw's accepted-turn outbox stuck forever.
+      try {
+        await interceptDocumentAttachments(
+          dialogue as Array<Record<string, unknown>>,
+          agentId,
+          client,
+          logger,
+        );
+      } catch (err) {
+        logger.warn?.(`[styx] accepted-turn attachment archival failed: ${fmtErr(err)}`);
+      }
+      return { status: result.duplicate ? "duplicate" as const : "committed" as const };
+    },
+
     async compact(opts: LifecycleParams) {
       const openclawAgentId = deriveOpenclawAgentId(opts, ctx);
-      const sessionId = extractSessionId(opts);
+      const sessionId = normalizeIdentifier(extractSessionId(opts), 256);
       const agentId = await ensureAgentForCall(openclawAgentId, sessionId);
       if (agentId === null) {
         // Anonymous поток — runtime может /compact, но Styx нечего
@@ -417,14 +510,13 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
 
     async afterTurn(opts: LifecycleParams) {
       const openclawAgentId = deriveOpenclawAgentId(opts, ctx);
-      const sessionId = extractSessionId(opts);
+      const sessionId = normalizeIdentifier(extractSessionId(opts), 256);
       const agentId = await ensureAgentForCall(openclawAgentId, sessionId);
       if (agentId === null) {
         return;
       }
-      // Maintenance only. Final dialogue capture and affect observation live
-      // in the typed agent_end hook, whose finality contract holds across
-      // multi-pass tool loops.
+      // Maintenance only. Durable dialogue/affect ownership belongs to the
+      // accepted-turn commitTurn outbox contract.
       const rawMessages = Array.isArray(opts["messages"])
         ? (opts["messages"] as Array<Record<string, unknown>>)
         : [];
@@ -457,11 +549,4 @@ function roughTokenEstimate(messages: StyxMessage[]): number {
     (acc, m) => acc + Math.ceil((m.content ?? "").length / 4),
     0,
   );
-}
-
-function extractAvailableTools(params: LifecycleParams): string[] | null {
-  const raw = params["availableTools"];
-  if (raw instanceof Set) return Array.from(raw).map(String);
-  if (Array.isArray(raw)) return raw.map(String);
-  return null;
 }

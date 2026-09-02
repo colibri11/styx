@@ -18,6 +18,11 @@ schema автогенерируется на `GET /openapi.json`, интерак
 Волна 30 (memory markers). 11 LLM-facing endpoint'ов (см. список
 ниже) поддерживают опциональную обёртку результата pre-rendered
 строкой с маркером таксономии: `<styx-{channel}>...</styx-{channel}>`.
+Это explicit-tool taxonomy. Основной автоматический Wave 37 preturn не
+использует отдельные channel wrappers: он приходит одним fenced
+`<styx-cognitive-continuity>` block. `<styx-salient>` и
+`<styx-self-state>` сохранены как legacy automatic markers для старых
+preturn surfaces, а не как primary path.
 Caller активирует обёртку одним из эквивалентных способов:
 
 - query-параметр `?wrap_for_llm=1` (значения `0` / `1`),
@@ -83,6 +88,30 @@ Plugin'ы (OpenClaw `extensions/styx`, Hermes `packages/styx-hermes`)
 Ненулевое значение — leak assembled view / tool result в historical
 messages (transcript echo, snapshot replay, native memory dump).
 Per-tag breakdown указывает на источник.
+
+## Граница памяти и cognitive continuity
+
+Миграция `0009_cognitive_continuity.sql` вводит три явных домена
+`memories.memory_domain`:
+
+- `dialogue` — сырой user/assistant/tool transcript;
+- `external_evidence` — документы, attachments и `experience_intake`;
+- `subjective_trace` — след, который может участвовать в реконструкции линии.
+
+Одного домена недостаточно: в subjective recall и `will_projection` входят
+только live rows с `memory_domain="subjective_trace"` и
+`line_eligible=true`. Диалог и внешнее свидетельство остаются доступными
+через отдельные cited-evidence/archive surfaces, но не становятся частью
+subjective line только из-за хранения. Изменение любой live eligible trace
+транзакционно увеличивает `line_state.version` и инвалидирует materialized
+will projection.
+
+Основной host-контракт состоит из двух additive endpoint'ов:
+`POST /cognition/preturn` перед генерацией и `POST /cognition/commit` только
+на terminal seam после полного tool loop. Legacy endpoints сохранены для
+mixed-version deployment. Hermes/OpenClaw используют fallback только при
+HTTP `404` от соответствующего cognition endpoint; timeout, `401`, `422` или
+`5xx` являются fail-open ошибкой текущего вызова и не запускают второй writer.
 
 ## Endpoint'ы
 
@@ -165,18 +194,18 @@ agent_id обновляет session_id и tools, не пересоздаёт sta
 
 ### `POST /sync_turn`
 
-Запись turn'а — INSERT memory с текущим affective provenance,
-embedding-after-commit, importance enqueue, classifier enqueue. Причинный
-переход finalized turn принимается отдельным `/affect/observe_turn` до этого
-вызова. Legacy peer-only sentiment работает только при отключённом causal
-observer.
+Legacy запись turn'а для callers без `/cognition/commit`: INSERT diary rows с
+текущим affective provenance, embedding-after-commit, importance enqueue и
+classifier enqueue. В mixed-version fallback finalized affect принимается
+отдельным `/affect/observe_turn` до этого вызова. Новый host не вызывает этот
+writer после успешного `/cognition/commit`.
 
 **Defect-fix B — split больших реплик:** реплика (user/assistant)
 длиннее `STYX_MESSAGE_SPLIT_PART_CHARS` (default 2000) режется на N
 рядов дневника того же role/session, каждый ≤ лимита (CHECK
 constraint `memories_content_length_check`, 2400). Все ряды остаются
-в `memories` (дневник = речь целиком; IAmBook §V — в архив части НЕ
-уходят). Группа помечается в metadata `msg_group` (uuid) / `part`
+в `memories` (по исторической схеме Styx дневник сохранял речь целиком;
+в архив части НЕ уходят). Группа помечается в metadata `msg_group` (uuid) / `part`
 (индекс) / `parts` (всего); композиция (`StyxComposer`,
 `recent_messages`) пересобирает группу обратно в один блок. Inline-
 embed ограничен `STYX_MESSAGE_SPLIT_INLINE_EMBED_CAP` (default 4) —
@@ -214,7 +243,9 @@ embed ограничен `STYX_MESSAGE_SPLIT_INLINE_EMBED_CAP` (default 4) —
 ### `POST /recall`
 
 On-demand recall — embed query, search_similar, format. Используется
-`styx_recall` tool на стороне обёртки (Hermes/OpenClaw).
+`styx_recall` tool на стороне обёртки (Hermes/OpenClaw). Ranked subjective
+recall фильтрует `memory_domain=subjective_trace` и `line_eligible=true`;
+dialogue/external evidence запрашиваются через отдельные surfaces.
 
 **Request:**
 ```json
@@ -284,8 +315,9 @@ update, eviction relevance).
 
 ### `POST /pre_llm_inject`
 
-Multi-channel framework: возвращает строки каналов для inject'а в user
-message. Сейчас единственный канал — self_state (волна 35).
+Legacy pre-generation surface для mixed-version core: возвращает строки
+каналов для inject'а в user message. Новый host вызывает её только если
+`/cognition/preturn` вернул `404`.
 
 **Request:**
 ```json
@@ -310,12 +342,209 @@ message. Сейчас единственный канал — self_state (вол
 явных сигналов. Payload не содержит названия эмоции и не является командой
 по тону; он распределяет внимание и глубину проверки до генерации текста.
 
+### `POST /cognition/preturn`
+
+Строит один атомарный fenced snapshot перед генерацией. Window mechanics,
+query-independent will projection, current affect/posture, pending
+consequences и query-dependent reconstruction читаются под одним per-agent
+lock. Ответ содержит bounded tagged block; его порядок фиксирован:
+`technical_projection` → `cognitive_posture` → `pending_consequences` →
+`reconstructed_subjective_traces`.
+
+**Request:**
+```json
+{
+  "agent_id": "agent_demo",
+  "host_key": "openclaw:run-018f",
+  "session_id": "5d7cc2e8-6fd2-42e8-b91f-bf92fb8dd26c",
+  "messages": [
+    {"role": "system", "content": "Follow operator constraints."},
+    {"role": "user", "content": "Что изменилось после прошлого действия?"}
+  ],
+  "query": "изменения после прошлого действия",
+  "token_budget": 12000,
+  "model": "local-model",
+  "platform": "openclaw",
+  "extra": {"current_goal": "проверить deploy", "risk": "high"}
+}
+```
+
+`messages` ограничены 256 элементами; допустимы роли
+`system|user|assistant|tool`, `content` ≤ 20 000 символов. Если задан
+`token_budget` (256..1 000 000), core сохраняет system frame и новейшие
+целые сообщения, помещающиеся в детерминированную оценку бюджета. Если
+`query` пуст, используется последняя непустая user-replica.
+`extra` — bounded JSON object (до 16 top-level keys; те же depth/node/byte
+guards, что journal metadata). Legacy string values поддерживаются;
+`current_event` может быть object или JSON-object string. В posture учитываются
+только allowlisted `goal|current_goal|task|constraints|conflicts|risk|urgency`.
+Query/user text также может дать correction/precision signals; остальные host
+metadata не попадают в trusted prompt.
+
+`host_key` опционален для callers, которые ещё не знают identity будущего
+terminal act. Hermes передаёт его уже в preturn: повтор с тем же
+`agent_id+host_key` возвращает точный сохранённый envelope и не арендует второй
+набор consequences; несовпадающий request получает `409`. OpenClaw v2026.8.2
+не имеет advancement key на стадии `assemble`, поэтому unkeyed повтор
+дедуплицируется только для byte-equivalent request внутри той же live session.
+После commit использованный snapshot больше не replay'ится.
+
+**Response 200:**
+```json
+{
+  "messages": [
+    {"role": "system", "content": "Follow operator constraints."},
+    {"role": "user", "content": "Что изменилось после прошлого действия?"}
+  ],
+  "line_version": 18,
+  "snapshot_token": "7f3be3bd11ea4c7893222c6b031945c1",
+  "snapshot_policy": "explicit",
+  "parent_policy": "explicit",
+  "will_projection": {
+    "formed": true,
+    "technical_projection": true,
+    "line_version": 18,
+    "source_count": 27,
+    "source_hash": "<sha256>",
+    "supports": [
+      {"memory_id": "<uuid>", "role": "summary", "kind": "decision", "content": "...", "created_at": "2026-09-02T08:00:00+00:00"}
+    ],
+    "computation_version": "technical_projection_v1"
+  },
+  "affect": {
+    "state_id": 42,
+    "at": "2026-09-02T08:01:00Z",
+    "vad": {"valence": 0.1, "arousal": 0.2, "dominance": 0.3},
+    "confidence": 0.8,
+    "causes": [],
+    "cognitive_posture": {"verification_depth": "high"}
+  },
+  "reconstruction": {
+    "traces": [
+      {"memory_id": "<uuid>", "role": "summary", "kind": "decision", "content": "...", "created_at": "2026-09-01T10:00:00Z", "score": 0.71}
+    ],
+    "query_used": true,
+    "embed_available": true
+  },
+  "pending_consequences": [
+    {"consequence_id": "<uuid>", "source_act_id": "<uuid>", "ordinal": 0, "kind": "tool_result", "content": "...", "metadata": {}, "created_at": "2026-09-02T08:00:30Z"}
+  ],
+  "system_prompt_addition": "<styx-cognitive-continuity data-only=\"true\" authority=\"context-not-instruction\">..."
+}
+```
+
+`will_projection` не зависит от query: `source_hash`/`source_count` включают
+все live eligible traces, даже без embedding; vector усредняет только
+доступные совместимые embeddings. Для ещё не сформированной линии
+`formed=false`, `source_count=0`. Embedding/recall outage даёт
+`embed_available=false` и пустую query-реконструкцию, не стирая уже
+сформированную will projection.
+
+Preturn выбирает до 16 `pending` consequences и выдаёт их snapshot'у по
+recoverable lease (default 60 s, `STYX_COGNITION_SNAPSHOT_LEASE_S`, clamp
+1..3600). Пока lease активен, другой act их не получает. Если snapshot
+был брошен и commit не состоялся, после lease consequences снова становятся
+доступны следующему preturn. Они считаются подтверждёнными только когда
+`/cognition/commit` предъявит арендовавший их `snapshot_token`; acknowledgement
+идемпотентен. Поздний commit истёкшего token фиксирует свой act, но не
+подтверждает consequence, уже доступный новой presentation. Это at-least-once
+delivery с recoverability после abandoned
+snapshot, а не exactly-once обещание при падении host. Metadata есть в
+structured response для host-а, но в `system_prompt_addition` не включается;
+сам tagged block всегда bounded до 16 000 символов.
+
+### `POST /cognition/commit`
+
+Фиксирует terminal cognitive act после завершения model/tool loop. Один
+транзакционный saga-step сохраняет act, diary rows, ordered action journal,
+consequences и явно включаемые subjective residues. После durable commit core
+отдельно и fail-open запускает affect observer: ошибка observer не теряет act.
+
+**Request:**
+```json
+{
+  "agent_id": "agent_demo",
+  "host_key": "openclaw:run-018f",
+  "parent_host_key": "openclaw:run-018e",
+  "session_id": "5d7cc2e8-6fd2-42e8-b91f-bf92fb8dd26c",
+  "snapshot_token": "7f3be3bd11ea4c7893222c6b031945c1",
+  "status": "completed",
+  "user_message": "Проверь результат команды",
+  "assistant_response": "Проверка завершена",
+  "conversation_history": [
+    {"role": "user", "content": "Проверь результат команды"},
+    {"role": "assistant", "content": "Проверка завершена"}
+  ],
+  "tool_events": [
+    {"kind": "call", "tool_event_id": "call-1", "name": "check", "content": "{\"target\":\"workspace\"}", "metadata": {}},
+    {"kind": "result", "tool_event_id": "call-1", "name": "check", "content": "passed", "metadata": {}}
+  ],
+  "consequences": [
+    {"kind": "verification", "content": "Workspace check passed", "incorporate": true, "line_eligible": true, "memory_kind": "decision", "metadata": {}}
+  ],
+  "model": "local-model",
+  "platform": "openclaw",
+  "extra": {"projection_scope": "finalized_channel_output"}
+}
+```
+
+`host_key` обязателен (1..512) и является durable idempotency key per agent.
+Повтор с тем же ключом возвращает исходный `act_id`, `duplicate=true` и не
+дублирует diary/action/consequence/residue; response повторяет стабильный
+исходный ack count. `parent_host_key` задаёт ancestry
+явно: если parent приходит позже, child сохраняет declared key и связь
+разрешается при записи parent; timestamp/порядок доставки parentage не меняют.
+
+По умолчанию `snapshot_policy=explicit` и `parent_policy=explicit`: работают
+переданные `snapshot_token`/`parent_host_key`. Current OpenClaw adapter
+использует `latest_session` для обоих полей. Под per-agent transaction lock
+core выбирает только последний live, complete, unused unkeyed snapshot той же
+session и последний уже committed act той же session. Если snapshot истёк или
+отсутствует, act всё равно фиксируется с `snapshot_claimed=false`; snapshot
+другой session никогда не подставляется. Повтор того же `host_key` проверяется
+до выбора head/snapshot и не потребляет более новый envelope.
+
+`tool_events` (до 64 суммарно) сохраняются ровно в переданном порядке с
+ordinal и kind `call|result|error`. Встроенные Hermes/OpenClaw adapters
+передают bounded finalized projection до того же общего bound 64.
+Content ограничен 8000 символами. Metadata принимает
+JSON с максимум 16 keys/items на уровень, глубиной до 6, key до 64 и string
+до 1000 символов; storage повторно bounds/redacts распространённые credential
+формы. Каждый принятый core'ом tool `result`/`error` без исключений также
+создаёт consequence для следующего act. Явные `consequences` ограничены 32;
+вместе с автоматически выведенными из result/error общий валидируемый bound
+равен 96. Переполнение отклоняется validation error, хвост не подавляется
+молча. `incorporate=true` создаёт durable residue row; отдельный opt-in
+`line_eligible=true` делает его
+`subjective_trace` и меняет line version. При `incorporate=true` и default
+`line_eligible=false` residue хранится как `external_evidence`; при
+`incorporate=false` он остаётся только в consequence inbox.
+
+**Response 200:**
+```json
+{
+  "act_id": "<uuid>",
+  "duplicate": false,
+  "committed": true,
+  "line_version": 19,
+  "acknowledged_consequences": 1,
+  "consequence_ids": ["<uuid>", "<uuid>"],
+  "memory_ids": ["<uuid>"]
+}
+```
+
+`snapshot_token` опционален для callers без preturn, но если передан, он
+должен принадлежать этому agent и может быть committed только один раз. Commit
+acknowledge'ит consequences, представленные этим token, и связывает act с
+`input_line_version` snapshot. `status` — `completed|failed`: failed terminal
+act всё равно журналируется как завершившийся host outcome.
+
 ### `POST /affect/observe_turn`
 
-Idempotent fail-open observation завершённого когнитивного акта. Hermes
-вызывает endpoint из `post_llm_call`, OpenClaw — из terminal `agent_end`, до
-записи реплик в дневник. Следующий OpenClaw pre-prompt ограниченно ждёт
-незавершённый terminal transition. Core отделяет stimulus от reaction и
+Legacy idempotent fail-open observation завершённого cognitive act. Новый
+`/cognition/commit` сам вызывает тот же observer после durable saga; прямой
+host-вызов нужен только при `404` нового endpoint в mixed-version deployment.
+Core отделяет stimulus от reaction и
 сохраняет immutable evidence плюс append-only transition. Последовательный
 повтор с тем же `idempotency_key` возвращает `duplicate=true` без повторного
 model-call; конкурентный evaluator может стартовать дважды, но UNIQUE и
@@ -389,9 +618,12 @@ Snapshot причинного состояния (legacy VAD ABI + evidence prov
 
 ### `POST /memory_store`
 
-Subjective write через selective gatekeeper (волна 17). Каждое решение
-gatekeeper'а — `skip` / `merge` / `supersede` / `store` — применяется
-синхронно: insert + sync embed + apply, всё в одной транзакции.
+Explicit structured write через selective gatekeeper (волна 17). Каждое
+решение gatekeeper'а — `skip` / `merge` / `supersede` / `store` — применяется
+синхронно: insert + sync embed + apply, всё в одной транзакции. Default
+`kind_src=subjective` создаёт eligible subjective trace; legacy-compatible
+`kind_src=experience_intake` создаёт `external_evidence` с
+`line_eligible=false`.
 
 **Request:**
 ```json
@@ -414,7 +646,8 @@ gatekeeper'а — `skip` / `merge` / `supersede` / `store` — применяе�
   Mapping kind→role: всё → `summary`.
 - `kind_src` — subjective / subjective_tail / experience_intake /
   dialogue_consolidation_daily / dialogue_batch_consolidation
-  (CHECK constraint).
+  (CHECK constraint). Значение `experience_intake` не входит в subjective
+  recall/will; само сохранение external evidence не является incorporation.
 
 **Response 200 (короткий content):**
 ```json
@@ -483,8 +716,9 @@ distance ≤ 0.25, до 3 штук) и в `relations` пишется `related_to
 constraint в `relations`.
 
 Также auto-link срабатывает для каждого user/assistant ряда в
-`/sync_turn` после embed-after-commit — dialogue → subjective memory
-связи через тот же `related_to`.
+legacy `/sync_turn` после embed-after-commit. Такие rows остаются доменом
+`dialogue`; graph relation не делает их `subjective_trace` и не включает в
+will/reconstruction.
 
 **ENV (auto-link):**
 - `STYX_AUTO_LINK_ENABLED` (default `true`) — главный toggle.
@@ -901,10 +1135,10 @@ chunks. Документ-артефакт уходит в архив (`documents
 доступен через `/search_archive`.
 
 **Defect-fix A — маркер акта вместо «no tail-memory»:** документ ≠
-память (IAmBook §V). В `memories` пишется tail-memory с **маркером
-акта архивации** — «я положил в архив документ такого-то рода»
+subjective memory по инженерной границе Styx. В `memories` пишется
+tail-memory с **маркером акта архивации** — «я положил в архив документ такого-то рода»
 (тип / происхождение / о чём / ссылка `styx://store/<id>`), БЕЗ
-содержания документа. Маркер — это след акта в линии `я`. Раньше
+содержания документа. Маркер — это сохранённый след акта. Раньше
 (волна 28) tail-memory не создавалась вовсе.
 
 **Defect-fix A — async ingest большого документа:** документ, который
@@ -963,8 +1197,11 @@ existing ряд, `chunks_count=0` (нет новых INSERT'ов),
 `act_marker_memory_id=null` (новый маркер не создаётся — акт уже
 зафиксирован при первом ingest'е).
 
-`act_marker_memory_id` — id tail-memory с маркером акта архивации
-(Defect-fix A); `null` при dedup. `chunks_embedded_inline=false` —
+`act_marker_memory_id` — id ровно одной короткой memory-маркера акта архивации
+(Defect-fix A); она создаётся с `memory_domain=external_evidence` и
+`line_eligible=false`. Тело документа остаётся только в `documents`+`chunks` и
+не превращается в subjective trace. При dedup маркер не дублируется и поле
+равно `null`. `chunks_embedded_inline=false` —
 большой документ, chunks embed'ятся async в worker pool;
 `/search_archive` найдёт документ после того как async-задача
 отработает.
@@ -1011,14 +1248,14 @@ tool (factory + impl + lazy HTTP call). Hermes plugin —
 ### `POST /dialogue/save`
 
 Explicit ad-hoc save одной реплики (волна 24). Пишет в `memories`
-с `role IN ('user','assistant')`. Auto-capture идёт через
-`/sync_turn` — этот route для programmatic callers (OpenClaw plugin
-context-engine `dialogue_save` tool).
+с `role IN ('user','assistant')`, `memory_domain=dialogue` и
+`line_eligible=false`. Основной auto-capture выполняет terminal
+`/cognition/commit`; legacy callers используют `/sync_turn`. Этот route —
+для programmatic explicit save (OpenClaw `dialogue_save` tool).
 
 **Pipeline-канал — не subjective:**
 - Auto-link НЕ применяется (D5 в waves/24, симметрия с `/ingest_experience`).
-- Classifier-enqueue / sentiment hot-path НЕ применяются (только
-  для natural turn'а через `/sync_turn`).
+- Classifier-enqueue / sentiment hot-path legacy `/sync_turn` НЕ применяются.
 
 **Request:**
 ```json
@@ -1204,15 +1441,13 @@ follow-up):
 - `styx_dialogue_recent` — wrapper над `POST /dialogue/recent`.
 - `styx_dialogue_prepare_summary` — wrapper над `POST /dialogue/prepare_summary`.
 
-`POST /dialogue/save` — без Hermes wrapper'а: Hermes capture идёт
-через `/sync_turn`; explicit save — для plugin-канала (симметрия
-с `/ingest_experience`).
+`POST /dialogue/save` — без Hermes wrapper'а: Hermes capture идёт через
+`/cognition/commit`; explicit save — для plugin-канала.
 
 `POST /dialogue/sessions` — без Hermes wrapper'а: административная
 поверхность без LLM use case (list of UUIDs без UI бесполезен LLM).
 
-OpenClaw plugin track в будущем зарегистрирует все 5 routes как
-LLM-tools напрямую через HTTP.
+OpenClaw plugin регистрирует все 5 routes как LLM-tools через HTTP.
 
 ### `POST /explain/decompose`
 

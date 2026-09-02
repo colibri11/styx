@@ -57,7 +57,7 @@ export function createStoreTool(
     label: "Styx Store",
     name: "styx_store",
     description:
-      "Сохранить новый фрагмент линии `я` (subjective write). Перед записью пройдёт через selective gatekeeper: новый ряд, merge с похожим существующим или supersede старого. Длинный текст автоматически уйдёт в documents+chunks с tail-memory сводкой. Используй для прожитого, осмысленного, того что входит в траекторию агента-как-личности — а не как RAG-загрузку справки. Если только хочешь занести фразу диалога, используй styx_dialogue_save (другой канал).",
+      "Сохранить явный subjective trace. Записывай только материал, который действительно участвовал в решении или понимании; внешнюю справку оставляй в evidence/archive до когнитивного включения. Selective gatekeeper выберет store, merge или supersede. Сам факт styx_store не доказывает personality или полноту когнитивного provenance. Для строки диалога используй styx_dialogue_save.",
     parameters: StoreParametersSchema,
     execute: async (toolCallId, toolParams, signal, onUpdate) => {
       const impl = await loadImpl();

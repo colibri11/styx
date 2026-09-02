@@ -241,15 +241,14 @@ def ingest_document(
     # рода» (IAmBook §V: документ ≠ память; в линию `я` входит акт, не
     # содержание). tail_mode='act_marker'.
     #
-    # kind='note' / kind_src='subjective_tail' — это и есть «tail-
-    # memory с archive_ref»; оба значения проходят CHECK constraint'ы
-    # memories (kind / kind_src), миграция не нужна.
+    # Маркер остаётся audit-ссылкой на архив, но не становится субъектным
+    # trace только по факту file-ingest: explicit external/non-line domain.
     result: RoutedWriteResult = route_long_content(
         queries,
         embedder,
         content=parsed.text,
         kind="note",
-        kind_src="subjective_tail",
+        kind_src="experience_intake",
         role="summary",
         config=store_routing,
         source="ingest_document",
@@ -264,6 +263,8 @@ def ingest_document(
         size_bytes=size,
         visibility=visibility,
         document_metadata_extra=doc_extra,
+        tail_memory_domain="external_evidence",
+        tail_line_eligible=False,
     )
 
     return IngestDocumentResult(

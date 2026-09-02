@@ -268,10 +268,10 @@ def test_real_plugin_manager_invokes_pre_llm_hook() -> None:
     from styx_hermes import _agent_session
 
     class _HookClient:
-        def pre_llm_inject(self, agent_id, **kwargs):
+        def cognition_preturn(self, agent_id, **kwargs):
             assert agent_id == "hook-agent"
             assert kwargs["session_id"] == "physical-session"
-            return {"context": "hook-context"}
+            return {"system_prompt_addition": "hook-context"}
 
     with _attached_active_config():
         pm = PluginManager()

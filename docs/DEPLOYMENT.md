@@ -13,32 +13,71 @@
 
 ## 0. Breaking changes при апгрейде
 
-**styx-core/styx-hermes 1.1.0 — causal affect continuity.** До обновления
-Hermes необходимо обновить оба пакета совместно: новый Hermes hook вызывает
-additive endpoint `/affect/observe_turn`, а core выполняет миграцию `0008`
-для `emotional_events` и provenance-колонок.
+### Текущий переход: cognitive continuity и migration 0009
 
-- Новый default path анализирует finalized user/assistant/tool turn, отделяет
-  peer stimulus от реакции агента и пишет idempotent causal transition.
-- `self_state` больше не инжектит фразу `Тебе сейчас X`; теперь это
-  `<styx-self-state>` с cognitive posture без style/voice инструкции.
-- `STYX_AFFECTIVE_TRANSITION_ENABLED=0` отключает новый путь. Только в этом
-  режиме `STYX_SENTIMENT_ENABLED` возвращает старый peer-only rollback path.
+Core и оба host adapter'а нужно обновлять как один rollout. Миграция
+`0009_cognitive_continuity.sql`:
+
+- классифицирует `memories` в `dialogue`, `external_evidence` и
+  `subjective_trace`, добавляет обязательный guard `line_eligible`;
+- создаёт append-only cognitive acts, ordered actions, consequence inbox,
+  fenced snapshots и отдельную typed `memory_lineage`;
+- создаёт versioned `line_state`/`will_projections`; любое изменение live
+  eligible subjective trace транзакционно помечает projection dirty;
+- сохраняет UUID и archive/search поверхности существующих rows.
+
+Новый host path — `/cognition/preturn` перед model call и ровно один
+`/cognition/commit` после завершения tool loop. Commit несёт finalized channel
+projection, ordered `call|result|error`, `host_key`, declared parent и
+`snapshot_token`. Принимается до 32 явных consequences; каждый допустимый
+`result`/`error` tool event также становится consequence, общий валидируемый
+bound — 96. Core отклоняет переполнение, а не молча обрезает причинный feedback.
+Consequences выдаются snapshot'у по lease, подтверждаются только terminal
+act'ом с этим token и после истечения lease снова доступны, если snapshot был
+брошен. Поэтому доставка recoverable at-least-once, а acknowledgement и retry
+того же act идемпотентны; поздний commit истёкшего snapshot не подтверждает
+повторную presentation, exactly-once при падении host не обещается. Legacy
+writers используются только если новый endpoint вернул `404`; не на timeout,
+auth, validation или `5xx`.
+
+Рекомендуемый порядок rollout:
+
+1. Сделать обычный backup PostgreSQL и остановить host writes либо перевести
+   gateway'и в maintenance.
+2. Обновить checkout/пакеты, затем выполнить `.venv/bin/styx migrate` один раз.
+3. Перезапустить `styx-daemon`; проверить `/healthz` и наличие обоих cognition
+   paths в `/openapi.json`.
+4. Обновить `styx-hermes` и OpenClaw plugin, затем перезапустить host
+   процессы. Не оставлять mixed-version fallback постоянным режимом.
+5. Выполнить два последовательных хода с tool result. Для Hermes передавать
+   физический `host_key` уже в preturn; OpenClaw v2026.8.2 сам доставляет
+   accepted advancement key через durable `commitTurn` outbox. Второй preturn
+   должен получить consequence первого, а terminal commit — вернуть ненулевой
+   `acknowledged_consequences`. Повтор commit с тем же `host_key` должен вернуть
+   `duplicate=true` без новых rows.
+
+OpenClaw-плагин требует v2026.8.2: `assemble` сохраняет rich messages и строит
+session-fenced snapshot, а `commitTurn` атомарно и идемпотентно продвигает
+принятый transcript turn. Hooks `agent_end`/`before_prompt_build` для finality
+не используются.
+
+Схема additive, но откат только binaries на старый writer семантически
+небезопасен: legacy writer не задаёт новые domain/eligibility поля явно.
+Для rollback возвращайте согласованный snapshot БД либо сохраняйте новый core
+до завершения обратной миграции данных.
+
+### Исторический переход: causal affect continuity и migration 0008
+
+Миграция `0008_emotional_evidence.sql` добавила `emotional_events` и
+provenance-колонки. Она не объявляет старые rows достоверным evidence: legacy
+provenance остаётся `NULL`.
+
+- `STYX_AFFECTIVE_TRANSITION_ENABLED=0` отключает causal observer. Только в
+  этом режиме `STYX_SENTIMENT_ENABLED` возвращает peer-only rollback path.
 - `STYX_AFFECTIVE_TRANSITION_TIMEOUT_S` (default `8.0`) ограничивает один
-  fail-open model-call. Ошибка не роняет завершённый host turn.
-- После deploy проверьте `/healthz`, один реальный ход и `/agent_state`:
-  `instant_evidence.event_id`, `confidence` и `causal_components` должны быть
-  заполнены. Затем убедитесь, что новые dialogue memories ссылаются на тот же
-  `emotional_context_state_id`.
-- Для OpenClaw требуется версия не ниже `2026.5.3` и явный trusted-hook
-  permission `plugins.entries.styx.hooks.allowConversationAccess=true`.
-  Без него host блокирует `agent_end`, поэтому finalized affect/dialogue
-  capture не выполняется. Docker bootstrap выставляет permission сам.
-
-Миграция additive и не объявляет старые rows достоверным evidence: legacy
-provenance остаётся `NULL`. Откат к старым бинарникам безопасен на уровне
-схемы — они игнорируют новые таблицу/колонки — но старый runtime снова будет
-использовать прежнюю семантику sentiment.
+  fail-open model-call. Ошибка observer не роняет durable cognitive act.
+- Для OpenClaw требуется версия не ниже `2026.8.2`; старые hook permissions
+  для causal finality больше не нужны.
 
 ### Историческое изменение 1.0.7
 
@@ -71,7 +110,7 @@ Hermes-профиль) когда-либо выставлялись любые �
 
 | Компонент | Версия | Зачем |
 |---|---|---|
-| Hermes Agent | `v2026.4.30+` | Host-фреймворк для plugin'а |
+| Hermes Agent | точный tag `v2026.8.31`, package `0.21.0` | Проверенный canonical cognition host-контракт |
 | PostgreSQL | 18+ с расширением `pgvector` | Long-tier memories + working_set persistence |
 | Ollama | актуальная | Embedding (`embeddinggemma:300m-qat-q8_0`) + LLM workers (`qwen3:4b-local`) |
 | Python | 3.11+ | Для `styx-core` daemon (минимальный slim Python) |
@@ -92,13 +131,28 @@ ollama pull qwen3:4b-local
 
 ### 2.1. Hermes Agent
 
-Официальный installer (если не установлен):
+Для canonical `/cognition/{preturn,commit}` deployment установите точно Hermes
+Agent tag `v2026.8.31` (package `0.21.0`). Docker-путь ниже пинит официальный
+образ `nousresearch/hermes-agent:v2026.8.31`; host-install должен быть закреплён
+на том же релизе, а не следовать `main` или непинованному installer channel.
+
+Upstream installer поддерживает pin через `--branch`; до attach Styx проверьте
+его canonical version output:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh \
+  | bash -s -- --branch v2026.8.31
+hermes --version
+# expected package version in output: 0.21.0
 ```
 
 После установки `hermes` доступен в `$PATH`, `~/.hermes/` создан как
 `$HERMES_HOME`.
+
+Более старые Hermes не являются canonical cognition deployment. Их можно
+временно оставить только как документированный degraded legacy/mixed-version
+lane: legacy preturn/sync/affect surfaces не дают атомарный fenced envelope,
+recoverable consequence lease и полный terminal action feedback. Успешный
+legacy fallback не считается проверкой семантики Wave 37.
 
 ### 2.2. Styx (workspace из git checkout)
 
@@ -270,7 +324,7 @@ embedding-модели (тяжелее, гонять вручную). Контр
 
 Админская миграционная операция (styx-core ≥ 1.0.3): переименовать
 `agent_id` по всем agent-scoped таблицам. Нужна, в частности, при
-переселении агента в Styx, чтобы его накопленная линия `я` смотрела под
+переносе agent-scoped памяти в Styx, чтобы накопленные данные смотрели под
 именем Hermes-профиля (`agent_identity` = имя профиля), — выравнивание
 `agent_id` под Hermes-профили перед миграцией.
 
@@ -423,11 +477,31 @@ curl -s http://127.0.0.1:8788/healthz | jq .
 
 # Inspect API schema
 curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
+curl -fsS http://127.0.0.1:8788/openapi.json | jq -e \
+  '.paths["/cognition/preturn"] and .paths["/cognition/commit"]'
 
 # Из Hermes-process (one-shot turn; с v2026.5.29.2 subcommand — chat, не ask;
 # выверено против v2026.6.19)
 hermes chat -q "Привет"  # в логах: "StyxMemoryProvider initialized" + "Styx pre_llm_call hook зарегистрирован"
 ```
+
+После двух последовательных validation-turn'ов проверьте журнал без вывода
+содержимого сообщений:
+
+```sql
+SELECT count(*) AS acts,
+       count(*) FILTER (WHERE status = 'completed') AS completed
+FROM cognitive_acts
+WHERE agent_id = 'agent_demo';
+
+SELECT status, count(*)
+FROM cognitive_consequences
+WHERE agent_id = 'agent_demo'
+GROUP BY status ORDER BY status;
+```
+
+Не включайте `channel_input`, `channel_output`, action/consequence content или
+provider credentials в deploy-логи и тикеты.
 
 ## 6. Troubleshooting
 
@@ -476,7 +550,18 @@ docker compose -f docker/docker-compose.test.yml --env-file .env up -d --build
 ```
 
 `.env` содержит `OLLAMA_HOST_IP`, `STYX_HTTP_TOKEN`, провайдерские ключи
-для Hermes.
+для Hermes и воспроизводимые host pins. Canonical defaults:
+
+```dotenv
+HERMES_IMAGE=nousresearch/hermes-agent:v2026.8.31
+OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.8.2
+```
+
+OpenClaw `2026.8.2` совпадает с plugin SDK в `extensions/styx/package-lock.json`.
+Override `OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest` разрешён только как
+отдельный latest-compat lane: его результат документируется отдельно и не
+заменяет canonical pin. Аналогично, override `HERMES_IMAGE` не считается
+canonical cognition deployment без отдельной compat-валидации exact tag/package.
 
 ### 7.1. hermes-styx обёртка на s6-overlay образе
 
@@ -502,8 +587,10 @@ gateway run`. Поэтому:
   `STYX_DATABASE_URL`/`DATABASE_URL`, а **НЕ** по `STYX_DAEMON_URL`. Без него
   провайдер не выберется **даже после attach** (хотя обёртка ходит в daemon
   только по HTTP).
-- **`HERMES_IMAGE` — s6-overlay образ** (нужно для маршрутизации gateway-CMD
-  через `main-wrapper.sh`).
+- **`HERMES_IMAGE` — exact `nousresearch/hermes-agent:v2026.8.31`** для
+  canonical contract; override обязан оставаться s6-overlay образом и является
+  отдельным compat lane (нужно для маршрутизации gateway-CMD через
+  `main-wrapper.sh`).
 - **Production Compose обязан задать `command: ["gateway","run"]`**:
   официальный образ v2026.8.31 не задаёт Docker CMD. В test-стеке команда —
   `["sleep","infinity"]` (контейнер живёт для

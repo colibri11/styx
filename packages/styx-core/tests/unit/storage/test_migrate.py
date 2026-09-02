@@ -7,7 +7,12 @@ import psycopg
 from styx.storage import migrate
 
 
-EXPECTED_TABLES = {"sessions", "memories", "recall_events", "_styx_migrations"}
+EXPECTED_TABLES = {
+    "sessions", "memories", "recall_events", "_styx_migrations",
+    "cognitive_acts", "cognitive_snapshots", "cognitive_actions",
+    "cognitive_consequences", "cognitive_presentations", "memory_lineage", "line_state",
+    "will_projections",
+}
 EXPECTED_INDEXES = {
     "sessions_agent_started_idx",
     "memories_agent_seq_idx",
@@ -15,6 +20,14 @@ EXPECTED_INDEXES = {
     "memories_embedding_hnsw_idx",
     "recall_events_memory_idx",
     "recall_events_session_idx",
+    "memories_subjective_line_idx",
+    "cognitive_acts_parent_key_idx",
+    "cognitive_snapshots_agent_created_idx",
+    "cognitive_snapshots_agent_host_uq",
+    "cognitive_consequences_inbox_idx",
+    "cognitive_presentations_active_idx",
+    "memory_lineage_source_idx",
+    "memory_lineage_target_idx",
 }
 
 
@@ -42,6 +55,7 @@ def test_migration_applies_to_empty_db(clean_db: str) -> None:
         "0003_working_set.sql", "0004_relations_unique.sql",
         "0005_documents_chunks.sql", "0006_chunks_fts.sql",
         "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
+        "0009_cognitive_continuity.sql",
     ]
 
     with psycopg.connect(clean_db) as conn:
@@ -60,6 +74,7 @@ def test_migration_is_idempotent(clean_db: str) -> None:
         "0003_working_set.sql", "0004_relations_unique.sql",
         "0005_documents_chunks.sql", "0006_chunks_fts.sql",
         "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
+        "0009_cognitive_continuity.sql",
     ]
     assert second == []
 
@@ -84,9 +99,10 @@ def test_schema_supports_basic_io(clean_db: str) -> None:
             # focus остаётся Styx-specific. query_hash NULL допустим
             # благодаря partial UNIQUE.
             cur.execute(
-                "INSERT INTO recall_events "
-                "(memory_id, session_id, focus, match_score) "
-                "VALUES (%s, '00000000-0000-0000-0000-000000000001', "
+                    "INSERT INTO recall_events "
+                    "(memory_id, session_id, agent_id, focus, match_score) "
+                    "VALUES (%s, '00000000-0000-0000-0000-000000000001', "
+                    "'test-agent', "
                 "'greeting', 0.91)",
                 (memory_id,),
             )
@@ -104,7 +120,7 @@ def test_schema_supports_basic_io(clean_db: str) -> None:
             assert cur.fetchone()[0] == 1
 
 
-def test_recall_events_has_no_agent_id_column(clean_db: str) -> None:
+def test_recall_events_has_agent_owned_session_fk(clean_db: str) -> None:
     migrate.run(clean_db)
     with psycopg.connect(clean_db) as conn:
         with conn.cursor() as cur:
@@ -113,9 +129,7 @@ def test_recall_events_has_no_agent_id_column(clean_db: str) -> None:
                 "WHERE table_schema = 'public' AND table_name = 'recall_events'"
             )
             cols = {row[0] for row in cur.fetchall()}
-    assert "agent_id" not in cols, (
-        "recall_events.agent_id сознательно отсутствует — scope через FK на memories"
-    )
+    assert "agent_id" in cols
     assert "memory_id" in cols
 
 

@@ -176,6 +176,8 @@ def route_long_content(
     visibility: str | None = None,
     document_metadata_extra: dict[str, Any] | None = None,
     tail_emotional_source_ids: list[uuid.UUID] | None = None,
+    tail_memory_domain: str | None = None,
+    tail_line_eligible: bool | None = None,
 ) -> RoutedWriteResult:
     """Route long content в documents + chunks + опц. tail-memory.
 
@@ -358,6 +360,8 @@ def route_long_content(
         importance_provisional=importance_provisional,
         archive_ref=archive_ref,
         emotional_source_ids=tail_emotional_source_ids,
+        memory_domain=tail_memory_domain,
+        line_eligible=tail_line_eligible,
     )
 
     return RoutedWriteResult(

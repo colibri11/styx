@@ -160,6 +160,84 @@ def test_observe_affective_turn_payload(client_no_token: StyxCoreClient) -> None
         assert body["tool_events"][0]["tool_call_id"] == "call-1"
 
 
+def test_cognition_preturn_payload_and_long_timeout(
+    client_no_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_no_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(
+            200,
+            {
+                "messages": [],
+                "line_version": 4,
+                "snapshot_token": "snap",
+                "system_prompt_addition": "<styx-continuity />",
+            },
+        )
+        out = client_no_token.cognition_preturn(
+            "agent-a",
+            host_key="hermes:sid:turn-1",
+            session_id="sid",
+            messages=[{"role": "user", "content": "hi"}],
+            query="hi",
+            model="m",
+            platform="hermes",
+            extra={"current_event": {"is_first_turn": True}},
+        )
+        assert out["snapshot_token"] == "snap"
+        args, kwargs = mock_post.call_args
+        assert args[0] == "http://daemon.local:8788/cognition/preturn"
+        assert kwargs["timeout"] == client_no_token._long_timeout
+        assert kwargs["json"]["host_key"] == "hermes:sid:turn-1"
+        assert kwargs["json"]["query"] == "hi"
+        assert kwargs["json"]["extra"]["current_event"] == {
+            "is_first_turn": True
+        }
+
+
+def test_cognition_preturn_none_messages_sends_empty_array(
+    client_no_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_no_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(200, {"snapshot_token": "snap"})
+        client_no_token.cognition_preturn("agent-a", messages=None)
+        assert mock_post.call_args.kwargs["json"]["messages"] == []
+
+
+def test_cognition_commit_payload_and_terminal_timeout(
+    client_no_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_no_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(
+            200, {"committed": True, "duplicate": False}
+        )
+        out = client_no_token.cognition_commit(
+            "agent-a",
+            session_id="sid",
+            host_key="hermes:sid:turn-1",
+            parent_host_key="hermes:sid:turn-0",
+            snapshot_token="snap",
+            status="completed",
+            user_message="hi",
+            assistant_response="hello",
+            tool_events=[{
+                "kind": "result", "tool_event_id": "call-1",
+                "name": "read", "content": "ok", "metadata": {},
+            }],
+            consequences=[{
+                "kind": "observation", "content": "confirmed",
+                "incorporate": True, "line_eligible": True,
+                "metadata": {},
+            }],
+        )
+        assert out["committed"] is True
+        args, kwargs = mock_post.call_args
+        assert args[0] == "http://daemon.local:8788/cognition/commit"
+        assert kwargs["timeout"] == client_no_token._affect_timeout
+        assert kwargs["json"]["parent_host_key"] == "hermes:sid:turn-0"
+        assert kwargs["json"]["tool_events"][0]["tool_event_id"] == "call-1"
+        assert kwargs["json"]["consequences"][0]["line_eligible"] is True
+
+
 def test_5xx_raises(client_no_token: StyxCoreClient) -> None:
     with patch.object(client_no_token._session, "post") as mock_post:
         mock_post.return_value = _mock_response(503, {"detail": "down"})

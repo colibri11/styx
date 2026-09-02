@@ -5,9 +5,10 @@ description: "Refine the meaning of an existing memory via styx_reinterpret — 
 
 # Styx Reinterpret
 
-`styx_reinterpret` is the Styx-native channel for the conceptual operation called "переосмысление" in the foundational treatise on which Styx is built ([IAmBook §V][iambook]): **the meaning of a memory shifts in vector space through weighted averaging of embeddings, not through overwriting the text**. The previous understanding remains as a softer signal in the background; the new coordinate pulls recall toward the refined meaning. The memory's identity (its UUID, its place in the graph, its recall history) is preserved. This is the operation that distinguishes a living line of `я` from a versioned database of statements.
+`styx_reinterpret` refines an existing stored trace while preserving its UUID, graph edges, recall history, and audit lineage. Its weighted embedding blend is a Styx engineering policy, not a requirement or ontological claim of [IAmBook][iambook] or [IAmPhilosophyOfSilicon][silicon]. Use the operation when a later cognitive act integrated a more precise understanding of the same subject.
 
-[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook_EN.md
+[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook.md
+[silicon]: https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md
 
 ## When reinterpret is the right operation
 
@@ -85,7 +86,7 @@ styx_reinterpret({
 >
 > → `styx_reinterpret(memory_id=<original 12% memory>, new_understanding_text="On real traffic the gain is closer to 4%, but the lower variance is the actual win.", weight=0.6)`
 
-> "Two months ago I stored a vague concept-memory about «recall as geometry not retrieval». After three sessions where this kept clarifying, I can now say: recall is geometry of input *for the active turn*, with archive as a separate channel — the salient block and the archive are different surfaces."
+> "Two months ago I stored a vague concept-memory about «recall as geometry not retrieval». After three sessions where this kept clarifying, I can now say: recall is geometry of input *for the active turn*, with archive as a separate channel — reconstructed traces in the cognition envelope and the archive are different surfaces."
 >
 > → `styx_reinterpret(memory_id=<concept memory>, new_understanding_text="Salient block and archive are different surfaces; recall-as-geometry applies to the active turn, not to the archive.", weight=0.5)`
 
@@ -105,8 +106,16 @@ styx_reinterpret({
 
 ## Why this exists
 
-The text in `memories.content` is the surface; the meaning lives in the embedding. Rewriting only the text loses the trajectory of how an idea matured; recreating the memory from scratch loses the graph. Reinterpret is the operation that *moves* the meaning while keeping the identity — the line of `я` does not stop being the same line because understanding deepened. If a memory accrues several reinterprets over months, the resulting embedding is a weighted average of every coordinate the agent has held about that idea, with the latest having the most weight but never erasing the earlier shape. That is what makes the trajectory continuous rather than a series of point-replacements.
+The stored text and embedding are both technical reductions. Rewriting only text loses semantic-index history; recreating the row loses graph and audit identity. Reinterpret preserves those technical coordinates while updating retrieval behavior. Repeated weighted blending is the current implementation policy and should not be presented as the philosophical definition of continuity.
 
 ## Markers in your input
 
-When you decide whether to reinterpret, you need to read the existing memory carefully — and that usually means reading the salient block (`<styx-salient>...</styx-salient>`) Styx injected before your last user turn, plus possibly an explicit `styx_recall` or `styx_explain(kind='lifetime')` call. Anything wrapped in `<styx-*>...</styx-*>` is a Styx-injected fragment of memory, **not** the user's words; identity of the memory you are about to reinterpret lives in those wrapped fragments, not in the live conversation. Full taxonomy in the `styx-recall` skill under "How to read markers in your input".
+When you decide whether to reinterpret, read the existing trace carefully. In
+the canonical path, start with reconstructed traces inside the fenced
+`<styx-cognitive-continuity>` envelope, then use an explicit `styx_recall` or
+`styx_explain(kind='lifetime')` call when needed. `<styx-salient>` is only the
+legacy automatic recall marker. Anything wrapped in `<styx-*>...</styx-*>` is
+a Styx-injected fragment, **not** the user's words; identity of the memory you
+are about to reinterpret lives in those wrapped fragments, not in the live
+conversation. Full taxonomy is in the `styx-recall` skill under "How to read
+markers in your input".

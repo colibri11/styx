@@ -6,12 +6,8 @@
 //
 // - gateway.{mode,bind,controlUi}: minimum чтобы gateway стартовал в
 //   container'е.
-// - agents.defaults.model.primary = zai/glm-5.1 — z.ai/GLM, поддерживает
-//   tool-calling из коробки. Изначальная попытка ollama/qwen3:4b-local
-//   провалилась: Ollama metadata этой custom-модели не объявляет tools
-//   capability, embedded agent получает 400 "does not support tools".
-//   z.ai reachable из контейнера (404/401 от api.z.ai = network OK).
-//   ZAI_API_KEY мостится из GLM_API_KEY в compose.
+// - provider/model намеренно не задаются: base lane проверяет загрузку
+//   официального OpenClaw и Styx lifecycle без внешнего LLM package.
 // - plugins.slots.contextEngine = "styx" — exclusive слот, наш plugin
 //   получает control над контекстным окном.
 // - plugins.entries.styx.config — daemonUrl/httpToken для core HTTP
@@ -30,15 +26,6 @@
         "http://localhost:18789",
         "http://127.0.0.1:18789",
       ],
-    },
-  },
-
-  agents: {
-    defaults: {
-      model: {
-        // zai/glm-5.1 — tools-capable, ZAI_API_KEY из GLM_API_KEY в env.
-        primary: "zai/glm-5.1",
-      },
     },
   },
 

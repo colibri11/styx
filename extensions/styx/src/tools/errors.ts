@@ -10,7 +10,7 @@
 // скорректировать дальнейшие шаги, а не поломать весь turn.
 
 import { jsonResult } from "openclaw/plugin-sdk/core";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentToolResult } from "openclaw/plugin-sdk/tool-results";
 
 import { StyxHttpError } from "../client.js";
 

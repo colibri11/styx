@@ -7,6 +7,55 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
+## [Unreleased — prepared: styx-core 1.2.0 / styx-hermes 1.2.0 / OpenClaw 0.3.0]
+
+Подготовлено, но не опубликовано: IAm v2 cognitive continuity. Указанные
+версии пакетов не означают наличие tag или release.
+
+### Добавлено
+
+- Миграция `0009_cognitive_continuity.sql`: явные memory domains и
+  `line_eligible`, cognitive act/action/consequence journals, fenced snapshots,
+  typed memory lineage и versioned technical will projection всей live
+  subjective line.
+- Atomic `POST /cognition/preturn` и `POST /cognition/commit`: единый
+  pre-generation envelope, snapshot acknowledgement, durable `host_key`
+  idempotency, declared parentage, ordered bounded/redacted tool events и
+  action→consequence feedback.
+- Consequence transport сохраняет до 32 явно переданных consequences и
+  создаёт consequence для каждого допустимого `result`/`error` tool event;
+  общий валидируемый bound — 96, без тихого отбрасывания хвоста.
+
+### Изменено
+
+- Raw dialogue, documents и experience intake больше не входят в subjective
+  recall/will только по факту хранения. Reconstruction использует лишь live
+  `subjective_trace` с `line_eligible=true`; archive/dialogue остаются
+  отдельными cited-evidence каналами.
+- Hermes и OpenClaw используют одинаковый preturn/terminal contract. OpenClaw
+  v2026.8.2 продвигает только принятый transcript turn через restart-safe
+  `ContextEngine.commitTurn` outbox; affect является координатой завершённого
+  act и не смешивается с will projection.
+- OpenClaw `assemble` сохраняет исходные AgentMessage без потери tool/multimodal
+  metadata, объединяет штатный memory prompt с одним Styx envelope и связывает
+  unkeyed fallback snapshots с accepted advancement только внутри session.
+- Публичная терминология выровнена с текущими `IAmBook.md` и
+  `IAmPhilosophyOfSilicon.md`: Styx описывается как одна Locus-style рабочая
+  архитектура, без утверждения о личности, сознательности или месте `я`;
+  конкретные reducers/tiers/blends остаются инженерными политиками.
+
+### Совместимость и миграция
+
+- Обновление core и host adapters выполняется согласованно с применением
+  migration `0009`. Legacy cognition surfaces остаются additive-совместимыми.
+- Mixed-version fallback разрешён только при `404` нового cognition endpoint;
+  timeout, auth, validation и server errors не запускают legacy double-write.
+- OpenClaw plugin требует `>=2026.8.2`; hook-based finality предыдущей линии
+  заменена declared transcript semantics и atomic idempotent `commitTurn`.
+- Схема additive, но старый writer не задаёт новые domain guards: binary-only
+  rollback без согласованного восстановления/обратной миграции БД не
+  поддерживается.
+
 ## [styx-core 1.1.0 / styx-hermes 1.1.0] — 2026-09-01
 
 Причинно непрерывное affect-состояние вместо эмоциональной style-инструкции.

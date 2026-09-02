@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from styx.storage.cognition import validate_journal_json
 
 
 class _LlmWrappableResponse(BaseModel):
@@ -212,6 +215,12 @@ _AffectExtraKey = Annotated[str, Field(min_length=1, max_length=64)]
 _AffectExtraValue = Annotated[str, Field(max_length=1_000)]
 
 
+def _validate_cognition_json(value: Any, *, depth: int = 0) -> None:
+    """Compatibility wrapper over the journal's shared aggregate budget."""
+    del depth
+    validate_journal_json(value, max_string=1_000)
+
+
 class AffectObserveTurnRequest(BaseModel):
     """Finalized cognitive-act envelope from a host adapter.
 
@@ -243,6 +252,178 @@ class AffectObserveTurnResponse(BaseModel):
     accepted: bool
     duplicate: bool
     reason: str | None = None
+
+
+# ── atomic cognitive continuity (wave 37) ───────────────────────────────
+
+
+class CognitionMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str = Field(max_length=20_000)
+    name: str | None = Field(default=None, max_length=256)
+    tool_call_id: str | None = Field(default=None, max_length=256)
+
+
+class CognitionPreturnRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=256)
+    host_key: str | None = Field(default=None, min_length=1, max_length=512)
+    session_id: str | None = Field(default=None, max_length=256)
+    messages: list[CognitionMessage] = Field(default_factory=list, max_length=256)
+    query: str | None = Field(default=None, max_length=20_000)
+    token_budget: int | None = Field(default=None, ge=256, le=1_000_000)
+    model: str | None = Field(default=None, max_length=512)
+    platform: str | None = Field(default=None, max_length=64)
+    extra: dict[str, Any] = Field(
+        default_factory=dict, max_length=16
+    )
+
+    @field_validator("extra")
+    @classmethod
+    def _bounded_extra(cls, value: dict[str, Any]) -> dict[str, Any]:
+        validate_journal_json(value)
+        current = value.get("current_event")
+        if isinstance(current, str):
+            try:
+                parsed = json.loads(current)
+            except json.JSONDecodeError as exc:
+                raise ValueError("extra.current_event must be a JSON object string") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("extra.current_event JSON must decode to an object")
+            validate_journal_json(parsed)
+        elif current is not None and not isinstance(current, dict):
+            raise ValueError("extra.current_event must be an object or JSON object string")
+        return value
+
+
+class CognitionWillProjection(BaseModel):
+    formed: bool
+    technical_projection: Literal[True] = True
+    line_version: int = Field(ge=0)
+    source_count: int = Field(ge=0)
+    source_hash: str = Field(max_length=64)
+    supports: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    computation_version: str = Field(max_length=64)
+
+
+class CognitionVAD(BaseModel):
+    valence: float
+    arousal: float
+    dominance: float
+
+
+class CognitionAffectSnapshot(BaseModel):
+    state_id: int | None = None
+    at: _dt.datetime | None = None
+    vad: CognitionVAD | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    causes: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    cognitive_posture: dict[str, Any] = Field(default_factory=dict, max_length=16)
+
+
+class CognitionTrace(BaseModel):
+    memory_id: str
+    role: str
+    kind: str
+    content: str = Field(max_length=2_400)
+    created_at: _dt.datetime
+    score: float
+
+
+class CognitionReconstruction(BaseModel):
+    traces: list[CognitionTrace] = Field(default_factory=list, max_length=8)
+    query_used: bool
+    embed_available: bool
+
+
+class CognitionPendingConsequence(BaseModel):
+    consequence_id: str
+    source_act_id: str
+    ordinal: int = Field(ge=0)
+    kind: str = Field(max_length=64)
+    content: str = Field(max_length=8_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: _dt.datetime
+
+
+class CognitionPreturnResponse(BaseModel):
+    messages: list[CognitionMessage] = Field(default_factory=list, max_length=256)
+    line_version: int = Field(ge=0)
+    snapshot_token: str = Field(min_length=1, max_length=128)
+    will_projection: CognitionWillProjection
+    affect: CognitionAffectSnapshot | None = None
+    reconstruction: CognitionReconstruction
+    pending_consequences: list[CognitionPendingConsequence] = Field(
+        default_factory=list, max_length=16
+    )
+    system_prompt_addition: str = Field(max_length=16_000)
+
+
+class CognitionToolEvent(BaseModel):
+    kind: Literal["call", "result", "error"]
+    tool_event_id: str = Field(default="", max_length=256)
+    name: str = Field(default="", max_length=256)
+    content: str = Field(default="", max_length=8_000)
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=16)
+
+    @field_validator("metadata")
+    @classmethod
+    def _bounded_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_cognition_json(value)
+        return value
+
+
+class CognitionConsequence(BaseModel):
+    kind: str = Field(min_length=1, max_length=64)
+    content: str = Field(min_length=1, max_length=8_000)
+    incorporate: bool = False
+    line_eligible: bool = False
+    memory_kind: Literal["fact", "episode", "decision", "concept", "note"] = "episode"
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=16)
+
+    @field_validator("metadata")
+    @classmethod
+    def _bounded_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_cognition_json(value)
+        return value
+
+
+class CognitionCommitRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=256)
+    host_key: str = Field(min_length=1, max_length=512)
+    parent_host_key: str | None = Field(default=None, min_length=1, max_length=512)
+    session_id: str | None = Field(default=None, max_length=256)
+    snapshot_token: str | None = Field(default=None, max_length=128)
+    snapshot_policy: Literal["explicit", "latest_session"] = "explicit"
+    parent_policy: Literal["explicit", "latest_session"] = "explicit"
+    status: Literal["completed", "failed"] = "completed"
+    user_message: str = Field(default="", max_length=20_000)
+    assistant_response: str = Field(default="", max_length=40_000)
+    conversation_history: list[CognitionMessage] = Field(
+        default_factory=list, max_length=24
+    )
+    tool_events: list[CognitionToolEvent] = Field(default_factory=list, max_length=64)
+    consequences: list[CognitionConsequence] = Field(default_factory=list, max_length=32)
+    model: str | None = Field(default=None, max_length=512)
+    platform: str | None = Field(default=None, max_length=64)
+    extra: dict[str, Any] = Field(
+        default_factory=dict, max_length=16
+    )
+
+    @field_validator("extra")
+    @classmethod
+    def _bounded_extra(cls, value: dict[str, Any]) -> dict[str, Any]:
+        validate_journal_json(value)
+        return value
+
+
+class CognitionCommitResponse(BaseModel):
+    act_id: str
+    duplicate: bool
+    committed: bool
+    line_version: int = Field(ge=0)
+    acknowledged_consequences: int = Field(ge=0)
+    consequence_ids: list[str] = Field(default_factory=list, max_length=96)
+    memory_ids: list[str] = Field(default_factory=list)
 
 
 # ── agent state ───────────────────────────────────────────────────────────

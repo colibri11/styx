@@ -15,9 +15,6 @@ import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry
 import { resolveAgentId } from "./src/agent-mapping.js";
 import { createStyxClient, type StyxLogger } from "./src/client.js";
 import { createStyxContextEngine } from "./src/context-engine.js";
-import { createBeforePromptBuildHook } from "./src/hooks/before-prompt-build.js";
-import { createAgentEndHook } from "./src/hooks/agent-end.js";
-import { TerminalTurnBarrier } from "./src/hooks/terminal-barrier.js";
 import {
   createAnalyticsTool,
   createConfirmUsageTool,
@@ -46,14 +43,13 @@ type PluginConfig = {
   requestTimeoutMs?: number;
   logging?: boolean;
   ownsCompaction?: boolean;
-  terminalDrainTimeoutMs?: number;
 };
 
 export default definePluginEntry({
   id: "styx",
   name: "Styx",
   description:
-    "Locus — динамический оркестратор контекстного окна на PostgreSQL+pgvector",
+    "Self-hosted memory/context subsystem with fenced cognitive continuity",
   kind: "context-engine",
   register(api) {
     const apiAny = api as unknown as Record<string, unknown>;
@@ -68,10 +64,6 @@ export default definePluginEntry({
     });
 
     const ownsCompaction = cfg.ownsCompaction ?? true;
-    const terminalDrainTimeoutMs = Math.max(
-      100,
-      Math.min(cfg.terminalDrainTimeoutMs ?? 10_000, 30_000),
-    );
 
     logger.info?.(
       `[styx] registering context engine + 17 tools (daemon=${cfg.daemonUrl ?? "http://127.0.0.1:8788"}, ownsCompaction=${ownsCompaction})`,
@@ -110,7 +102,7 @@ export default definePluginEntry({
       }),
     );
 
-    // Tools. SDK 2026.5.7 экспортирует registerTool с TSchema-generic
+    // Tools. SDK 2026.8.2 экспортирует registerTool с TSchema-generic
     // (`OpenClawPluginToolFactory` + `OpenClawPluginToolOptions` в
     // `dist/plugin-sdk/src/plugins/tool-types.d.ts`), но
     // `OpenClawPluginToolOptions` не реэкспортируется через корневой
@@ -192,68 +184,8 @@ export default definePluginEntry({
       names: ["styx_link"],
     });
 
-    // Hook before_prompt_build (мини-волна 26.8) — канал доставки
-    // salient в pi-embedded runner (openai-codex backend). Lifecycle
-    // ContextEngine.assemble игнорируется этим runner'ом; вместо
-    // этого pi-embedded склеивает baseSystemPrompt с
-    // `appendSystemContext` от hook'а через `joinPresentTextSegments`
-    // (cf. OpenClaw checkout 2026.4.15
-    // `src/agents/pi-embedded-runner/run/attempt.thread-helpers.ts:23`).
-    //
-    // `api.on("before_prompt_build", handler)` — typed hook API из
-    // plugin SDK (`PluginHookName` enum в `hook-types.d.ts:553`).
-    // Loose-typed cast симметричен с registerCE / registerTool выше
-    // (SDK типизация недоступна через корневой entry-point).
-    //
-    // Graceful degradation: если SDK старая и не имеет `.on()` —
-    // warn + skip (engine + tools зарегистрированы выше, plugin
-    // продолжит работу в non-embedded path через assemble lifecycle).
-    const apiOn = (api as unknown as {
-      on?: (
-        hookName: string,
-        handler: unknown,
-        opts?: { priority?: number; timeoutMs?: number },
-      ) => void;
-    }).on;
-
-    if (typeof apiOn === "function") {
-      const hostConfig = apiAny["config"] as Record<string, unknown> | undefined;
-      const plugins = hostConfig?.["plugins"] as Record<string, unknown> | undefined;
-      const entries = plugins?.["entries"] as Record<string, unknown> | undefined;
-      const styxEntry = entries?.["styx"] as Record<string, unknown> | undefined;
-      const hookPolicy = styxEntry?.["hooks"] as Record<string, unknown> | undefined;
-      if (hookPolicy?.["allowConversationAccess"] !== true) {
-        logger.warn?.(
-          "[styx] agent_end requires " +
-          "plugins.entries.styx.hooks.allowConversationAccess=true in " +
-          "OpenClaw >=2026.5.3; without it finalized dialogue and affect " +
-          "capture are blocked",
-        );
-      }
-      const terminalBarrier = new TerminalTurnBarrier();
-      const beforePromptBuild = createBeforePromptBuildHook({
-        client,
-        logger,
-        resolveAgentId: resolve,
-        terminalBarrier,
-        terminalDrainTimeoutMs,
-      });
-      apiOn("before_prompt_build", beforePromptBuild);
-      const agentEnd = createAgentEndHook({
-        client,
-        logger,
-        resolveAgentId: resolve,
-        terminalBarrier,
-        terminalWorkBudgetMs: Math.max(100, terminalDrainTimeoutMs - 250),
-      });
-      apiOn("agent_end", agentEnd, { timeoutMs: 30_000 });
-      logger.info?.(
-        "[styx] registered before_prompt_build + agent_end hooks",
-      );
-    } else {
-      logger.warn?.(
-        "[styx] api.on отсутствует — typed hooks не зарегистрированы (несовместимая версия openclaw)",
-      );
-    }
+    logger.info?.(
+      "[styx] durable accepted-turn lifecycle is owned by ContextEngine.commitTurn",
+    );
   },
 });

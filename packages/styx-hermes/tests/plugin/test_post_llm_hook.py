@@ -15,11 +15,11 @@ class _CaptureClient:
         self.error = error
         self.calls: list[tuple[str, dict]] = []
 
-    def observe_affective_turn(self, agent_id: str, **kwargs):
+    def cognition_commit(self, agent_id: str, **kwargs):
         self.calls.append((agent_id, kwargs))
         if self.error is not None:
             raise self.error
-        return {"accepted": False, "duplicate": False}
+        return {"committed": True, "duplicate": False}
 
 
 @pytest.fixture(autouse=True)
@@ -69,27 +69,30 @@ def test_post_llm_hook_forwards_identity_history_and_tools() -> None:
     assert len(client.calls) == 1
     agent_id, payload = client.calls[0]
     assert agent_id == "agent-a"
-    assert payload["idempotency_key"] == "hermes:physical-session:turn-9"
-    assert _agent_session.get_turn_key("physical-session") == payload["idempotency_key"]
-    assert payload["turn_id"] == "turn-9"
+    assert payload["host_key"] == "hermes:physical-session:turn-9"
+    assert _agent_session.get_turn_key("physical-session") == payload["host_key"]
+    assert payload["parent_host_key"] is None
+    assert payload["snapshot_token"] is None
     assert payload["user_message"] == "current user"
     assert payload["assistant_response"] == "final answer"
-    assert payload["task_id"] == "task-1"
+    assert payload["extra"]["task_id"] == "task-1"
     assert [item["role"] for item in payload["conversation_history"]] == [
         "system", "user", "assistant",
     ]
     assert payload["tool_events"] == [
         {
             "kind": "call",
-            "tool_call_id": "call-1",
+            "tool_event_id": "call-1",
             "name": "read_file",
             "content": '{"path":"a"}',
+            "metadata": {},
         },
         {
             "kind": "result",
-            "tool_call_id": "call-1",
+            "tool_event_id": "call-1",
             "name": "read_file",
             "content": "file contents",
+            "metadata": {},
         },
     ]
 
@@ -226,6 +229,43 @@ def test_post_llm_hook_tool_scan_and_serialization_are_bounded_and_safe() -> Non
     assert all("Explosive" in event["content"] for event in events)
 
 
+def test_tool_trajectory_keeps_latest_64_events_in_causal_order() -> None:
+    history = []
+    for index in range(33):
+        history.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": f"call-{index}",
+                    "function": {"name": "tool", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "name": "tool",
+                "content": f"result-{index}",
+                "is_error": index == 32,
+            },
+        ])
+
+    events = post_llm_hook._bounded_tool_events(history)
+
+    assert len(events) == 64
+    assert [
+        (events[0]["kind"], events[0]["tool_event_id"]),
+        (events[1]["kind"], events[1]["tool_event_id"]),
+    ] == [
+        ("call", "call-1"),
+        ("result", "call-1"),
+    ]
+    assert events[-2]["kind"] == "call"
+    assert events[-2]["tool_event_id"] == "call-32"
+    assert events[-1]["kind"] == "error"
+    assert events[-1]["tool_event_id"] == "call-32"
+
+
 def test_post_llm_hook_bounds_identifiers_and_idempotency_key() -> None:
     client = _CaptureClient()
     _agent_session.set_session("agent-a", client)
@@ -239,13 +279,12 @@ def test_post_llm_hook_bounds_identifiers_and_idempotency_key() -> None:
     )
 
     payload = client.calls[0][1]
-    assert len(payload["idempotency_key"]) <= 512
-    assert len(payload["turn_id"]) <= 256
+    assert len(payload["host_key"]) <= 512
     assert len(payload["session_id"]) <= 256
-    assert len(payload["task_id"]) <= 256
+    assert len(payload["extra"]["task_id"]) <= 256
     assert len(payload["model"]) <= 512
     assert len(payload["platform"]) <= 64
-    assert ":sha256:" in payload["turn_id"]
+    assert "sha256" in payload["host_key"]
 
 
 def test_turn_key_handoff_does_not_confuse_delayed_background_sync() -> None:
@@ -266,6 +305,32 @@ def test_turn_key_handoff_does_not_confuse_delayed_background_sync() -> None:
     assert _agent_session.get_turn_key(
         "same-session", user_content="user n+1", assistant_content="answer n+1",
     ) == "hermes:same-session:turn-n-plus-1"
+
+
+def test_snapshot_fence_and_parent_identity_follow_physical_turn_order() -> None:
+    client = _CaptureClient()
+    _agent_session.set_session("agent-a", client)
+    _agent_session.remember_preturn_snapshot(
+        "same-session", "snapshot-1", act_key="hermes:same-session:turn-1"
+    )
+    post_llm_hook.on_post_llm_call(
+        session_id="same-session", turn_id="turn-1",
+        user_message="one", assistant_response="answer one",
+    )
+    _agent_session.remember_preturn_snapshot(
+        "same-session", "snapshot-2", act_key="hermes:same-session:turn-2"
+    )
+    post_llm_hook.on_post_llm_call(
+        session_id="same-session", turn_id="turn-2",
+        user_message="two", assistant_response="answer two",
+    )
+
+    first = client.calls[0][1]
+    second = client.calls[1][1]
+    assert first["snapshot_token"] == "snapshot-1"
+    assert first["parent_host_key"] is None
+    assert second["snapshot_token"] == "snapshot-2"
+    assert second["parent_host_key"] == first["host_key"]
 
 
 def test_identical_consecutive_turn_content_keeps_physical_order() -> None:
@@ -330,7 +395,7 @@ def test_post_llm_hook_is_fail_open(caplog) -> None:
             assistant_response="a", conversation_history=[],
         ) is None
     assert len(client.calls) == 1
-    assert "/affect/observe_turn failed" in caplog.text
+    assert "/cognition/commit failed" in caplog.text
 
 
 def test_post_llm_hook_without_initialized_session_is_noop() -> None:

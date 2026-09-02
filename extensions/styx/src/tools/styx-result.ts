@@ -14,7 +14,7 @@
 // падаем на стандартный `jsonResult(resp)` — старое поведение.
 
 import { jsonResult } from "openclaw/plugin-sdk/core";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentToolResult } from "openclaw/plugin-sdk/tool-results";
 
 type WrappableResponse = { llm_text?: string | null };
 

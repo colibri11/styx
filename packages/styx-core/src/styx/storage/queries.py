@@ -261,6 +261,8 @@ class MemoryHit:
     embedding: list[float] | None = field(default=None)
     recall_event_id: int | None = field(default=None)
     kind_src: str | None = field(default=None)
+    memory_domain: str = field(default="subjective_trace")
+    line_eligible: bool = field(default=True)
     affective_provenance: MemoryAffectiveProvenance | None = field(default=None)
 
 
@@ -453,7 +455,7 @@ class AgentScopedQueries:
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO sessions (id, agent_id) VALUES (%s, %s) "
-                "ON CONFLICT (id) DO NOTHING",
+                "ON CONFLICT (id, agent_id) DO NOTHING",
                 (sid, self._agent_id),
             )
 
@@ -468,18 +470,12 @@ class AgentScopedQueries:
             )
 
     def session_exists(self, session_id: uuid.UUID) -> bool:
-        """Есть ли строка сессии в ``sessions`` (волна 34, FK→NULL guard).
-
-        Индексированный PK-lookup до дорогого ``embed()`` в memory_store.
-        Без agent_id-фильтра — FK ``memories_session_id_fkey`` смотрит на
-        ``sessions.id`` независимо от agent_id; нам важен сам факт
-        существования строки, чтобы insert не упал ForeignKeyViolation'ом.
-        """
+        """Есть ли принадлежащая этому агенту строка сессии (FK→NULL guard)."""
         sid = _as_uuid(session_id)
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM sessions WHERE id = %s LIMIT 1",
-                (sid,),
+                "SELECT 1 FROM sessions WHERE id = %s AND agent_id=%s LIMIT 1",
+                (sid, self._agent_id),
             )
             return cur.fetchone() is not None
 
@@ -493,6 +489,7 @@ class AgentScopedQueries:
         session_id: uuid.UUID | str | None = None,
         embedding: list[float] | None = None,
         metadata: dict[str, Any] | None = None,
+        cognitive_act_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
         if len(content) > MEMORIES_CONTENT_LIMIT:
             # Страховка нижнего уровня (defense-in-depth): не позволяем
@@ -512,16 +509,19 @@ class AgentScopedQueries:
             cur.execute(
                 "INSERT INTO memories "
                 "(agent_id, session_id, role, content, embedding, metadata, "
+                " memory_domain, line_eligible, cognitive_act_id, "
                 " emotional_context_valence, emotional_context_arousal, "
                 " emotional_context_dominance, emotional_context_state_id, "
                 " emotional_context_at, emotional_context_confidence, "
                 " emotional_context_causes) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 'dialogue', false, %s, "
+                " %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING "
                 "RETURNING id",
                 (
                     self._agent_id, sid, role, content,
                     _vector_literal(embedding), psycopg.types.json.Jsonb(meta),
+                    cognitive_act_id,
                     affect.vector.valence if affect is not None else None,
                     affect.vector.arousal if affect is not None else None,
                     affect.vector.dominance if affect is not None else None,
@@ -822,6 +822,8 @@ class AgentScopedQueries:
                 m.agent_id,
                 m.kind,
                 m.kind_src,
+                m.memory_domain,
+                m.line_eligible,
                 m.role,
                 m.content,
                 m.metadata,
@@ -841,6 +843,8 @@ class AgentScopedQueries:
             WHERE m.agent_id = %(agent_id)s
               AND m.embedding IS NOT NULL
               AND m.superseded_by IS NULL
+              AND m.memory_domain = 'subjective_trace'
+              AND m.line_eligible = true
               {snapshot_clause}
             ORDER BY score DESC
             LIMIT %(lim)s
@@ -872,6 +876,8 @@ class AgentScopedQueries:
                 agent_id=r["agent_id"],
                 kind=r["kind"],
                 kind_src=r["kind_src"],
+                memory_domain=r["memory_domain"],
+                line_eligible=bool(r["line_eligible"]),
                 role=r["role"],
                 content=r["content"],
                 metadata=r["metadata"],
@@ -907,13 +913,13 @@ class AgentScopedQueries:
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO recall_events "
-                "(memory_id, session_id, query_hash, match_score) "
-                "VALUES (%s, %s, %s, %s) "
+                "(memory_id, session_id, agent_id, query_hash, match_score) "
+                "VALUES (%s, %s, %s, %s, %s) "
                 "ON CONFLICT (memory_id, query_hash) "
                 "WHERE query_hash IS NOT NULL "
                 "DO UPDATE SET matched_at = now(), match_score = EXCLUDED.match_score "
                 "RETURNING id",
-                (memory_id, sid, query_hash, match_score),
+                (memory_id, sid, self._agent_id, query_hash, match_score),
             )
             row = cur.fetchone()
         if row is None:
@@ -1010,6 +1016,9 @@ class AgentScopedQueries:
         importance_provisional: float | None = None,
         archive_ref: dict[str, Any] | None = None,
         emotional_source_ids: list[uuid.UUID] | None = None,
+        memory_domain: str | None = None,
+        line_eligible: bool | None = None,
+        cognitive_act_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
         """INSERT subjective memory с явными ``kind`` / ``kind_src``.
 
@@ -1042,15 +1051,24 @@ class AgentScopedQueries:
             )
         sid = _as_uuid(session_id) if session_id is not None else None
         meta = metadata or {}
+        if memory_domain is None:
+            memory_domain = (
+                "external_evidence" if kind_src == "experience_intake"
+                else "subjective_trace"
+            )
+        if line_eligible is None:
+            line_eligible = memory_domain == "subjective_trace"
         affect = self._emotional_context_values(emotional_source_ids)
         cols = [
             "agent_id", "session_id", "role", "kind", "kind_src",
-            "content", "embedding", "metadata",
+            "content", "embedding", "metadata", "memory_domain",
+            "line_eligible", "cognitive_act_id",
         ]
         params: list[Any] = [
             self._agent_id, sid, role, kind, kind_src,
             content, _vector_literal(embedding),
-            psycopg.types.json.Jsonb(meta),
+            psycopg.types.json.Jsonb(meta), memory_domain, line_eligible,
+            cognitive_act_id,
         ]
         if affect is not None:
             cols.extend([
@@ -1085,7 +1103,18 @@ class AgentScopedQueries:
             raise RuntimeError(
                 "insert_memory не вернул id — возможно constraint violation"
             )
-        return row[0]
+        memory_id = row[0]
+        if memory_domain == "subjective_trace" and line_eligible:
+            from styx.storage.cognition import append_lineage
+            append_lineage(
+                self._conn,
+                self._agent_id,
+                transform=("incorporated" if cognitive_act_id else "provenance_unknown"),
+                target_memory_id=memory_id,
+                cognitive_act_id=cognitive_act_id,
+                source_coordinates={"kind_src": kind_src},
+            )
+        return memory_id
 
     def find_gatekeeper_candidates(
         self,
@@ -1120,6 +1149,8 @@ class AgentScopedQueries:
             " WHERE agent_id = %s "
             "   AND superseded_by IS NULL "
             "   AND embedding IS NOT NULL "
+            "   AND memory_domain = 'subjective_trace' "
+            "   AND line_eligible = true "
         )
         params: list[Any] = [qvec, self._agent_id]
         if exclude_id is not None:
@@ -1148,11 +1179,25 @@ class AgentScopedQueries:
         """
         with self._conn.cursor() as cur:
             cur.execute(
+                "SELECT memory_domain, line_eligible FROM memories "
+                "WHERE id=%s AND agent_id=%s",
+                (memory_id, self._agent_id),
+            )
+            forgotten = cur.fetchone()
+            cur.execute(
                 "DELETE FROM relations "
                 " WHERE (source_type = 'memory' AND source_id = %s) "
                 "    OR (target_type = 'memory' AND target_id = %s)",
                 (memory_id, memory_id),
             )
+        if forgotten is not None and forgotten[0] == "subjective_trace" and forgotten[1]:
+            from styx.storage.cognition import append_lineage
+            append_lineage(
+                self._conn, self._agent_id, transform="forgotten_rewire",
+                source_memory_id=memory_id,
+                source_coordinates={"forgotten_memory_id": str(memory_id), "reason": "gatekeeper_skip"},
+            )
+        with self._conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM memories "
                 " WHERE id = %s AND agent_id = %s",
@@ -1211,6 +1256,12 @@ class AgentScopedQueries:
                 " WHERE id = %s AND agent_id = %s",
                 (new_id, self._agent_id),
             )
+        from styx.storage.cognition import append_lineage
+        append_lineage(
+            self._conn, self._agent_id, transform="consolidated",
+            target_memory_id=existing_id,
+            source_coordinates={"merged_memory_id": str(new_id)},
+        )
 
     def apply_gatekeeper_supersede(
         self,
@@ -1235,12 +1286,19 @@ class AgentScopedQueries:
                 " WHERE id = %s AND agent_id = %s",
                 (new_id, existing_id, self._agent_id),
             )
+            superseded = (cur.rowcount or 0) > 0
             cur.execute(
                 "INSERT INTO relations "
                 "  (source_type, source_id, target_type, target_id, relation, weight) "
                 "VALUES ('memory', %s, 'memory', %s, 'supersedes', 1.0) "
                 "ON CONFLICT DO NOTHING",
                 (new_id, existing_id),
+            )
+        if superseded:
+            from styx.storage.cognition import append_lineage
+            append_lineage(
+                self._conn, self._agent_id, transform="superseded",
+                source_memory_id=existing_id, target_memory_id=new_id,
             )
 
     # -- auto-link при INSERT (волна 18) ---------------------------------
@@ -2051,17 +2109,28 @@ class AgentScopedQueries:
         # диалога. Совпадает с CHECK constraint (memories_role_check
         # из миграции 0001) и семантически точнее чем user/assistant.
         affect = self._emotional_context_values(source_ids)
+        with self._conn.cursor() as eligibility_cur:
+            eligibility_cur.execute(
+                "SELECT count(*)::int, "
+                "       count(*) FILTER (WHERE memory_domain='subjective_trace' "
+                "                         AND line_eligible=true)::int "
+                "FROM memories WHERE agent_id=%s AND id=ANY(%s)",
+                (self._agent_id, source_ids),
+            )
+            total, eligible = eligibility_cur.fetchone()
+        line_eligible = bool(source_ids) and total == len(source_ids) and eligible == total
         sql = (
             "INSERT INTO memories ("
             "  agent_id, role, kind, kind_src, content, "
-            "  importance_provisional, archive_ref, embedding, "
+            "  importance_provisional, archive_ref, embedding, memory_domain, line_eligible, "
             "  emotional_context_valence, emotional_context_arousal, "
             "  emotional_context_dominance, emotional_context_state_id, "
             "  emotional_context_at, emotional_context_confidence, "
             "  emotional_context_causes"
             ") VALUES ("
             "  %s, 'summary', 'episode', 'dialogue_batch_consolidation', "
-            "  %s, 0.5, %s, NULL, %s, %s, %s, %s, %s, %s, %s"
+            "  %s, 0.5, %s, NULL, 'subjective_trace', %s, "
+            "  %s, %s, %s, %s, %s, %s, %s"
             ") RETURNING id"
         )
         with self._conn.cursor() as cur:
@@ -2071,6 +2140,7 @@ class AgentScopedQueries:
                     self._agent_id,
                     content,
                     Jsonb(archive_ref),
+                    line_eligible,
                     affect[0] if affect is not None else None,
                     affect[1] if affect is not None else None,
                     affect[2] if affect is not None else None,
@@ -2081,7 +2151,15 @@ class AgentScopedQueries:
                     if affect is not None and affect[6] is not None else None,
                 ),
             )
-            return cur.fetchone()[0]
+            memory_id = cur.fetchone()[0]
+        from styx.storage.cognition import append_lineage
+        for ordinal, source_id in enumerate(source_ids):
+            append_lineage(
+                self._conn, self._agent_id, transform="consolidated",
+                source_memory_id=source_id, target_memory_id=memory_id,
+                ordinal=ordinal,
+            )
+        return memory_id
 
     # -- Reinterpret (волна 22) ------------------------------------------
 
@@ -2182,7 +2260,14 @@ class AgentScopedQueries:
                     self._agent_id,
                 ),
             )
-            return cur.rowcount or 0
+            count = cur.rowcount or 0
+        if count:
+            from styx.storage.cognition import append_lineage
+            append_lineage(
+                self._conn, self._agent_id, transform="reinterpreted",
+                source_memory_id=memory_id, target_memory_id=memory_id,
+            )
+        return count
 
     def insert_memory_reinterpretation(
         self,
@@ -2272,6 +2357,7 @@ class AgentScopedQueries:
             "  AND created_at >= %s AND created_at <= %s "
             "  AND superseded_by IS NULL "
             "  AND kind_src <> 'dialogue_consolidation_daily' "
+            "  AND memory_domain = 'subjective_trace' AND line_eligible = true "
             "  AND embedding IS NOT NULL "
             "ORDER BY created_at ASC"
         )
@@ -2326,7 +2412,7 @@ class AgentScopedQueries:
         if not memory_ids:
             return []
         sql = (
-            "SELECT id, content, kind, kind_src, visibility, "
+            "SELECT id, content, kind, kind_src, visibility, memory_domain, line_eligible, "
             "       superseded_by, embedding "
             "  FROM memories "
             " WHERE id = ANY(%s) AND agent_id = %s"
@@ -2367,16 +2453,21 @@ class AgentScopedQueries:
             }
         }
         affect = self._latest_source_emotional_context(source_ids)
+        source_eligible = all(
+            row.get("memory_domain") == "subjective_trace" and row.get("line_eligible")
+            for row in self.load_memories_for_consolidation(source_ids)
+        )
         sql = (
             "INSERT INTO memories "
             "(agent_id, visibility, kind, kind_src, content, metadata, "
-            " embedding, importance_provisional, role, "
+            " embedding, importance_provisional, role, memory_domain, line_eligible, "
             " emotional_context_valence, emotional_context_arousal, "
             " emotional_context_dominance, emotional_context_state_id, "
             " emotional_context_at, emotional_context_confidence, "
             " emotional_context_causes) "
             "VALUES (%s, %s, %s, 'dialogue_consolidation_daily', "
-            "        %s, %s, %s, 0.7, 'summary', %s, %s, %s, %s, %s, %s, %s) "
+            "        %s, %s, %s, 0.7, 'summary', 'subjective_trace', %s, "
+            "        %s, %s, %s, %s, %s, %s, %s) "
             "RETURNING id"
         )
         with self._conn.cursor() as cur:
@@ -2389,6 +2480,7 @@ class AgentScopedQueries:
                     content,
                     Jsonb(metadata),
                     _vector_literal(embedding),
+                    source_eligible,
                     affect["valence"] if affect is not None else None,
                     affect["arousal"] if affect is not None else None,
                     affect["dominance"] if affect is not None else None,
@@ -2400,7 +2492,16 @@ class AgentScopedQueries:
                     else None,
                 ),
             )
-            return cur.fetchone()[0]
+            memory_id = cur.fetchone()[0]
+        from styx.storage.cognition import append_lineage
+        for ordinal, source_id in enumerate(source_ids):
+            append_lineage(
+                self._conn, self._agent_id, transform="consolidated",
+                source_memory_id=source_id, target_memory_id=memory_id,
+                ordinal=ordinal,
+                source_coordinates={"application_id": application_id},
+            )
+        return memory_id
 
     def mark_consolidation_sources_superseded(
         self, *, new_memory_id: uuid.UUID, source_ids: list[uuid.UUID]
@@ -2478,11 +2579,13 @@ class AgentScopedQueries:
         cols = [
             "agent_id", "role", "kind", "kind_src",
             "content", "embedding", "metadata", "content_hash",
+            "memory_domain", "line_eligible",
         ]
         params: list[Any] = [
             self._agent_id, role, kind, kind_src,
             content, _vector_literal(embedding),
             psycopg.types.json.Jsonb(meta), content_hash,
+            "external_evidence", False,
         ]
         if importance_provisional is not None:
             cols.append("importance_provisional")

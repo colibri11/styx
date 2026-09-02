@@ -15,6 +15,15 @@ import pytest
 DSN_ENV = "STYX_TEST_DATABASE_URL"
 
 _STYX_DROP_STMTS = [
+    # Cognitive continuity (wave 37) — child tables before memories.
+    "DROP TABLE IF EXISTS memory_lineage CASCADE",
+    "DROP TABLE IF EXISTS cognitive_presentations CASCADE",
+    "DROP TABLE IF EXISTS cognitive_consequences CASCADE",
+    "DROP TABLE IF EXISTS cognitive_actions CASCADE",
+    "DROP TABLE IF EXISTS cognitive_snapshots CASCADE",
+    "DROP TABLE IF EXISTS will_projections CASCADE",
+    "DROP TABLE IF EXISTS line_state CASCADE",
+    "DROP TABLE IF EXISTS cognitive_acts CASCADE",
     # Working set state persistence (волна 13) — независимая таблица.
     "DROP TABLE IF EXISTS working_set CASCADE",
     # Memorybox-port таблицы (волна 7) — порядок матчит FK зависимости.
@@ -37,6 +46,8 @@ _STYX_DROP_STMTS = [
     # CASCADE на DROP TABLE memories снесёт триггер, а функцию очистим
     # явно.
     "DROP FUNCTION IF EXISTS enqueue_importance_scoring() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_mark_line_dirty() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_enforce_memory_domain() CASCADE",
     # Базовые Styx-таблицы.
     "DROP TABLE IF EXISTS recall_events CASCADE",
     "DROP TABLE IF EXISTS memories CASCADE",
