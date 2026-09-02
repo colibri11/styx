@@ -7,7 +7,7 @@
 `pre_llm_call` получает единый fenced envelope через `/cognition/preturn`,
 передаёт физический `host_key` когда Hermes его предоставляет и сохраняет
 `snapshot_token`. Same-act preturn retry идемпотентен; abandoned snapshot не
-теряет feedback навсегда — consequence lease делает доставку recoverable
+теряет feedback навсегда — observation lease делает доставку recoverable
 at-least-once. `post_llm_call` после завершения tool loop
 передаёт finalized channel projection, ordered bounded tool trajectory,
 `host_key`, declared parent и snapshot в `/cognition/commit`. Retry одного
@@ -17,9 +17,11 @@ at-least-once. `post_llm_call` после завершения tool loop
 Hermes.
 
 Adapter передаёт bounded finalized projection до 64 ordered
-`call|result|error` events суммарно. `result`/`error`, уже увиденные внутри
+`call|result|error` events суммарно. Явный client method
+`cognition_observe` предназначен только для независимо пришедших после act,
+предварительно редуцированных различий. `result`/`error`, уже увиденные внутри
 этого tool loop, остаются same-act journal events и не переиздаются как
-future consequence. После commit core создаёт durable reduction outcome;
+future observation. После commit core создаёт durable reduction outcome;
 canonical reducer асинхронно выводит 0..4 evidence-bound residues и обновляет
 causal carrier. Повтор с тем же `host_key`, но иным bounded request получает
 `409`, а не молча принимается как прежний act.

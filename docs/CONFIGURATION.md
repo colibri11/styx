@@ -82,7 +82,8 @@
 | Var | Default | Назначение |
 |---|---|---|
 | `STYX_COGNITION_RECALL_LIMIT` | `8` | Максимум live eligible subjective traces в reconstruction одного fenced preturn; clamp 1..8. |
-| `STYX_COGNITION_PENDING_LIMIT` | `16` | Настраиваемый верхний предел pending consequences; clamp 1..16. Wave 38 дополнительно применяет hard safety cap 4 на snapshot/prompt, поэтому effective limit сейчас `min(value, 4)`. |
+| `STYX_COGNITION_PENDING_LIMIT` | `16` | Совместимый верхний предел выдачи pending observations; clamp 1..16, effective hard cap snapshot/prompt — 4. |
+| `STYX_COGNITION_OBSERVATION_PENDING_CAP` | `1024` | Per-agent backpressure bound durable observation inbox; clamp 1..100000. При достижении cap ingest возвращает `429` и `Retry-After`, не удаляя старые observations. |
 | `STYX_COGNITION_SNAPSHOT_LEASE_S` | `60.0` | Lease snapshot/presentation в секундах; clamp 1..3600. Same-act retry по `host_key` использует тот же snapshot. После abandoned preturn и expiry непризнанные consequences снова доступны для at-least-once delivery; commit ack идемпотентен. |
 | `STYX_COGNITION_REDUCTION_WAIT_S` | `0.35` | Bounded ожидание terminal reduction непосредственного predecessor перед preturn; clamp 0..5 s. По timeout запрос продолжается с явным `continuity_freshness`, stale не маскируется как current. `0` отключает ожидание. |
 | `STYX_ACT_RESIDUE_RETRY_TICK_S` | `30.0` | Интервал sweeper-а, который reconciles retryable/crashed act-residue outcomes; clamp 1..3600 s. |

@@ -238,6 +238,37 @@ def test_cognition_commit_payload_and_terminal_timeout(
         assert kwargs["json"]["consequences"][0]["line_eligible"] is True
 
 
+def test_cognition_observe_is_explicit_and_uses_long_timeout(
+    client_no_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_no_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(
+            200, {"observation_id": "obs-1", "duplicate": False}
+        )
+        out = client_no_token.cognition_observe(
+            "agent-a",
+            source_id="monitor",
+            source_stream="main",
+            source_sequence=7,
+            observation_key="event-7",
+            difference_kind="state_change",
+            content="The monitored state changed.",
+            salience=0.8,
+            confidence=0.9,
+            reducer_name="monitor-diff",
+            reducer_version="1",
+            action_ref={"host_key": "turn-1", "action_ordinal": 0},
+        )
+        assert out["observation_id"] == "obs-1"
+        args, kwargs = mock_post.call_args
+        assert args[0] == "http://daemon.local:8788/cognition/observations"
+        assert kwargs["timeout"] == client_no_token._long_timeout
+        assert kwargs["json"]["source_sequence"] == 7
+        assert kwargs["json"]["action_ref"] == {
+            "host_key": "turn-1", "action_ordinal": 0,
+        }
+
+
 def test_5xx_raises(client_no_token: StyxCoreClient) -> None:
     with patch.object(client_no_token._session, "post") as mock_post:
         mock_post.return_value = _mock_response(503, {"detail": "down"})

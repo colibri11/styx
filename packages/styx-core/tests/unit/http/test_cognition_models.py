@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from styx.http.models import CognitionCommitRequest, CognitionPreturnRequest
+from styx.http.models import (
+    CognitionCommitRequest,
+    CognitionObserveRequest,
+    CognitionPreturnRequest,
+)
 
 
 def test_tool_shape_preserves_kind_id_and_content() -> None:
@@ -88,3 +92,36 @@ def test_combined_consequence_contract_allows_32_plus_64() -> None:
     )
     assert len(request.tool_events) == 64
     assert len(request.consequences) == 32
+
+
+def test_observation_request_is_strict_bounded_and_agent_scoped() -> None:
+    payload = {
+        "agent_id": "agent-a",
+        "source_id": "monitor",
+        "source_stream": "workspace/main",
+        "source_sequence": 7,
+        "observation_key": "event-7",
+        "difference_kind": "state_change",
+        "content": "A bounded difference was detected.",
+        "salience": 0.8,
+        "confidence": 0.9,
+        "reducer_name": "workspace-diff",
+        "reducer_version": "1",
+        "action_ref": {
+            "agent_id": "agent-a",
+            "host_key": "turn-1",
+            "action_ordinal": 0,
+        },
+    }
+    request = CognitionObserveRequest.model_validate(payload)
+    assert request.source_sequence == 7
+
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        CognitionObserveRequest.model_validate({**payload, "raw_sensor_blob": "x"})
+    with pytest.raises(ValidationError, match="must match"):
+        CognitionObserveRequest.model_validate({
+            **payload,
+            "action_ref": {**payload["action_ref"], "agent_id": "agent-b"},
+        })
+    with pytest.raises(ValidationError):
+        CognitionObserveRequest.model_validate({**payload, "confidence": float("nan")})

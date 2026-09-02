@@ -51,6 +51,7 @@ class StyxConfig:
     # host adapters independently of their own transport limits.
     cognition_recall_limit: int = 8
     cognition_pending_limit: int = 16
+    cognition_observation_pending_cap: int = 1024
     cognition_snapshot_lease_s: float = 60.0
     # Brief bounded barrier for parent-act residue visibility before the next
     # preturn assembles its causal envelope. Zero disables the wait.
@@ -433,6 +434,7 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "affective_transition_timeout_s",
         "cognition_recall_limit",
         "cognition_pending_limit",
+        "cognition_observation_pending_cap",
         "cognition_snapshot_lease_s",
         "cognition_reduction_wait_s",
         "act_residue_retry_tick_s",
@@ -594,6 +596,13 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         ),
         cognition_pending_limit=max(
             1, min(16, int(merged.get("cognition_pending_limit", 16)))
+        ),
+        cognition_observation_pending_cap=max(
+            1,
+            min(
+                100_000,
+                int(merged.get("cognition_observation_pending_cap", 1024)),
+            ),
         ),
         cognition_snapshot_lease_s=max(
             1.0, min(3600.0, float(merged.get("cognition_snapshot_lease_s", 60.0)))
@@ -915,6 +924,10 @@ def _read_env() -> dict[str, Any]:
         "cognition_pending_limit": (
             int(os.environ["STYX_COGNITION_PENDING_LIMIT"])
             if os.environ.get("STYX_COGNITION_PENDING_LIMIT") else None
+        ),
+        "cognition_observation_pending_cap": (
+            int(os.environ["STYX_COGNITION_OBSERVATION_PENDING_CAP"])
+            if os.environ.get("STYX_COGNITION_OBSERVATION_PENDING_CAP") else None
         ),
         "cognition_snapshot_lease_s": (
             float(os.environ["STYX_COGNITION_SNAPSHOT_LEASE_S"])

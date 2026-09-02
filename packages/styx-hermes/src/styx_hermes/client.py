@@ -276,6 +276,50 @@ class StyxCoreClient:
             timeout=self._affect_timeout,
         )
 
+    def cognition_observe(
+        self,
+        agent_id: str,
+        *,
+        source_id: str,
+        source_stream: str,
+        source_sequence: int,
+        observation_key: str,
+        difference_kind: str,
+        content: str,
+        salience: float,
+        confidence: float,
+        reducer_name: str,
+        reducer_version: str,
+        action_ref: dict[str, Any] | None = None,
+        source_observed_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish one independently observed, pre-reduced difference.
+
+        The terminal Hermes hook intentionally does not call this method for
+        same-act tool results.  It is an explicit connector/sensor surface.
+        """
+        return self._post(
+            "/cognition/observations",
+            {
+                "agent_id": agent_id,
+                "source_id": source_id,
+                "source_stream": source_stream,
+                "source_sequence": source_sequence,
+                "observation_key": observation_key,
+                "difference_kind": difference_kind,
+                "content": content,
+                "salience": salience,
+                "confidence": confidence,
+                "reducer_name": reducer_name,
+                "reducer_version": reducer_version,
+                "action_ref": action_ref,
+                "source_observed_at": source_observed_at,
+                "metadata": metadata or {},
+            },
+            timeout=self._long_timeout,
+        )
+
     def observe_affective_turn(
         self,
         agent_id: str,

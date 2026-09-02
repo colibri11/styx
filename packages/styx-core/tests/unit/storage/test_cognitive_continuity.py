@@ -428,25 +428,18 @@ def test_expired_presentation_recovery_and_late_commit_orders(
             consequences=[{"kind": "result", "content": "shown once"}], metadata={},
         )
         record_snapshot(
-            conn, "agent-a", "snapshot-a", 0, host_key="commit-a", lease_seconds=60,
+            conn, "agent-a", "snapshot-a", 0, host_key="commit-a", lease_seconds=1,
         )
         shown_a = present_pending_consequences(conn, "agent-a", "snapshot-a")
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE cognitive_snapshots SET lease_expires_at=clock_timestamp()-interval '1 second' "
-                "WHERE token='snapshot-a'"
-            )
-            cur.execute(
-                "UPDATE cognitive_presentations "
-                "SET lease_expires_at=clock_timestamp()-interval '1 second' "
-                "WHERE snapshot_token='snapshot-a'"
-            )
+            cur.execute("SELECT pg_sleep(1.05)")
         record_snapshot(
             conn, "agent-a", "snapshot-b", 0, host_key="commit-b", lease_seconds=60,
         )
         shown_b = present_pending_consequences(conn, "agent-a", "snapshot-b")
-    assert shown_a[0]["source_act_id"] == str(source.act_id)
-    assert shown_b[0]["consequence_id"] == shown_a[0]["consequence_id"]
+    assert source.act_id is not None
+    assert shown_a[0]["observation_status"] == "legacy"
+    assert shown_b[0]["observation_id"] == shown_a[0]["observation_id"]
 
     acknowledgements: dict[str, int] = {}
     for name in (commit_first, "b" if commit_first == "a" else "a"):

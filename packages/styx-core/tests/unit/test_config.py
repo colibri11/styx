@@ -89,12 +89,14 @@ def test_load_reads_bounded_cognition_reduction_and_residue_retry_config(
     monkeypatch.setenv("STYX_COGNITION_REDUCTION_WAIT_S", "0.6")
     monkeypatch.setenv("STYX_ACT_RESIDUE_RETRY_TICK_S", "12.5")
     monkeypatch.setenv("STYX_ACT_RESIDUE_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("STYX_COGNITION_OBSERVATION_PENDING_CAP", "2048")
 
     cfg = config.load()
 
     assert cfg.cognition_reduction_wait_s == pytest.approx(0.6)
     assert cfg.act_residue_retry_tick_s == pytest.approx(12.5)
     assert cfg.act_residue_max_attempts == 4
+    assert cfg.cognition_observation_pending_cap == 2048
 
 
 def test_load_clamps_cognition_reduction_wait_and_retry_bounds(
@@ -104,9 +106,11 @@ def test_load_clamps_cognition_reduction_wait_and_retry_bounds(
     monkeypatch.setenv("STYX_COGNITION_REDUCTION_WAIT_S", "99")
     monkeypatch.setenv("STYX_ACT_RESIDUE_RETRY_TICK_S", "0")
     monkeypatch.setenv("STYX_ACT_RESIDUE_MAX_ATTEMPTS", "99")
+    monkeypatch.setenv("STYX_COGNITION_OBSERVATION_PENDING_CAP", "999999")
 
     cfg = config.load()
 
     assert cfg.cognition_reduction_wait_s == pytest.approx(5.0)
     assert cfg.act_residue_retry_tick_s == pytest.approx(1.0)
     assert cfg.act_residue_max_attempts == 20
+    assert cfg.cognition_observation_pending_cap == 100_000

@@ -9,7 +9,7 @@ import datetime as _dt
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from styx.storage.cognition import validate_journal_json
 
@@ -296,6 +296,82 @@ class CognitionPreturnRequest(BaseModel):
         return value
 
 
+class CognitionObservationActionRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host_key: str = Field(min_length=1, max_length=512)
+    agent_id: str | None = Field(default=None, min_length=1, max_length=256)
+    action_ordinal: int | None = Field(default=None, ge=0)
+    action_event_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def _has_action_coordinate(self) -> "CognitionObservationActionRef":
+        if self.action_ordinal is None and self.action_event_id is None:
+            raise ValueError("action_ref requires action_ordinal or action_event_id")
+        return self
+
+
+class CognitionObserveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1, max_length=256)
+    source_id: str = Field(min_length=1, max_length=256)
+    source_stream: str = Field(min_length=1, max_length=256)
+    source_sequence: int = Field(ge=0)
+    observation_key: str = Field(min_length=1, max_length=256)
+    difference_kind: Literal[
+        "state_change",
+        "delivery_receipt",
+        "action_result",
+        "action_error",
+        "external_signal",
+    ]
+    content: str = Field(min_length=1, max_length=2_000)
+    salience: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    reducer_name: str = Field(min_length=1, max_length=128)
+    reducer_version: str = Field(min_length=1, max_length=64)
+    action_ref: CognitionObservationActionRef | None = None
+    source_observed_at: _dt.datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=16)
+
+    @field_validator("source_observed_at")
+    @classmethod
+    def _timezone_required(
+        cls, value: _dt.datetime | None
+    ) -> _dt.datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("source_observed_at must include a timezone")
+        return value
+
+    @field_validator("metadata")
+    @classmethod
+    def _bounded_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_cognition_json(value)
+        return value
+
+    @model_validator(mode="after")
+    def _same_agent_action_ref(self) -> "CognitionObserveRequest":
+        if (
+            self.action_ref is not None
+            and self.action_ref.agent_id is not None
+            and self.action_ref.agent_id != self.agent_id
+        ):
+            raise ValueError("action_ref.agent_id must match agent_id")
+        return self
+
+
+class CognitionObserveResponse(BaseModel):
+    observation_id: str
+    duplicate: bool
+    payload_hash: str = Field(min_length=64, max_length=64)
+    correlation_status: Literal["uncorrelated", "pending", "resolved", "conflict"]
+    action_act_id: str | None = None
+    late: bool
+    pending_count: int = Field(ge=0)
+    created_at: _dt.datetime
+
+
 class CognitionWillProjection(BaseModel):
     formed: bool
     technical_projection: Literal[True] = True
@@ -366,6 +442,29 @@ class CognitionPendingConsequence(BaseModel):
     created_at: _dt.datetime
 
 
+class CognitionObservation(BaseModel):
+    observation_id: str
+    observation_status: Literal["canonical", "legacy"]
+    source_id: str | None = Field(default=None, max_length=256)
+    source_stream: str | None = Field(default=None, max_length=256)
+    source_sequence: int | None = Field(default=None, ge=0)
+    observation_key: str | None = Field(default=None, max_length=256)
+    difference_kind: str = Field(max_length=64)
+    content: str = Field(max_length=512)
+    salience: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    reducer_name: str | None = Field(default=None, max_length=128)
+    reducer_version: str | None = Field(default=None, max_length=64)
+    correlation_status: Literal[
+        "legacy", "uncorrelated", "pending", "resolved", "conflict"
+    ]
+    action_ordinal: int | None = Field(default=None, ge=0)
+    action_event_id: str | None = Field(default=None, max_length=256)
+    source_observed_at: _dt.datetime | None = None
+    ingested_at: _dt.datetime
+    late: bool = False
+
+
 class CognitionPreturnResponse(BaseModel):
     messages: list[CognitionMessage] = Field(default_factory=list, max_length=256)
     line_version: int = Field(ge=0)
@@ -373,9 +472,13 @@ class CognitionPreturnResponse(BaseModel):
     will_projection: CognitionWillProjection
     affect: CognitionAffectSnapshot | None = None
     reconstruction: CognitionReconstruction
+    observations: list[CognitionObservation] = Field(
+        default_factory=list, max_length=16
+    )
     pending_consequences: list[CognitionPendingConsequence] = Field(
         default_factory=list, max_length=16
     )
+    observation_queue: dict[str, Any] = Field(default_factory=dict, max_length=16)
     continuity_freshness: dict[str, Any] = Field(
         default_factory=dict, max_length=32
     )
@@ -445,6 +548,7 @@ class CognitionCommitResponse(BaseModel):
     duplicate: bool
     committed: bool
     line_version: int = Field(ge=0)
+    consumed_observations: int = Field(ge=0)
     acknowledged_consequences: int = Field(ge=0)
     consequence_ids: list[str] = Field(default_factory=list, max_length=96)
     memory_ids: list[str] = Field(default_factory=list)

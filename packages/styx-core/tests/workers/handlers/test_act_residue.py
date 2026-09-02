@@ -104,12 +104,23 @@ def _raw_input(act_id: uuid.UUID, agent_id: str = "agent-a") -> dict[str, Any]:
         }],
         "presented_observations": [{
             "observation_id": OBSERVATION_ID,
-            "source_act_id": "source-act",
-            "ordinal": 0,
-            "kind": "delivery_status",
+            "observation_status": "canonical",
+            "source_id": "delivery-monitor",
+            "source_stream": "workspace/main",
+            "source_sequence": 0,
+            "observation_key": "delivery-0",
+            "difference_kind": "delivery_receipt",
             "content": "delivered",
-            "metadata": {},
-            "presented_snapshot_token": "snapshot-1",
+            "salience": 0.7,
+            "confidence": 0.9,
+            "reducer_name": "delivery-diff",
+            "reducer_version": "1",
+            "correlation_status": "resolved",
+            "action_ordinal": 0,
+            "action_event_id": "call-1",
+            "source_observed_at": "2026-09-02T00:00:00+00:00",
+            "ingested_at": "2026-09-02T00:00:01+00:00",
+            "late": False,
         }],
     }
 
@@ -363,7 +374,7 @@ def test_input_projection_includes_only_bounded_frozen_snapshot() -> None:
         },
         "cognitive_posture": {"deliberation": 0.8},
         "continuity_freshness": {"fresh": True},
-        "presented_consequence_ids": [OBSERVATION_ID],
+            "presented_observation_ids": [OBSERVATION_ID],
         "trace_coordinates": [],
     }
     projection, _ = _project_input(raw, agent_id="agent-a", act_id=act_id)
@@ -371,6 +382,26 @@ def test_input_projection_includes_only_bounded_frozen_snapshot() -> None:
 
     raw["input_snapshot"]["snapshot_token"] = "must-not-pass"
     with pytest.raises(ValueError, match="allowlist"):
+        _project_input(raw, agent_id="agent-a", act_id=act_id)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("difference_kind", "host_defined", "difference_kind"),
+        ("source_sequence", True, "source_sequence"),
+        ("confidence", float("nan"), "confidence"),
+        ("correlation_status", "caused", "correlation_status"),
+        ("ingested_at", "not-a-time", "ISO timestamp"),
+    ],
+)
+def test_input_projection_revalidates_frozen_observation_shape(
+    field: str, value: Any, match: str
+) -> None:
+    act_id = uuid.uuid4()
+    raw = _raw_input(act_id)
+    raw["presented_observations"][0][field] = value
+    with pytest.raises(ValueError, match=match):
         _project_input(raw, agent_id="agent-a", act_id=act_id)
 
 
@@ -440,9 +471,6 @@ def test_handler_prompt_excludes_opaque_host_and_snapshot_coordinates(
     raw["host_key"] = sentinels["host"]
     raw["declared_parent_key"] = sentinels["parent"]
     raw["input_snapshot_token"] = sentinels["input_token"]
-    raw["presented_observations"][0]["presented_snapshot_token"] = sentinels[
-        "presentation_token"
-    ]
     raw["channel_input"] = {"history": "VISIBLE-CHANNEL-INPUT-EVIDENCE"}
     raw["channel_output"] = {
         "assistant_response": "VISIBLE-CHANNEL-OUTPUT-EVIDENCE"
@@ -470,7 +498,7 @@ def test_handler_prompt_excludes_opaque_host_and_snapshot_coordinates(
         },
         "cognitive_posture": {},
         "continuity_freshness": {"fresh": False},
-        "presented_consequence_ids": [OBSERVATION_ID],
+        "presented_observation_ids": [OBSERVATION_ID],
         "trace_coordinates": [],
     }
     calls = _install_storage(monkeypatch, raw)

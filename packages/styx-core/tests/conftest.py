@@ -19,6 +19,8 @@ _STYX_DROP_STMTS = [
     "DROP TABLE IF EXISTS cognitive_act_reductions CASCADE",
     "DROP FUNCTION IF EXISTS styx_validate_act_reduction_task() CASCADE",
     "DROP FUNCTION IF EXISTS styx_enforce_projection_readiness() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_immutable_observation_source() CASCADE",
+    "DROP FUNCTION IF EXISTS styx_immutable_observation_presentation() CASCADE",
     # Cognitive continuity (wave 37) — child tables before memories.
     "DROP TABLE IF EXISTS memory_lineage CASCADE",
     "DROP TABLE IF EXISTS cognitive_presentations CASCADE",

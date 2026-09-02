@@ -123,16 +123,19 @@ user message
    │                        ├── whole-line causal carrier + coverage/status
    │                        ├── predecessor reduction freshness
    │                        ├── current affect / cognitive posture
-   │                        ├── pending action consequences
+   │                        ├── frozen durable observations
    │                        └── reconstructed subjective traces
    │
    ├── LLM/tool loop ───── ordered call → result/error events + final answer
    │
+   ├── /cognition/observations ─ pre-reduced external differences
+   │                             └── source-idempotent inbox + optional action correlation
+   │
    └── /cognition/commit ─ host_key-idempotent terminal saga
                             ├── declared parent lineage, not timestamp ancestry
                             ├── dialogue + ordered bounded/redacted tool journal
-                            ├── explicit future consequence inbox / external evidence
-                            ├── acknowledgement of consequences from this snapshot
+                            ├── explicit legacy consequence journal / external evidence
+                            ├── consumption of observations from this snapshot
                             └── durable reduction outcome + async canonical reducer
 
 async reducer ───────────── 0..4 validated residues (включая affect-coordinate)
@@ -141,12 +144,16 @@ async reducer ───────────── 0..4 validated residues (�
 
 `snapshot_token` связывает то, что было показано перед генерацией, с
 завершённым актом. Preturn может заранее получить `host_key`: повтор того же
-акта идемпотентно возвращает его snapshot. Pending consequence выдаётся по
-recoverable lease: если snapshot был брошен до commit, consequence снова
+акта идемпотентно возвращает его snapshot. Durable observation выдаётся по
+recoverable lease: если snapshot был брошен до commit, observation снова
 станет доступен после lease. Доставка поэтому at-least-once, а подтверждение
 идемпотентно и происходит только terminal commit'ом предъявленного token пока
 его lease действует; поздний commit истёкшего snapshot не забирает feedback у
-новой presentation.
+новой presentation. Observation поступает отдельным authenticated вызовом уже
+как короткое предварительно редуцированное различие; raw sensor/tool payload
+этот endpoint не принимает. Ingest, presentation и consumption сами по себе
+не меняют subjective line — это может сделать только общий validated act
+reducer после участия observation в следующем cognitive act.
 Retry commit с тем же `host_key` и тем же bounded request возвращает
 существующий act; изменённый request под тем же ключом отклоняется с `409`.
 `parent_host_key` сохраняет заявленную ветвящуюся причинную линию даже при

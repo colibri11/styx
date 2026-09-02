@@ -11,7 +11,7 @@ legacy context engine.
 
 `ContextEngine.assemble` вызывает `/cognition/preturn` и добавляет один
 `<styx-cognitive-continuity>` block в порядке: whole-line causal carrier →
-continuity freshness → current posture → pending feedback → reconstructed
+continuity freshness → current posture → frozen observations → reconstructed
 subjective traces.
 OpenClaw AgentMessage возвращаются без нормализации: tool calls, multimodal
 parts и provider metadata остаются у host. Встроенный memory prompt OpenClaw
@@ -23,7 +23,7 @@ parts и provider metadata остаются у host. Встроенный memory
 принятого session act и дедуплицирует по advancement key. `agent_end` и prompt
 hooks не являются владельцами finality и плагином не регистрируются.
 
-Consequences выдаются по recoverable lease: fallback-повтор того же prompt
+Observations выдаются по recoverable lease: fallback-повтор того же prompt
 получает точный сохранённый envelope, а accepted `commitTurn` подтверждает
 только snapshot своей session. Истёкший или отсутствующий snapshot не
 заменяется данными другой session.
@@ -31,7 +31,9 @@ Consequences выдаются по recoverable lease: fallback-повтор то
 Plugin передаёт bounded finalized projection до 64 ordered
 `call|result|error` events суммарно. Result/error, уже увиденный внутри акта,
 остаётся same-act journal event и не возвращается следующему акту как новое
-последствие. Commit создаёт durable reduction outcome; canonical reducer
+наблюдение. Client предоставляет явный `cognitionObserve` только sensor/
+connector-интеграциям для предварительно редуцированных post-act различий.
+Commit создаёт durable reduction outcome; canonical reducer
 асинхронно выводит 0..4 evidence-bound residues и перестраивает causal
 carrier. Повтор advancement key с изменённым bounded request получает `409`.
 

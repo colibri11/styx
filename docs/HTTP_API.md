@@ -346,15 +346,64 @@ Legacy pre-generation surface для mixed-version core: возвращает с
 явных сигналов. Payload не содержит названия эмоции и не является командой
 по тону; он распределяет внимание и глубину проверки до генерации текста.
 
+### `POST /cognition/observations`
+
+Authenticated append одного уже предварительно редуцированного внешнего
+различия. Endpoint не принимает raw sensor blob, transcript, document или
+tool dump и не создаёт memory/affect/line residue. Stable
+`agent_id+source_id+observation_key` делает exact retry идемпотентным;
+изменённый payload под тем же key и повтор source sequence с другим key дают
+`409`.
+
+```json
+{
+  "agent_id": "agent_demo",
+  "source_id": "environment-monitor",
+  "source_stream": "workspace/main",
+  "source_sequence": 42,
+  "observation_key": "event-42",
+  "difference_kind": "action_error",
+  "content": "Проверка после предыдущего действия завершилась ошибкой.",
+  "salience": 0.8,
+  "confidence": 0.95,
+  "reducer_name": "monitor-diff",
+  "reducer_version": "1",
+  "action_ref": {"host_key": "openclaw:run-018f", "action_ordinal": 1},
+  "source_observed_at": "2026-09-02T08:00:30Z",
+  "metadata": {}
+}
+```
+
+`difference_kind` ограничен
+`state_change|delivery_receipt|action_result|action_error|external_signal`.
+Action reference agent-scoped и означает только совпадение координат, не
+доказанную причинность. Observation может прийти до act и получить
+`correlation_status=pending`; commit указанного act детерминированно переведёт
+его в `resolved|conflict`. При per-agent cap endpoint возвращает `429` с
+`Retry-After`, не удаляя старые rows.
+
+```json
+{
+  "observation_id": "<uuid>",
+  "duplicate": false,
+  "payload_hash": "<sha256>",
+  "correlation_status": "pending",
+  "action_act_id": null,
+  "late": false,
+  "pending_count": 1,
+  "created_at": "2026-09-02T08:00:31Z"
+}
+```
+
 ### `POST /cognition/preturn`
 
 Строит один атомарный fenced snapshot перед генерацией. Window mechanics,
-query-independent whole-line carrier, current affect/posture, pending
-consequences и query-dependent reconstruction читаются под одним per-agent
+query-independent whole-line carrier, current affect/posture, frozen pending
+observations и query-dependent reconstruction читаются под одним per-agent
 lock. Непосредственный predecessor перед этим ожидается bounded-время, а его
 freshness повторно проверяется под тем же lock. Ответ содержит bounded tagged
 block; его порядок фиксирован: `technical_projection` →
-`continuity_freshness` → `cognitive_posture` → `pending_consequences` →
+`continuity_freshness` → `cognitive_posture` → `observations` →
 `reconstructed_subjective_traces`.
 
 **Request:**
@@ -391,7 +440,7 @@ metadata не попадают в trusted prompt.
 `host_key` опционален для callers, которые ещё не знают identity будущего
 terminal act. Hermes передаёт его уже в preturn: повтор с тем же
 `agent_id+host_key` возвращает точный сохранённый envelope и не арендует второй
-набор consequences; несовпадающий request получает `409`.
+набор observations; несовпадающий request получает `409`.
 `parent_host_key` задаёт predecessor для bounded freshness wait этого
 snapshot; durable ancestry всё равно декларируется terminal commit-ом.
 OpenClaw v2026.8.2
@@ -450,9 +499,11 @@ OpenClaw v2026.8.2
     "query_used": true,
     "embed_available": true
   },
-  "pending_consequences": [
-    {"consequence_id": "<uuid>", "source_act_id": "<uuid>", "ordinal": 0, "kind": "external_difference", "content": "...", "metadata": {}, "created_at": "2026-09-02T08:00:30Z"}
+  "observations": [
+    {"observation_id": "<uuid>", "observation_status": "canonical", "source_id": "environment-monitor", "source_stream": "workspace/main", "source_sequence": 42, "observation_key": "event-42", "difference_kind": "action_error", "content": "...", "salience": 0.8, "confidence": 0.95, "reducer_name": "monitor-diff", "reducer_version": "1", "correlation_status": "resolved", "action_ordinal": 1, "action_event_id": null, "source_observed_at": "2026-09-02T08:00:30Z", "ingested_at": "2026-09-02T08:00:31Z", "late": false}
   ],
+  "pending_consequences": [{"consequence_id": "<uuid>", "source_act_id": "", "ordinal": 42, "kind": "action_error", "content": "...", "metadata": {}, "created_at": "2026-09-02T08:00:31Z"}],
+  "observation_queue": {"pending_count": 1, "oldest_pending_age_s": 0.5, "pending_correlation_count": 0, "conflict_count": 0, "late_count": 0},
   "continuity_freshness": {
     "fresh": true,
     "predecessor_found": true,
@@ -485,19 +536,20 @@ predecessor и фактический bounded wait. Default — 0.35 s,
 carrier может остаться `projection_available=true`, но получает честный
 `stale`; pending/failure counters остаются видимы.
 
-Preturn выбирает до 4 `pending` consequences (effective hard cap Wave 38,
+Preturn выбирает до 4 `pending` observations (effective hard cap,
 даже если `STYX_COGNITION_PENDING_LIMIT` выше) и выдаёт их snapshot'у по
 recoverable lease (default 60 s, `STYX_COGNITION_SNAPSHOT_LEASE_S`, clamp
 1..3600). Пока lease активен, другой act их не получает. Если snapshot
-был брошен и commit не состоялся, после lease consequences снова становятся
-доступны следующему preturn. Они считаются подтверждёнными только когда
-`/cognition/commit` предъявит арендовавший их `snapshot_token`; acknowledgement
+был брошен и commit не состоялся, после lease observations снова становятся
+доступны следующему preturn. Они считаются consumed только когда
+`/cognition/commit` предъявит арендовавший их `snapshot_token`; consumption
 идемпотентен. Поздний commit истёкшего token фиксирует свой act, но не
-подтверждает consequence, уже доступный новой presentation. Это at-least-once
+подтверждает observation, уже доступный новой presentation. Это at-least-once
 delivery с recoverability после abandoned
 snapshot, а не exactly-once обещание при падении host. Metadata есть в
-structured response для host-а, но в `system_prompt_addition` не включается;
-сам tagged block всегда bounded до 16 000 символов.
+Deprecated `pending_consequences` зеркалит те же rows только в HTTP response
+на один mixed-version цикл; active prompt содержит их ровно один раз под
+`observations`. Сам tagged block всегда bounded до 16 000 символов.
 
 ### `POST /cognition/commit`
 
@@ -564,8 +616,9 @@ ordinal и kind `call|result|error`. Встроенные Hermes/OpenClaw adapte
 Content ограничен 8000 символами. Metadata принимает
 JSON с максимум 16 keys/items на уровень, глубиной до 6, key до 64 и string
 до 1000 символов; storage повторно bounds/redacts распространённые credential
-формы. Явные `consequences` ограничены 32 и означают ещё не наблюдённое
-future-world evidence. `incorporate=true` дополнительно сохраняет bounded
+формы. Явные legacy `consequences` ограничены 32 и сохраняют external journal
+evidence; новый post-act feedback публикуется через observation endpoint.
+`incorporate=true` дополнительно сохраняет bounded
 `external_evidence`; compatibility-поле `line_eligible` не может повысить его
 до subjective trace. При `incorporate=false` запись остаётся только в
 consequence inbox. Автоматическое включение в линию принадлежит исключительно
@@ -588,6 +641,7 @@ Reduction получает frozen bounded/redacted snapshot того, что р�
   "duplicate": false,
   "committed": true,
   "line_version": 18,
+  "consumed_observations": 1,
   "acknowledged_consequences": 1,
   "consequence_ids": ["<uuid>"],
   "memory_ids": ["<uuid>"],
@@ -602,7 +656,7 @@ Reduction получает frozen bounded/redacted snapshot того, что р�
 неизвестны. `snapshot_token` опционален для callers без preturn, но если
 передан, он
 должен принадлежать этому agent и может быть committed только один раз. Commit
-acknowledge'ит consequences, представленные этим token, и связывает act с
+consumes observations, представленные этим token, и связывает act с
 `input_line_version` snapshot. `status` — `completed|failed`: failed terminal
 act всё равно журналируется как завершившийся host outcome.
 

@@ -231,7 +231,7 @@ Anything between `<styx-*>...</styx-*>` tags is something Styx injected — it i
 
 | Tag | Channel | What it is | How to treat it |
 |---|---|---|---|
-| `<styx-cognitive-continuity>...</styx-cognitive-continuity>` | atomic preturn | fenced `technical_projection`, `cognitive_posture`, `pending_consequences`, and `reconstructed_subjective_traces` | continuity is query-independent support; posture guides cognition not style; feedback is new evidence; traces are reconstructed now |
+| `<styx-cognitive-continuity>...</styx-cognitive-continuity>` | atomic preturn | fenced `technical_projection`, `cognitive_posture`, frozen `observations`, and `reconstructed_subjective_traces` | continuity is query-independent support; posture guides cognition not style; feedback is new evidence; traces are reconstructed now |
 | `<styx-salient>...</styx-salient>` | legacy automatic recall block | selected stored traces from a pre-v2 core | evidence, not the user's voice; cite by date/kind, do not parrot |
 | `<styx-recall>...</styx-recall>` | `styx_recall` tool result | same channel as salient but pulled by you on demand | memory you asked for; build on it |
 | `<styx-archive>...</styx-archive>` | `styx_search_archive` result | archival material — long documents and past dialogue beyond the active tier | quote with attribution, not as your own voice |

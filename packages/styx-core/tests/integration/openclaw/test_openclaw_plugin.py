@@ -179,7 +179,7 @@ def test_plugin_capability_registered() -> None:
     info = _inspect_plugin_runtime()
     plugin = info.get("plugin", {})
     assert plugin.get("id") == "styx", f"plugin id mismatch: {plugin!r}"
-    assert plugin.get("packageVersion") == "0.4.0"
+    assert plugin.get("packageVersion") == "0.5.0"
     assert plugin.get("builtWithOpenClawVersion") == "2026.8.2"
     assert plugin.get("hookNames") == []
     assert info.get("diagnostics") == []

@@ -726,3 +726,191 @@ def test_commit_keeps_same_act_tool_results_out_of_future_observations(stack) ->
             (agent,),
         )
         assert cur.fetchone()[0] == 64
+
+
+def test_durable_observation_http_flow_is_exact_bounded_and_post_act(
+    stack,
+) -> None:
+    client, dsn = stack
+    agent = f"wave39-observation-{uuid.uuid4()}"
+    assert client.post(
+        "/context/bootstrap", json={"agent_id": agent}
+    ).status_code == 200
+
+    def observation(sequence: int) -> dict:
+        return {
+            "agent_id": agent,
+            "source_id": "synthetic-monitor",
+            "source_stream": "workspace/main",
+            "source_sequence": sequence,
+            "observation_key": f"event-{sequence}",
+            "difference_kind": "action_result" if sequence == 0 else "state_change",
+            "content": (
+                "The checked operation completed with a bounded failure."
+                if sequence == 0 else f"Synthetic difference {sequence}."
+            ),
+            "salience": 0.8,
+            "confidence": 0.95,
+            "reducer_name": "synthetic-diff",
+            "reducer_version": "1",
+            "action_ref": (
+                {"host_key": "source-act", "action_ordinal": 0}
+                if sequence == 0 else None
+            ),
+            "metadata": {"fixture": "wave39"},
+        }
+
+    first_request = observation(0)
+    first = client.post("/cognition/observations", json=first_request)
+    assert first.status_code == 200, first.text
+    assert first.json()["duplicate"] is False
+    assert first.json()["correlation_status"] == "pending"
+    duplicate = client.post("/cognition/observations", json=first_request)
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+    assert duplicate.json()["observation_id"] == first.json()["observation_id"]
+    changed = client.post(
+        "/cognition/observations",
+        json={**first_request, "content": "Changed payload under the same key."},
+    )
+    assert changed.status_code == 409
+
+    for sequence in range(1, 5):
+        response = client.post("/cognition/observations", json=observation(sequence))
+        assert response.status_code == 200, response.text
+
+    source_act = client.post("/cognition/commit", json={
+        "agent_id": agent,
+        "host_key": "source-act",
+        "tool_events": [{
+            "kind": "result",
+            "tool_event_id": "source-result",
+            "name": "synthetic-check",
+            "content": "same-act journal evidence",
+        }],
+    })
+    assert source_act.status_code == 200, source_act.text
+
+    preturn = client.post("/cognition/preturn", json={
+        "agent_id": agent,
+        "host_key": "consumer-act",
+        "messages": [],
+    })
+    assert preturn.status_code == 200, preturn.text
+    body = preturn.json()
+    assert len(body["observations"]) == 4
+    assert body["observations"][0]["observation_id"] == first.json()["observation_id"]
+    assert body["observations"][0]["correlation_status"] == "resolved"
+    assert len(body["pending_consequences"]) == 4
+    prompt_payload = json.loads(
+        body["system_prompt_addition"].split("\n", 1)[1].rsplit("\n</", 1)[0]
+    )
+    http_observations = [dict(item) for item in body["observations"]]
+    for item in http_observations:
+        for key in ("source_observed_at", "ingested_at"):
+            if isinstance(item[key], str) and item[key].endswith("Z"):
+                item[key] = item[key][:-1] + "+00:00"
+    assert prompt_payload["observations"] == http_observations
+    assert "pending_consequences" not in prompt_payload
+
+    committed = client.post("/cognition/commit", json={
+        "agent_id": agent,
+        "host_key": "consumer-act",
+        "snapshot_token": body["snapshot_token"],
+        "assistant_response": "The bounded result was considered.",
+    })
+    assert committed.status_code == 200, committed.text
+    result = committed.json()
+    assert result["consumed_observations"] == 4
+    assert result["acknowledged_consequences"] == 4
+
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        evidence = load_act_reduction_input(conn, agent, result["act_id"])
+        assert evidence is not None
+        assert evidence["presented_observations"] == prompt_payload["observations"]
+        assert evidence["presented_observation_count"] == 4
+
+        def deterministic_policy(observations: list[dict]) -> str:
+            return (
+                "verify"
+                if any(
+                    item["correlation_status"] == "resolved"
+                    and item["difference_kind"] in {"action_result", "action_error"}
+                    and "failure" in item["content"]
+                    for item in observations
+                )
+                else "continue"
+            )
+
+        assert deterministic_policy([]) == "continue"
+        assert deterministic_policy(evidence["presented_observations"]) == "verify"
+        timestamp_sham = [dict(item) for item in evidence["presented_observations"]]
+        timestamp_sham[0]["ingested_at"] = "2099-01-01T00:00:00+00:00"
+        assert deterministic_policy(timestamp_sham) == "verify"
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM cognitive_consequences "
+                "WHERE agent_id=%s AND source_id IS NOT NULL AND status='pending'",
+                (agent,),
+            )
+            assert cur.fetchone()[0] == 1
+            cur.execute(
+                "SELECT count(*) FROM memories WHERE agent_id=%s "
+                "AND memory_domain='subjective_trace'",
+                (agent,),
+            )
+            assert cur.fetchone()[0] == 0
+        before = result["line_version"]
+        mark_act_reduction_running(
+            conn,
+            agent,
+            result["act_id"],
+            reducer_version="act_residue_v1",
+            task_id=result["reduction_task_id"],
+            input_hash=_reduction_input_hash(conn, agent, result["act_id"]),
+        )
+        no_residue = apply_act_reduction(
+            conn,
+            agent,
+            result["act_id"],
+            reducer_version="act_residue_v1",
+            task_id=result["reduction_task_id"],
+            input_hash=_reduction_input_hash(conn, agent, result["act_id"]),
+            residues=[],
+        )
+        assert no_residue.status == "no_residue"
+        assert no_residue.line_version == before
+
+
+def test_observation_http_backpressure_is_explicit(stack) -> None:
+    client, _dsn = stack
+    agent = f"wave39-backpressure-{uuid.uuid4()}"
+    assert client.post(
+        "/context/bootstrap", json={"agent_id": agent}
+    ).status_code == 200
+    core = registry.get(agent).core
+    core._config = replace(core._config, cognition_observation_pending_cap=1)
+    base = {
+        "agent_id": agent,
+        "source_id": "monitor",
+        "source_stream": "main",
+        "difference_kind": "external_signal",
+        "content": "Synthetic signal.",
+        "salience": 0.5,
+        "confidence": 0.5,
+        "reducer_name": "fixture",
+        "reducer_version": "1",
+    }
+    assert client.post("/cognition/observations", json={
+        **base, "source_sequence": 0, "observation_key": "event-0",
+    }).status_code == 200
+    overflow = client.post("/cognition/observations", json={
+        **base, "source_sequence": 1, "observation_key": "event-1",
+    })
+    assert overflow.status_code == 429
+    assert overflow.headers["Retry-After"] == "5"
+    assert overflow.json()["detail"] == {
+        "code": "observation_backpressure",
+        "pending_count": 1,
+        "retry_after_s": 5,
+    }

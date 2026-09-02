@@ -259,9 +259,49 @@ export type CognitionPreturnResponse = {
     query_used: boolean;
     embed_available: boolean;
   };
+  observations: Array<Record<string, unknown>>;
   pending_consequences: Array<Record<string, unknown>>;
+  observation_queue: Record<string, unknown>;
   continuity_freshness: Record<string, unknown>;
   system_prompt_addition?: string | null;
+};
+
+export type CognitionObserveRequest = {
+  agent_id: string;
+  source_id: string;
+  source_stream: string;
+  source_sequence: number;
+  observation_key: string;
+  difference_kind:
+    | "state_change"
+    | "delivery_receipt"
+    | "action_result"
+    | "action_error"
+    | "external_signal";
+  content: string;
+  salience: number;
+  confidence: number;
+  reducer_name: string;
+  reducer_version: string;
+  action_ref?: {
+    host_key: string;
+    agent_id?: string | null;
+    action_ordinal?: number | null;
+    action_event_id?: string | null;
+  } | null;
+  source_observed_at?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type CognitionObserveResponse = {
+  observation_id: string;
+  duplicate: boolean;
+  payload_hash: string;
+  correlation_status: "uncorrelated" | "pending" | "resolved" | "conflict";
+  action_act_id: string | null;
+  late: boolean;
+  pending_count: number;
+  created_at: string;
 };
 
 export type CognitionToolEvent = {
@@ -303,6 +343,8 @@ export type CognitionCommitResponse = {
   duplicate: boolean;
   committed: boolean;
   line_version: number;
+  consumed_observations: number;
+  /** @deprecated Mixed-version compatibility alias. */
   acknowledged_consequences: number;
   consequence_ids: string[];
   memory_ids: string[];
@@ -794,6 +836,10 @@ export type StyxClient = {
     body: CognitionPreturnRequest,
     options?: StyxRequestOptions,
   ) => Promise<CognitionPreturnResponse>;
+  cognitionObserve: (
+    body: CognitionObserveRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<CognitionObserveResponse>;
   cognitionCommit: (
     body: CognitionCommitRequest,
     options?: StyxRequestOptions,
@@ -969,6 +1015,7 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     contextAfterTurn: (body) => postCall("/context/after_turn", body),
     affectObserveTurn: (body, options) => postCall("/affect/observe_turn", body, options),
     cognitionPreturn: (body, options) => postCall("/cognition/preturn", body, options),
+    cognitionObserve: (body, options) => postCall("/cognition/observations", body, options),
     cognitionCommit: (body, options) => postCall("/cognition/commit", body, options),
     syncTurn: (body, options) => postCall("/sync_turn", body, options),
     // tools

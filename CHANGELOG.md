@@ -7,7 +7,62 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
-## [Unreleased — prepared: styx-core 1.3.0 / styx-hermes 1.3.0 / OpenClaw 0.4.0]
+## [Unreleased — prepared: styx-core 1.4.0 / styx-hermes 1.4.0 / OpenClaw 0.5.0]
+
+Подготовлено, но не опубликовано: durable perception/action feedback. Версии
+не означают наличие tag или release.
+
+### Добавлено
+
+- Additive migration `0011_durable_observations.sql` и authenticated
+  `POST /cognition/observations` для коротких, предварительно редуцированных
+  внешних различий с source idempotency, stream sequence, reducer provenance
+  и optional agent-scoped action correlation.
+- Exact immutable presentation payload/hash/version, recoverable lease,
+  terminal consumption и frozen observation evidence общего act reducer-а.
+- Явные `cognition_observe`/`cognitionObserve` clients в Hermes/OpenClaw,
+  per-agent backpressure и bounded queue counts/age/status observability.
+
+### Изменено
+
+- Active prompt содержит canonical `observations` ровно один раз; deprecated
+  `pending_consequences` остаётся только response mirror на mixed-version
+  цикл. Commit возвращает canonical `consumed_observations` и прежний alias.
+- Same-act tool result/error по-прежнему остаётся journal evidence и не
+  публикуется host adapter-ом как post-act observation автоматически.
+- Observation не меняет subjective line при ingest, presentation или
+  consumption. Только validated residue последующего terminal act может
+  изменить causal root/carrier; `no_residue` сохраняет line version.
+
+### Надёжность и безопасность
+
+- Exact retry создаёт одну row, изменённый payload/sequence collision получает
+  `409`; overflow получает `429`/`Retry-After` без удаления pending rows.
+- Observation-before-act поздно разрешается по точным action coordinates.
+  Cross-agent reference и несовпадающий ordinal/event не становятся resolved;
+  correlation не трактуется как доказанная причинность.
+- Frozen source/presentation payload защищён constraints/triggers и повторно
+  валидируется перед reducer. Omitted/unpresented row не consume'ится и не
+  становится reducer evidence.
+
+### Проверка текущего checkpoint
+
+- Wave 39 PostgreSQL/HTTP/reducer gate: **133 passed** на host и в fresh
+  Docker image; pure config/model/Hermes-client boundary: **35 passed**;
+  полный Docker Hermes: **231 passed**.
+- OpenClaw npm contract suite: green; provider-neutral Docker/host integration:
+  **5 passed / 3 expected skipped**; runtime loaded/activated plugin 0.5.0 на
+  OpenClaw 2026.8.2, plugin diagnostics пусты.
+- Полный host DB-suite без внешнего embedding runtime достиг
+  **1691 passed / 54 skipped**; оставшиеся **35 failures** относятся к
+  недоступному в этом контуре Ollama. После отдельного разрешения полный fresh
+  Docker core-suite на real PostgreSQL + Ollama завершён: **1779 passed / 16
+  skipped / 0 failed**. Первый запуск с живым daemon дал только 27 setup
+  deadlocks на fixture DDL; после штатной остановки daemon повторный suite
+  прошёл без ошибок и без дополнительных правок кода.
+- Push/tag/release не выполнялись.
+
+## [Prepared checkpoint — styx-core 1.3.0 / styx-hermes 1.3.0 / OpenClaw 0.4.0]
 
 Подготовлено, но не опубликовано: durable act residue и causal carrier всей
 валидированной сохраняющейся линии. Эти версии не означают наличие tag или

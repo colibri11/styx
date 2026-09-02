@@ -13,7 +13,7 @@
 
 ## 0. Breaking changes при апгрейде
 
-### Текущий переход: act residue / causal carrier и migrations 0009–0010
+### Текущий переход: durable observations и migrations 0009–0011
 
 Core и оба host adapter'а нужно обновлять как один rollout. Миграция
 `0009_cognitive_continuity.sql`:
@@ -37,16 +37,31 @@ Core и оба host adapter'а нужно обновлять как один rol
 - создаёт bounded retry/outbox guards. Queue payload содержит только
   координаты и digest, без raw dialogue.
 
+Migration `0011_durable_observations.sql` эволюционирует существующий inbox
+без второй конкурирующей очереди:
+
+- добавляет immutable source idempotency, source stream/sequence, controlled
+  difference kind и preliminary reducer provenance;
+- разрешает observation прийти до act и поздно разрешает optional
+  agent-scoped action coordinates, не объявляя correlation доказанной
+  причинностью;
+- замораживает exact presented payload/hash/version; один observation не имеет
+  двух активных leases, а omitted rows остаются pending;
+- вводит authenticated `POST /cognition/observations`, queue age/count
+  observability и per-agent backpressure.
+
 Новый host path — `/cognition/preturn` перед model call и ровно один
 `/cognition/commit` после завершения tool loop. Commit несёт finalized channel
 projection, ordered `call|result|error`, `host_key`, declared parent и
-`snapshot_token`. Принимается до 32 явных future-world consequences.
+`snapshot_token`. Legacy commit принимает до 32 явных consequences; canonical
+future-world feedback приходит отдельно через `/cognition/observations` уже
+как короткое предварительно редуцированное различие.
 `result`/`error`, уже увиденный моделью в том же tool loop, остаётся ordered
 journal evidence и не переиздаётся следующему акту как новое последствие.
 Каждый terminal commit в той же транзакции получает ровно один reduction
 outcome; canonical reducer асинхронно выводит 0..4 evidence-bound residues и
 атомарно обновляет causal root/frontier и whole-line carrier.
-Consequences выдаются snapshot'у по lease, подтверждаются только terminal
+Observations выдаются snapshot'у по lease, consumed только terminal
 act'ом с этим token и после истечения lease снова доступны, если snapshot был
 брошен. Поэтому доставка recoverable at-least-once, а acknowledgement и retry
 того же act идемпотентны; поздний commit истёкшего snapshot не подтверждает
@@ -63,7 +78,7 @@ auth, validation или `5xx`.
 2. Обновить checkout/пакеты, затем выполнить `.venv/bin/styx migrate` один раз.
 3. Перезапустить `styx-daemon`; reducer handler и retry sweeper работают в том
    же процессе. Проверить `/healthz` и наличие обоих cognition paths в
-   `/openapi.json`.
+   `/openapi.json`, включая `/cognition/observations`.
 4. Обновить `styx-hermes` и OpenClaw plugin, затем перезапустить host
    процессы. Не оставлять mixed-version fallback постоянным режимом.
 5. Выполнить два последовательных хода с tool result. Для Hermes передавать
@@ -71,8 +86,8 @@ auth, validation или `5xx`.
    accepted advancement key через durable `commitTurn` outbox. Commit должен
    вернуть `reduction_id` и status; второй preturn — явные
    `continuity_freshness` и carrier status. Same-act tool result не должен
-   появиться в `pending_consequences`. Отдельно переданный explicit consequence
-   должен пройти lease/ack. Повтор commit с тем же body возвращает
+   появиться в `observations`. Отдельно опубликованный post-act observation
+   должен пройти lease/consumption. Повтор commit с тем же body возвращает
    `duplicate=true`, а с изменённым body — `409` без новых rows.
 
 OpenClaw-плагин требует v2026.8.2: `assemble` сохраняет rich messages и строит
@@ -80,7 +95,8 @@ session-fenced snapshot, а `commitTurn` атомарно и идемпотен�
 принятый transcript turn. Hooks `agent_end`/`before_prompt_build` для finality
 не используются.
 
-Схема additive, но откат только binaries на старый writer семантически
+Схема additive, но откат только binaries на старый writer после `0011`
+семантически
 небезопасен: legacy writer не задаёт новые domain/eligibility/provenance поля
 явно и не создаёт reduction outcome.
 Для rollback возвращайте согласованный snapshot БД либо сохраняйте новый core

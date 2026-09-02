@@ -3289,6 +3289,67 @@ class StyxMemoryCore:
 
     # -- cognitive continuity envelope (wave 37) -----------------------
 
+    def cognition_observe(
+        self,
+        *,
+        source_id: str,
+        source_stream: str,
+        source_sequence: int,
+        observation_key: str,
+        difference_kind: str,
+        content: str,
+        salience: float,
+        confidence: float,
+        reducer_name: str,
+        reducer_version: str,
+        action_ref: dict[str, Any] | None = None,
+        source_observed_at: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist one externally reduced difference without changing line."""
+        if self._conn is None or self._queries is None:
+            raise RuntimeError("cognition_observe called before initialize")
+        from styx.storage.observations import ingest_observation
+
+        with self._write_lock:
+            if self._conn is None:
+                raise RuntimeError("provider shut down mid-cognition_observe")
+            with self._guarded_write("cognition_observe"):
+                result = ingest_observation(
+                    self._conn,
+                    self._agent_id,
+                    source_id=source_id,
+                    source_stream=source_stream,
+                    source_sequence=source_sequence,
+                    observation_key=observation_key,
+                    difference_kind=difference_kind,
+                    content=content,
+                    salience=salience,
+                    confidence=confidence,
+                    reducer_name=reducer_name,
+                    reducer_version=reducer_version,
+                    action_ref=action_ref,
+                    source_observed_at=source_observed_at,
+                    metadata=metadata,
+                    pending_cap=(
+                        self._config.cognition_observation_pending_cap
+                        if self._config else 1024
+                    ),
+                )
+                self._conn.commit()
+        return {
+            "observation_id": str(result.observation_id),
+            "duplicate": result.duplicate,
+            "payload_hash": result.payload_hash,
+            "correlation_status": result.correlation_status,
+            "action_act_id": (
+                str(result.action_act_id) if result.action_act_id else None
+            ),
+            "late": result.late,
+            "pending_count": result.pending_count,
+            "created_at": result.created_at,
+        }
+
     def cognition_preturn(
         self,
         *,
@@ -3388,6 +3449,10 @@ class StyxMemoryCore:
             record_snapshot,
             strict_reconstruction,
         )
+        from styx.storage.observations import (
+            legacy_consequence_mirror,
+            observation_queue_stats,
+        )
 
         snapshot_token = uuid.uuid4().hex
         target_session = _coerce_session_id(session_id) if session_id else self._session_id
@@ -3481,10 +3546,11 @@ class StyxMemoryCore:
                         self._config.cognition_snapshot_lease_s if self._config else 60.0
                     ),
                 )
-                pending = present_pending_consequences(
+                observations = present_pending_consequences(
                     self._conn, self._agent_id, snapshot_token,
                     limit=(self._config.cognition_pending_limit if self._config else 16),
                 )
+                queue_stats = observation_queue_stats(self._conn, self._agent_id)
                 state = read_last_state_record(self._conn, self._agent_id)
                 lifecycle = read_active_cause_lifecycle(self._conn, self._agent_id)
                 affect: dict[str, Any] | None = None
@@ -3544,7 +3610,7 @@ class StyxMemoryCore:
                 prompt = build_system_prompt_addition(
                     will=will,
                     cognitive_posture=posture,
-                    pending=pending,
+                    pending=observations,
                     traces=traces,
                     continuity_freshness=freshness,
                 )
@@ -3562,7 +3628,11 @@ class StyxMemoryCore:
                         "query_used": bool(effective_query),
                         "embed_available": query_vector is not None,
                     },
-                    "pending_consequences": pending,
+                    "observations": observations,
+                    "pending_consequences": legacy_consequence_mirror(
+                        observations
+                    ),
+                    "observation_queue": queue_stats,
                     "continuity_freshness": freshness,
                     "system_prompt_addition": prompt,
                 }
@@ -3704,6 +3774,7 @@ class StyxMemoryCore:
                         "duplicate": True,
                         "committed": True,
                         "line_version": duplicate_line_version,
+                        "consumed_observations": result.acknowledged_count,
                         "acknowledged_consequences": result.acknowledged_count,
                         "consequence_ids": [str(value) for value in result.consequence_ids],
                         "memory_ids": [],
@@ -3761,6 +3832,7 @@ class StyxMemoryCore:
             "duplicate": False,
             "committed": True,
             "line_version": line_version,
+            "consumed_observations": result.acknowledged_count,
             "acknowledged_consequences": result.acknowledged_count,
             "consequence_ids": [str(value) for value in result.consequence_ids],
             "memory_ids": memory_ids,

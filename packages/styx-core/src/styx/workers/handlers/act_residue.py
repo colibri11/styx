@@ -8,6 +8,7 @@ reduction atomically in the worker transaction.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import math
@@ -63,6 +64,20 @@ ALLOWED_CAUSAL_ROLES = frozenset({
 })
 ALLOWED_EVIDENCE_SOURCES = frozenset({
     "channel_input", "channel_output", "action", "observation"
+})
+OBSERVATION_FIELDS = frozenset({
+    "observation_id", "observation_status", "source_id", "source_stream",
+    "source_sequence", "observation_key", "difference_kind", "content",
+    "salience", "confidence", "reducer_name", "reducer_version",
+    "correlation_status", "action_ordinal", "action_event_id",
+    "source_observed_at", "ingested_at", "late",
+})
+OBSERVATION_DIFFERENCE_KINDS = frozenset({
+    "state_change", "delivery_receipt", "action_result", "action_error",
+    "external_signal",
+})
+OBSERVATION_CORRELATION_STATUSES = frozenset({
+    "uncorrelated", "pending", "resolved", "conflict",
 })
 
 
@@ -180,6 +195,107 @@ def _bounded_text(value: Any, limit: int) -> str:
     return redact_journal_text(value)[:limit]
 
 
+def _validate_observation_projection(item: dict[str, Any]) -> str:
+    """Validate frozen observation evidence independently of its DB hash."""
+    if set(item) != OBSERVATION_FIELDS:
+        raise ValueError("presented observation fields не совпадают с allowlist")
+    observation_id = item.get("observation_id")
+    if not isinstance(observation_id, str):
+        raise ValueError("observation_id должен быть UUID-строкой")
+    try:
+        normalized_id = str(uuid.UUID(observation_id))
+    except ValueError as exc:
+        raise ValueError("observation_id должен быть UUID-строкой") from exc
+
+    status = item.get("observation_status")
+    if status not in {"canonical", "legacy"}:
+        raise ValueError("observation_status вне canonical|legacy")
+    difference_kind = item.get("difference_kind")
+    content = item.get("content")
+    if (
+        not isinstance(difference_kind, str)
+        or not 1 <= len(difference_kind) <= 64
+        or not isinstance(content, str)
+        or not 1 <= len(content) <= MAX_OBSERVATION_CONTENT_CHARS
+        or type(item.get("late")) is not bool
+    ):
+        raise ValueError("presented observation имеет неверную bounded форму")
+
+    for key in ("ingested_at", "source_observed_at"):
+        value = item.get(key)
+        if key == "source_observed_at" and value is None:
+            continue
+        if not isinstance(value, str) or not 1 <= len(value) <= 64:
+            raise ValueError(f"presented observation.{key} должен быть timestamp")
+        try:
+            parsed = dt.datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"presented observation.{key} должен быть ISO timestamp"
+            ) from exc
+        if parsed.tzinfo is None:
+            raise ValueError(
+                f"presented observation.{key} должен содержать timezone"
+            )
+
+    action_ordinal = item.get("action_ordinal")
+    if action_ordinal is not None and (
+        isinstance(action_ordinal, bool)
+        or not isinstance(action_ordinal, int)
+        or action_ordinal < 0
+    ):
+        raise ValueError("presented observation.action_ordinal неверен")
+    action_event_id = item.get("action_event_id")
+    if action_event_id is not None and (
+        not isinstance(action_event_id, str)
+        or not 1 <= len(action_event_id) <= 256
+    ):
+        raise ValueError("presented observation.action_event_id неверен")
+
+    if status == "canonical":
+        if difference_kind not in OBSERVATION_DIFFERENCE_KINDS:
+            raise ValueError("canonical observation difference_kind неверен")
+        for key, maximum in (
+            ("source_id", 256),
+            ("source_stream", 256),
+            ("observation_key", 256),
+            ("reducer_name", 128),
+            ("reducer_version", 64),
+        ):
+            value = item.get(key)
+            if not isinstance(value, str) or not 1 <= len(value) <= maximum:
+                raise ValueError(f"canonical observation.{key} неверен")
+        source_sequence = item.get("source_sequence")
+        if (
+            isinstance(source_sequence, bool)
+            or not isinstance(source_sequence, int)
+            or source_sequence < 0
+        ):
+            raise ValueError("canonical observation.source_sequence неверен")
+        for key in ("salience", "confidence"):
+            value = item.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(f"canonical observation.{key} неверен")
+        if item.get("correlation_status") not in OBSERVATION_CORRELATION_STATUSES:
+            raise ValueError("canonical observation.correlation_status неверен")
+    else:
+        nullable = {
+            "source_id", "source_stream", "source_sequence", "observation_key",
+            "salience", "confidence", "reducer_name", "reducer_version",
+            "action_ordinal", "action_event_id", "source_observed_at",
+        }
+        if any(item.get(key) is not None for key in nullable):
+            raise ValueError("legacy observation содержит invented provenance")
+        if item.get("correlation_status") != "legacy":
+            raise ValueError("legacy observation.correlation_status неверен")
+    return normalized_id
+
+
 def _project_input(
     raw: Any, *, agent_id: str, act_id: uuid.UUID
 ) -> tuple[dict[str, Any], ActCoordinates]:
@@ -234,26 +350,16 @@ def _project_input(
     for item in observations_raw:
         if not isinstance(item, dict):
             raise ValueError("presented observation должен быть object")
-        observation_id = item.get("observation_id")
-        if not isinstance(observation_id, str):
-            raise ValueError("observation_id должен быть UUID-строкой")
-        try:
-            observation_id = str(uuid.UUID(observation_id))
-        except ValueError as exc:
-            raise ValueError("observation_id должен быть UUID-строкой") from exc
+        observation_id = _validate_observation_projection(item)
         if observation_id in observation_ids:
             raise ValueError("presented observations содержат duplicate id")
         observation_ids.add(observation_id)
-        observations.append({
-            "observation_id": observation_id[:128],
-            "source_act_id": _bounded_text(item.get("source_act_id", ""), 64),
-            "ordinal": item.get("ordinal"),
-            "kind": _bounded_text(item.get("kind", "external_difference"), 64),
-            "content": _bounded_text(
-                item.get("content", ""), MAX_OBSERVATION_CONTENT_CHARS
-            ),
-            "metadata": _bounded_text(item.get("metadata", {}), MAX_METADATA_CHARS),
-        })
+        observation = dict(item)
+        observation["observation_id"] = observation_id[:128]
+        observation["content"] = _bounded_text(
+            item.get("content", ""), MAX_OBSERVATION_CONTENT_CHARS
+        )
+        observations.append(observation)
 
     raw_channel_input = raw.get("channel_input", {})
     raw_channel_output = raw.get("channel_output", {})
@@ -266,7 +372,7 @@ def _project_input(
             "carrier",
             "cognitive_posture",
             "continuity_freshness",
-            "presented_consequence_ids",
+            "presented_observation_ids",
             "trace_coordinates",
         }
         if set(raw_input_snapshot) != expected_snapshot_keys:

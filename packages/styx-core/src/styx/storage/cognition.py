@@ -509,86 +509,15 @@ def present_pending_consequences(
     *,
     limit: int = MAX_PENDING,
 ) -> list[dict[str, Any]]:
-    """Lease pending rows to a physical snapshot without rebinding history.
+    """Compatibility name for the single canonical observation inbox."""
+    from styx.storage.observations import present_pending_observations
 
-    The presentation rows are immutable.  An uncommitted expired lease merely
-    stops fencing the consequence, allowing a later snapshot to create a new
-    association.  Retrying the same still-live snapshot reads its association.
-    """
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT lease_expires_at,presentation_completed_at, "
-            "       lease_expires_at > clock_timestamp() AS active "
-            "FROM cognitive_snapshots "
-            "WHERE token=%s AND agent_id=%s FOR UPDATE",
-            (snapshot_token, agent_id),
-        )
-        snapshot = cur.fetchone()
-        if snapshot is None:
-            raise ValueError("snapshot_token is unknown for this agent")
-        # Presentation is the acknowledgement boundary, not merely a DB
-        # selection.  Lease only the subset that is guaranteed to fit the
-        # active prompt; omitted rows remain pending for a later snapshot.
-        bounded_limit = min(max(1, limit), MAX_PENDING, MAX_PRESENTED_PENDING)
-        if snapshot["active"] and snapshot["presentation_completed_at"] is None:
-            cur.execute(
-                "SELECT c.id FROM cognitive_consequences c "
-                "WHERE c.agent_id=%s AND c.status <> 'acknowledged' "
-                "  AND NOT EXISTS ("
-                "    SELECT 1 FROM cognitive_presentations active "
-                "    WHERE active.agent_id=c.agent_id "
-                "      AND active.consequence_id=c.id "
-                "      AND active.lease_expires_at > clock_timestamp()"
-                "  ) "
-                "ORDER BY c.created_at,c.ordinal LIMIT %s FOR UPDATE OF c",
-                (agent_id, bounded_limit),
-            )
-            available_ids = [row["id"] for row in cur.fetchall()]
-            for consequence_id in available_ids:
-                cur.execute(
-                    "INSERT INTO cognitive_presentations "
-                    "(snapshot_token,consequence_id,agent_id,lease_expires_at) "
-                    "VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                    (
-                        snapshot_token,
-                        consequence_id,
-                        agent_id,
-                        snapshot["lease_expires_at"],
-                    ),
-                )
-            cur.execute(
-                "UPDATE cognitive_snapshots "
-                "SET presentation_completed_at=clock_timestamp() "
-                "WHERE token=%s AND agent_id=%s "
-                "  AND presentation_completed_at IS NULL",
-                (snapshot_token, agent_id),
-            )
-        cur.execute(
-            "SELECT c.id,c.act_id,c.ordinal,c.kind,c.content,c.metadata,c.created_at "
-            "FROM cognitive_presentations p "
-            "JOIN cognitive_consequences c "
-            "  ON (c.id,c.agent_id)=(p.consequence_id,p.agent_id) "
-            "WHERE p.snapshot_token=%s AND p.agent_id=%s "
-            "  AND p.lease_expires_at > clock_timestamp() "
-            "  AND c.status <> 'acknowledged' "
-            "ORDER BY c.created_at,c.ordinal LIMIT %s",
-            (snapshot_token, agent_id, bounded_limit),
-        )
-        rows = list(cur.fetchall())
-    return [
-        {
-            "consequence_id": str(row["id"]),
-            "source_act_id": str(row["act_id"]),
-            "ordinal": int(row["ordinal"]),
-            "kind": row["kind"],
-            "content": redact_journal_text(
-                row["content"], limit=MAX_PRESENTED_PENDING_CONTENT
-            ),
-            "metadata": row["metadata"],
-            "created_at": row["created_at"].isoformat(),
-        }
-        for row in rows
-    ]
+    return present_pending_observations(
+        conn,
+        agent_id,
+        snapshot_token,
+        limit=min(limit, MAX_PENDING, MAX_PRESENTED_PENDING),
+    )
 
 
 def record_snapshot(
@@ -993,6 +922,18 @@ def commit_cognitive_act(
                 ),
             )
 
+        # Observations may arrive before the referenced act.  Resolution is
+        # performed only after this act's full ordered action journal exists,
+        # in the same transaction, and never upgrades a mismatch to causality.
+        from styx.storage.observations import resolve_pending_observations_for_act
+
+        resolve_pending_observations_for_act(
+            conn,
+            agent_id,
+            host_key=host_key,
+            act_id=act_id,
+        )
+
         consequence_ids: list[uuid.UUID] = []
         for ordinal, consequence in enumerate(consequences):
             consequence_id = uuid.uuid4()
@@ -1128,13 +1069,35 @@ def build_system_prompt_addition(
     )
     closing = "\n</styx-cognitive-continuity>"
 
-    safe_pending = [
+    def _optional_text(value: Any, limit: int) -> str | None:
+        return str(value)[:limit] if value is not None else None
+
+    safe_observations = [
         {
-            "consequence_id": str(item.get("consequence_id", ""))[:64],
-            "source_act_id": str(item.get("source_act_id", ""))[:64],
-            "ordinal": int(item.get("ordinal", 0)),
-            "kind": str(item.get("kind", ""))[:64],
+            "observation_id": str(item.get("observation_id", ""))[:64],
+            "observation_status": str(
+                item.get("observation_status", "legacy")
+            )[:16],
+            "source_id": _optional_text(item.get("source_id"), 256),
+            "source_stream": _optional_text(item.get("source_stream"), 256),
+            "source_sequence": item.get("source_sequence"),
+            "observation_key": _optional_text(item.get("observation_key"), 256),
+            "difference_kind": str(item.get("difference_kind", ""))[:64],
             "content": str(item.get("content", ""))[:MAX_PRESENTED_PENDING_CONTENT],
+            "salience": item.get("salience"),
+            "confidence": item.get("confidence"),
+            "reducer_name": _optional_text(item.get("reducer_name"), 128),
+            "reducer_version": _optional_text(item.get("reducer_version"), 64),
+            "correlation_status": str(
+                item.get("correlation_status", "legacy")
+            )[:16],
+            "action_ordinal": item.get("action_ordinal"),
+            "action_event_id": _optional_text(item.get("action_event_id"), 256),
+            "source_observed_at": _optional_text(
+                item.get("source_observed_at"), 64
+            ),
+            "ingested_at": _optional_text(item.get("ingested_at"), 64),
+            "late": bool(item.get("late", False)),
         }
         for item in list(pending)[:MAX_PRESENTED_PENDING]
         if isinstance(item, dict)
@@ -1192,7 +1155,7 @@ def build_system_prompt_addition(
         "technical_projection": projection,
         "continuity_freshness": safe_freshness,
         "cognitive_posture": safe_posture,
-        "pending_consequences": safe_pending,
+        "observations": safe_observations,
         "reconstructed_subjective_traces": safe_traces,
     }
 
@@ -1205,7 +1168,7 @@ def build_system_prompt_addition(
     if len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION:
         return prompt
 
-    # Preserve the complete carrier and every actually leased consequence.
+    # Preserve the complete carrier and every actually leased observation.
     # Query-dependent recall is the first optional surface removed.
     payload["reconstructed_subjective_traces"] = []
     prompt = _render(payload)
@@ -1213,9 +1176,6 @@ def build_system_prompt_addition(
         return prompt
 
     payload["cognitive_posture"] = {}
-    payload["pending_consequences"] = [
-        {**item, "content": item["content"][:256]} for item in safe_pending
-    ]
     payload["details_omitted"] = True
     prompt = _render(payload)
     if len(prompt) <= MAX_SYSTEM_PROMPT_ADDITION:
@@ -1231,9 +1191,7 @@ def build_system_prompt_addition(
         },
         "continuity_freshness": safe_freshness,
         "cognitive_posture": {},
-        "pending_consequences": [
-            {**item, "content": item["content"][:128]} for item in safe_pending
-        ],
+        "observations": safe_observations,
         "reconstructed_subjective_traces": [],
         "details_omitted": True,
     }

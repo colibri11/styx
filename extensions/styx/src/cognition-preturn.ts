@@ -64,7 +64,9 @@ export async function fetchCanonicalPreturn(
         diagnostics: { legacy_fallback: true },
       },
       reconstruction: { traces: [], query_used: false, embed_available: false },
+      observations: [],
       pending_consequences: [],
+      observation_queue: {},
       continuity_freshness: {
         fresh: true,
         predecessor_found: false,

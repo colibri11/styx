@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import psycopg
 
 from styx.storage import migrate
@@ -34,6 +36,10 @@ EXPECTED_INDEXES = {
     "cognitive_act_reductions_pending_idx",
     "llm_tasks_act_residue_active_uq",
     "llm_tasks_act_residue_attempt_uq",
+    "cognitive_observations_source_key_uq",
+    "cognitive_observations_source_sequence_uq",
+    "cognitive_observations_pending_order_idx",
+    "cognitive_observations_pending_correlation_idx",
 }
 
 
@@ -63,6 +69,7 @@ def test_migration_applies_to_empty_db(clean_db: str) -> None:
         "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
         "0009_cognitive_continuity.sql",
         "0010_act_residue_carrier.sql",
+        "0011_durable_observations.sql",
     ]
 
     with psycopg.connect(clean_db) as conn:
@@ -83,8 +90,61 @@ def test_migration_is_idempotent(clean_db: str) -> None:
         "0007_documents_pipeline.sql", "0008_emotional_evidence.sql",
         "0009_cognitive_continuity.sql",
         "0010_act_residue_carrier.sql",
+        "0011_durable_observations.sql",
     ]
     assert second == []
+
+
+def test_0011_upgrades_legacy_inbox_without_inventing_provenance(
+    clean_db: str,
+) -> None:
+    migrations = migrate.discover_migrations()
+    legacy = [item for item in migrations if item.name <= "0010_act_residue_carrier.sql"]
+    current = [item for item in migrations if item.name == "0011_durable_observations.sql"]
+    with psycopg.connect(clean_db) as conn:
+        migrate.apply(conn, legacy)
+        act_id = uuid.uuid4()
+        consequence_id = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO cognitive_acts "
+                "(id,agent_id,host_key,status,channel_input,channel_output,completed_at) "
+                "VALUES (%s,'agent-a','legacy-act','completed','{}','{}',now())",
+                (act_id,),
+            )
+            cur.execute(
+                "INSERT INTO cognitive_consequences "
+                "(id,agent_id,act_id,ordinal,kind,content,metadata,status) "
+                "VALUES (%s,'agent-a',%s,0,'legacy-result','legacy evidence','{}','pending')",
+                (consequence_id, act_id),
+            )
+            cur.execute(
+                "INSERT INTO cognitive_snapshots "
+                "(token,agent_id,line_version,lease_expires_at,presentation_completed_at) "
+                "VALUES ('legacy-snapshot','agent-a',0,now()+interval '1 hour',now())"
+            )
+            cur.execute(
+                "INSERT INTO cognitive_presentations "
+                "(snapshot_token,consequence_id,agent_id,lease_expires_at) "
+                "VALUES ('legacy-snapshot',%s,'agent-a',now()+interval '1 hour')",
+                (consequence_id,),
+            )
+        conn.commit()
+
+        assert migrate.apply(conn, current) == ["0011_durable_observations.sql"]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source_id,correlation_status FROM cognitive_consequences "
+                "WHERE id=%s",
+                (consequence_id,),
+            )
+            assert cur.fetchone() == (None, "legacy")
+            cur.execute(
+                "SELECT presented_payload,payload_hash,presentation_version "
+                "FROM cognitive_presentations WHERE consequence_id=%s",
+                (consequence_id,),
+            )
+            assert cur.fetchone() == (None, None, None)
 
 
 def test_schema_supports_basic_io(clean_db: str) -> None:

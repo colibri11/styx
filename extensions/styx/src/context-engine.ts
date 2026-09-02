@@ -254,7 +254,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
     info: {
       id: "styx",
       name: "Styx",
-      version: "0.4.0",
+      version: "0.5.0",
       ownsCompaction,
       acceptedHostParams: ["sessionTarget", "runtimeSettings", "runtimeContext"],
       transcriptSemantics: {

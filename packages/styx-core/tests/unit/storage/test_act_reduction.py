@@ -133,6 +133,34 @@ def _prompt_posture() -> dict:
     }
 
 
+def _prompt_observation(
+    *,
+    observation_id: uuid.UUID | None = None,
+    sequence: int = 0,
+    content: str = "The result became visible.",
+) -> dict:
+    return {
+        "observation_id": str(observation_id or uuid.uuid4()),
+        "observation_status": "canonical",
+        "source_id": "test-monitor",
+        "source_stream": "main",
+        "source_sequence": sequence,
+        "observation_key": f"difference-{sequence}",
+        "difference_kind": "external_difference",
+        "content": content,
+        "salience": 0.8,
+        "confidence": 0.9,
+        "reducer_name": "test-difference-reducer",
+        "reducer_version": "1",
+        "correlation_status": "uncorrelated",
+        "action_ordinal": None,
+        "action_event_id": None,
+        "source_observed_at": None,
+        "ingested_at": "2026-09-02T00:00:00+00:00",
+        "late": False,
+    }
+
+
 def _parse_renderer_prompt(prompt: str) -> dict:
     return _model_visible_snapshot({"system_prompt_addition": prompt})
 
@@ -142,19 +170,13 @@ def _prompt_body(prompt: str) -> dict:
 
 
 def test_model_visible_snapshot_accepts_full_renderer_shape() -> None:
-    consequence_id = uuid.uuid4()
+    observation_id = uuid.uuid4()
     source_act_id = uuid.uuid4()
     trace_id = uuid.uuid4()
     prompt = build_system_prompt_addition(
         will=_prompt_will(),
         cognitive_posture=_prompt_posture(),
-        pending=[{
-            "consequence_id": str(consequence_id),
-            "source_act_id": str(source_act_id),
-            "ordinal": 0,
-            "kind": "external_difference",
-            "content": "The result became visible.",
-        }],
+        pending=[_prompt_observation(observation_id=observation_id)],
         traces=[{
             "memory_id": str(trace_id),
             "role": "constraint",
@@ -181,7 +203,7 @@ def test_model_visible_snapshot_accepts_full_renderer_shape() -> None:
     assert visible["carrier"]["text"] == _prompt_will()["carrier_text"]
     assert visible["carrier"]["causal_root_version"] == 7
     assert visible["cognitive_posture"] == _prompt_posture()
-    assert visible["presented_consequence_ids"] == [str(consequence_id)]
+    assert visible["presented_observation_ids"] == [str(observation_id)]
     assert visible["trace_coordinates"][0]["memory_id"] == str(trace_id)
 
 
@@ -190,13 +212,10 @@ def test_model_visible_snapshot_accepts_renderer_detail_drop_with_whole_carrier(
     prompt = build_system_prompt_addition(
         will=_prompt_will(carrier),
         cognitive_posture={f"pressure-{index}": "p" * 1_000 for index in range(16)},
-        pending=[{
-            "consequence_id": str(uuid.uuid4()),
-            "source_act_id": str(uuid.uuid4()),
-            "ordinal": index,
-            "kind": "external_difference",
-            "content": "c" * 512,
-        } for index in range(4)],
+        pending=[
+            _prompt_observation(sequence=index, content="c" * 512)
+            for index in range(4)
+        ],
         traces=[{
             "memory_id": str(uuid.uuid4()),
             "role": "constraint",
@@ -232,13 +251,10 @@ def test_model_visible_snapshot_accepts_compact_renderer_shape(
     prompt = build_system_prompt_addition(
         will=_prompt_will(carrier),
         cognitive_posture={f"pressure-{index}": "p" * 1_000 for index in range(16)},
-        pending=[{
-            "consequence_id": str(uuid.uuid4()),
-            "source_act_id": str(uuid.uuid4()),
-            "ordinal": index,
-            "kind": "external_difference",
-            "content": "c" * 512,
-        } for index in range(4)],
+        pending=[
+            _prompt_observation(sequence=index, content="c" * 256)
+            for index in range(2)
+        ],
         traces=[],
     )
 
@@ -273,13 +289,10 @@ def test_model_visible_snapshot_accepts_stale_renderer_shapes(
         posture = {
             f"pressure-{index}": "p" * 1_000 for index in range(16)
         }
-        pending = [{
-            "consequence_id": str(uuid.uuid4()),
-            "source_act_id": str(uuid.uuid4()),
-            "ordinal": index,
-            "kind": "external_difference",
-            "content": "c" * 512,
-        } for index in range(4)]
+        pending = [
+            _prompt_observation(sequence=index, content="c" * 256)
+            for index in range(2)
+        ]
     will = {
         **_prompt_will(carrier),
         "formed": False,
@@ -605,7 +618,7 @@ def test_load_binds_exact_frozen_snapshot_projection_without_raw_messages(
         assert snapshot["carrier"]["text"].startswith("Retained verification path")
         assert snapshot["cognitive_posture"] == {}
         assert snapshot["continuity_freshness"]["reduction_status"] == "applied"
-        assert snapshot["presented_consequence_ids"] == [str(consequence_id)]
+        assert snapshot["presented_observation_ids"] == [str(consequence_id)]
         assert snapshot["trace_coordinates"] == [{
             "memory_id": str(trace_id),
             "role": "summary",

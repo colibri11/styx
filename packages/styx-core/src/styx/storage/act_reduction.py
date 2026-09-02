@@ -90,6 +90,10 @@ _PROMPT_OPENING = (
 _PROMPT_CLOSING = "\n</styx-cognitive-continuity>"
 _PROMPT_TOP_KEYS = frozenset({
     "technical_projection", "continuity_freshness", "cognitive_posture",
+    "observations", "reconstructed_subjective_traces",
+})
+_PROMPT_LEGACY_TOP_KEYS = frozenset({
+    "technical_projection", "continuity_freshness", "cognitive_posture",
     "pending_consequences", "reconstructed_subjective_traces",
 })
 _PROMPT_TECHNICAL_FULL_KEYS = frozenset({
@@ -115,7 +119,14 @@ _PROMPT_REDUCTION_STATUSES = frozenset({
     "absent", "applied", "no_residue", "pending", "predecessor_pending",
     "retryable", "running", "terminal_failure", "unscheduled", "untracked",
 })
-_PROMPT_PENDING_KEYS = frozenset({
+_PROMPT_OBSERVATION_KEYS = frozenset({
+    "observation_id", "observation_status", "source_id", "source_stream",
+    "source_sequence", "observation_key", "difference_kind", "content",
+    "salience", "confidence", "reducer_name", "reducer_version",
+    "correlation_status", "action_ordinal", "action_event_id",
+    "source_observed_at", "ingested_at", "late",
+})
+_PROMPT_LEGACY_CONSEQUENCE_KEYS = frozenset({
     "consequence_id", "source_act_id", "ordinal", "kind", "content",
 })
 _PROMPT_TRACE_KEYS = frozenset({
@@ -522,11 +533,22 @@ def _model_visible_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ActReductionConflict("frozen continuity envelope must be an object")
     details_omitted = "details_omitted" in raw
-    expected_top = (
+    raw_keys = set(raw)
+    current_top = (
         _PROMPT_TOP_KEYS | {"details_omitted"}
         if details_omitted else _PROMPT_TOP_KEYS
     )
-    if set(raw) != expected_top:
+    legacy_top = (
+        _PROMPT_LEGACY_TOP_KEYS | {"details_omitted"}
+        if details_omitted else _PROMPT_LEGACY_TOP_KEYS
+    )
+    if raw_keys == current_top:
+        prompt_shape = "observations"
+    elif raw_keys == legacy_top:
+        # One-cycle mixed-version compatibility: acts can finish after a
+        # daemon upgrade with a pre-upgrade, already-frozen preturn envelope.
+        prompt_shape = "legacy_consequences"
+    else:
         raise ActReductionConflict("frozen continuity fields do not match allowlist")
     if details_omitted and raw["details_omitted"] is not True:
         raise ActReductionConflict("details_omitted must be true when present")
@@ -534,7 +556,9 @@ def _model_visible_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     technical = raw.get("technical_projection")
     freshness = raw.get("continuity_freshness")
     posture = raw.get("cognitive_posture")
-    pending = raw.get("pending_consequences")
+    observations = raw.get(
+        "observations" if prompt_shape == "observations" else "pending_consequences"
+    )
     traces = raw.get("reconstructed_subjective_traces")
     if not isinstance(technical, dict):
         raise ActReductionConflict("technical_projection fields do not match allowlist")
@@ -559,8 +583,8 @@ def _model_visible_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ActReductionConflict("continuity_freshness fields do not match allowlist")
     if not isinstance(posture, dict) or set(posture) - _POSTURE_KEYS:
         raise ActReductionConflict("cognitive_posture fields do not match allowlist")
-    if not isinstance(pending, list) or len(pending) > MAX_SNAPSHOT_PRESENTED:
-        raise ActReductionConflict("pending_consequences is not bounded")
+    if not isinstance(observations, list) or len(observations) > MAX_SNAPSHOT_PRESENTED:
+        raise ActReductionConflict("observations is not bounded")
     if not isinstance(traces, list) or len(traces) > MAX_SNAPSHOT_TRACES:
         raise ActReductionConflict("reconstructed traces are not bounded")
     if type(technical.get("formed")) is not bool or type(
@@ -669,31 +693,117 @@ def _model_visible_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ActReductionConflict("continuity JSON projection is invalid")
 
     presented_ids: list[str] = []
-    pending_content_limit = (
-        128 if technical_shape in {"compact", "withheld"}
-        else 256 if details_omitted
-        else 512
-    )
-    for item in pending:
-        if not isinstance(item, dict) or set(item) != _PROMPT_PENDING_KEYS:
-            raise ActReductionConflict("pending consequence fields do not match allowlist")
-        ids = _snapshot_uuid_list([item.get("consequence_id")], limit=1)
-        source_ids = _snapshot_uuid_list([item.get("source_act_id")], limit=1)
-        ordinal = item.get("ordinal")
+    for item in observations:
+        if prompt_shape == "legacy_consequences":
+            if (
+                not isinstance(item, dict)
+                or set(item) != _PROMPT_LEGACY_CONSEQUENCE_KEYS
+            ):
+                raise ActReductionConflict(
+                    "legacy consequence fields do not match allowlist"
+                )
+            ids = _snapshot_uuid_list([item.get("consequence_id")], limit=1)
+            source_ids = _snapshot_uuid_list([item.get("source_act_id")], limit=1)
+            ordinal = item.get("ordinal")
+            kind = item.get("kind")
+            content = item.get("content")
+            if (
+                not ids
+                or not source_ids
+                or isinstance(ordinal, bool)
+                or not isinstance(ordinal, int)
+                or ordinal < 0
+                or not isinstance(kind, str)
+                or not 1 <= len(kind) <= 64
+                or not isinstance(content, str)
+                or len(content) > 512
+            ):
+                raise ActReductionConflict("legacy consequence coordinate is invalid")
+            if ids[0] in presented_ids:
+                raise ActReductionConflict("legacy consequence ids must be unique")
+            presented_ids.append(ids[0])
+            continue
+        if not isinstance(item, dict) or set(item) != _PROMPT_OBSERVATION_KEYS:
+            raise ActReductionConflict("observation fields do not match allowlist")
+        ids = _snapshot_uuid_list([item.get("observation_id")], limit=1)
+        status = item.get("observation_status")
+        difference_kind = item.get("difference_kind")
+        content = item.get("content")
+        ingested_at = item.get("ingested_at")
         if (
             not ids
-            or not source_ids
-            or isinstance(ordinal, bool)
-            or not isinstance(ordinal, int)
-            or ordinal < 0
-            or not isinstance(item.get("kind"), str)
-            or len(item["kind"]) > 64
-            or not isinstance(item.get("content"), str)
-            or len(item["content"]) > pending_content_limit
+            or status not in {"canonical", "legacy"}
+            or not isinstance(difference_kind, str)
+            or not 1 <= len(difference_kind) <= 64
+            or not isinstance(content, str)
+            or len(content) > 512
+            or not isinstance(ingested_at, str)
+            or not 1 <= len(ingested_at) <= 64
+            or type(item.get("late")) is not bool
         ):
-            raise ActReductionConflict("pending consequence coordinate is invalid")
+            raise ActReductionConflict("observation coordinate is invalid")
+        if status == "canonical":
+            for key, maximum in (
+                ("source_id", 256),
+                ("source_stream", 256),
+                ("observation_key", 256),
+                ("reducer_name", 128),
+                ("reducer_version", 64),
+            ):
+                value = item.get(key)
+                if not isinstance(value, str) or not 1 <= len(value) <= maximum:
+                    raise ActReductionConflict(f"observation.{key} is invalid")
+            sequence = item.get("source_sequence")
+            if (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or sequence < 0
+            ):
+                raise ActReductionConflict("observation.source_sequence is invalid")
+            for key in ("salience", "confidence"):
+                value = item.get(key)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or not 0.0 <= float(value) <= 1.0
+                ):
+                    raise ActReductionConflict(f"observation.{key} is invalid")
+            if item.get("correlation_status") not in {
+                "uncorrelated", "pending", "resolved", "conflict",
+            }:
+                raise ActReductionConflict(
+                    "observation.correlation_status is invalid"
+                )
+        else:
+            nullable = {
+                "source_id", "source_stream", "source_sequence",
+                "observation_key", "salience", "confidence", "reducer_name",
+                "reducer_version", "action_ordinal", "action_event_id",
+                "source_observed_at",
+            }
+            if any(item.get(key) is not None for key in nullable) or (
+                item.get("correlation_status") != "legacy"
+            ):
+                raise ActReductionConflict("legacy observation projection is invalid")
+        action_ordinal = item.get("action_ordinal")
+        if action_ordinal is not None and (
+            isinstance(action_ordinal, bool)
+            or not isinstance(action_ordinal, int)
+            or action_ordinal < 0
+        ):
+            raise ActReductionConflict("observation.action_ordinal is invalid")
+        for key in ("action_event_id", "source_observed_at"):
+            value = item.get(key)
+            if value is not None and (
+                not isinstance(value, str)
+                or not 1 <= len(value) <= (
+                    256 if key == "action_event_id" else 64
+                )
+            ):
+                raise ActReductionConflict(f"observation.{key} is invalid")
         if ids[0] in presented_ids:
-            raise ActReductionConflict("pending consequence ids must be unique")
+            raise ActReductionConflict("observation ids must be unique")
         presented_ids.append(ids[0])
 
     visible_traces: list[dict[str, Any]] = []
@@ -747,7 +857,7 @@ def _model_visible_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
         },
         "cognitive_posture": safe_posture,
         "continuity_freshness": safe_freshness,
-        "presented_consequence_ids": presented_ids,
+        "presented_observation_ids": presented_ids,
         "trace_coordinates": visible_traces,
     }
 
@@ -772,9 +882,9 @@ def load_act_reduction_input(
 ) -> dict[str, Any] | None:
     """Load the bounded/redacted evidence envelope for exactly one agent's act.
 
-    ``presented_observations`` are prior consequences actually acknowledged by
-    this act.  Consequences emitted by this same act (including tool results)
-    are intentionally not treated as future-world observations.
+    ``presented_observations`` come from the immutable payload of the exact
+    presentation consumed by this act.  Source-row changes and same-act tool
+    events therefore cannot be replayed as future-world observations.
     """
     agent_id = _validate_agent_id(agent_id)
     act_uuid = _as_uuid(act_id, "act_id")
@@ -799,20 +909,17 @@ def load_act_reduction_input(
 
         cur.execute(
             "SELECT c.id AS observation_id,c.act_id AS source_act_id,c.ordinal,"
-            "       c.kind,c.content,c.metadata,p.snapshot_token,"
-            "       count(*) OVER() AS total_count "
-            "FROM cognitive_consequences c "
-            "LEFT JOIN LATERAL ("
-            "  SELECT cp.snapshot_token FROM cognitive_presentations cp "
-            "  WHERE cp.agent_id=c.agent_id AND cp.consequence_id=c.id "
-            "    AND cp.snapshot_token=%s "
-            "  ORDER BY cp.presented_at DESC LIMIT 1"
-            ") p ON true "
-            "WHERE c.agent_id=%s AND c.acknowledged_by_act_id=%s "
-            "  AND c.act_id<>%s "
-            "ORDER BY c.acknowledged_at,c.created_at,c.ordinal,c.id LIMIT %s",
+            " c.kind,c.content,c.metadata,c.created_at,p.snapshot_token,"
+            " p.presented_payload,p.payload_hash,p.presentation_version,"
+            " count(*) OVER() AS total_count "
+            "FROM cognitive_presentations p "
+            "JOIN cognitive_consequences c "
+            " ON (c.id,c.agent_id)=(p.consequence_id,p.agent_id) "
+            "WHERE p.snapshot_token=%s AND p.agent_id=%s "
+            "AND c.acknowledged_by_act_id=%s "
+            "ORDER BY p.presented_at,p.consequence_id LIMIT %s",
             (
-                act["input_snapshot_token"], agent_id, act_uuid, act_uuid,
+                act["input_snapshot_token"], agent_id, act_uuid,
                 MAX_OBSERVATIONS + 1,
             ),
         )
@@ -845,21 +952,48 @@ def load_act_reduction_input(
         }
         for row in raw_actions[:MAX_ACTIONS]
     ]
-    observations = [
-        {
+    observations: list[dict[str, Any]] = []
+    for row in raw_observations[:MAX_OBSERVATIONS]:
+        payload = row["presented_payload"]
+        if isinstance(payload, dict):
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            if (
+                row["presentation_version"] != "observation_presentation_v1"
+                or hashlib.sha256(encoded).hexdigest() != row["payload_hash"]
+            ):
+                raise ActReductionConflict(
+                    "consumed observation presentation hash mismatch"
+                )
+            observations.append(dict(payload))
+            continue
+        # Mixed-version row: preserve old evidence without inventing reducer
+        # provenance.  New snapshots always freeze the canonical shape.
+        observations.append({
             "observation_id": str(row["observation_id"]),
-            "source_act_id": str(row["source_act_id"]),
-            "ordinal": int(row["ordinal"]),
-            "kind": str(row["kind"])[:64],
-            "content": redact_journal_text(row["content"], limit=8000),
-            "metadata": redact_journal_metadata(row["metadata"] or {}),
-            "presented_snapshot_token": (
-                str(row["snapshot_token"])[:128]
-                if row["snapshot_token"] is not None else None
-            ),
-        }
-        for row in raw_observations[:MAX_OBSERVATIONS]
-    ]
+            "observation_status": "legacy",
+            "source_id": None,
+            "source_stream": None,
+            "source_sequence": None,
+            "observation_key": None,
+            "difference_kind": str(row["kind"])[:64],
+            "content": redact_journal_text(row["content"], limit=512),
+            "salience": None,
+            "confidence": None,
+            "reducer_name": None,
+            "reducer_version": None,
+            "correlation_status": "legacy",
+            "action_ordinal": None,
+            "action_event_id": None,
+            "source_observed_at": None,
+            "ingested_at": row["created_at"].isoformat(),
+            "late": False,
+        })
     return {
         "agent_id": agent_id,
         "act_id": str(act["id"]),
