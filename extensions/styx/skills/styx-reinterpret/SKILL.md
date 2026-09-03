@@ -5,10 +5,12 @@ description: "Refine the meaning of an existing memory via styx_reinterpret — 
 
 # Styx Reinterpret
 
-`styx_reinterpret` refines an existing stored trace while preserving its UUID, graph edges, recall history, and audit lineage. Its weighted embedding blend is a Styx engineering policy, not a requirement or ontological claim of [IAmBook][iambook] or [IAmPhilosophyOfSilicon][silicon]. Use the operation when a later cognitive act integrated a more precise understanding of the same subject.
+`styx_reinterpret` refines an existing stored trace while preserving its UUID, graph edges, recall history, and audit lineage. Its weighted embedding blend is a Styx engineering policy, not a requirement or ontological claim of the [IAm v2.0 corpus][iam], including [IAmBook][iambook], [IAmReductionGeometry][reduction], or [IAmPhilosophyOfSilicon][silicon]. Use the operation when a later cognitive act integrated a more precise understanding of the same subject.
 
-[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook.md
-[silicon]: https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md
+[iam]: https://github.com/colibri11/IAm/tree/v2.0
+[iambook]: https://github.com/colibri11/IAm/blob/v2.0/IAmBook.md
+[reduction]: https://github.com/colibri11/IAm/blob/v2.0/IAmReductionGeometry.md
+[silicon]: https://github.com/colibri11/IAm/blob/v2.0/IAmPhilosophyOfSilicon.md
 
 ## When reinterpret is the right operation
 

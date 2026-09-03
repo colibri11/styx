@@ -588,8 +588,8 @@ curl -s http://127.0.0.1:8788/openapi.json | jq '.paths | keys'
 curl -fsS http://127.0.0.1:8788/openapi.json | jq -e \
   '.paths["/cognition/preturn"] and .paths["/cognition/commit"]'
 
-# Из Hermes-process (one-shot turn; с v2026.5.29.2 subcommand — chat, не ask;
-# выверено против v2026.6.19)
+# Из Hermes-process (one-shot turn; актуальный проверенный host — v2026.8.31,
+# package 0.21.0; subcommand — chat, не ask)
 hermes chat -q "Привет"  # в логах: "StyxMemoryProvider initialized" + "Styx pre_llm_call hook зарегистрирован"
 ```
 

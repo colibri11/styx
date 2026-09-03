@@ -1,5 +1,8 @@
 # styx — OpenClaw plugin (TypeScript)
 
+Текущая версия плагина: **0.7.0** (репозиторный релиз
+[`v1.0.16`](https://github.com/colibri11/styx/releases/tag/v1.0.16)).
+
 OpenClaw plugin под `~/.openclaw/plugins/styx/`. Подключает Styx-core
 (FastAPI HTTP API daemon) к OpenClaw gateway: tools (`api.registerTool`) и
 durable context engine (`api.registerContextEngine`).
@@ -45,7 +48,7 @@ social surface остаётся deny-by-default.
 
 Архитектурный контракт — в корневом `README.md` и `docs/HTTP_API.md`.
 
-## Связь с docker-стиком
+## Связь с Docker-стеком
 
 Эта папка bind-mount'ится в openclaw-контейнеры как
 `/home/node/.openclaw/plugins/styx:rw`:
@@ -70,7 +73,8 @@ extensions/styx/
 ├── skills/                # LLM runbook'и (мини-волна 26.6)
 │   ├── styx-capture/SKILL.md      # когда вызывать styx_store
 │   ├── styx-recall/SKILL.md       # когда explicit query (после automatic block)
-│   └── styx-reinterpret/SKILL.md  # переосмысление как weighted blend
+│   ├── styx-reinterpret/SKILL.md  # переосмысление как weighted blend
+│   └── styx-ingest/SKILL.md       # document file → cited archive
 ├── dist/                  # tsc output
 └── scripts/               # contract tests (host integration в styx-core)
 ```
@@ -88,7 +92,15 @@ extensions/styx/
   `memory_domain=external_evidence`, `line_eligible=false`, а dedup retry её
   не дублирует.
 
-Онтологический источник — [IAmBook.md](https://github.com/colibri11/IAm/blob/main/IAmBook.md), прикладные границы — [IAmPhilosophyOfSilicon.md](https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md). Скиллы описывают только actually-implemented инженерное поведение; каждый field соответствует tool factory в `src/tools/*.ts`.
+Концептуальный корпус зафиксирован на
+[IAm v2.0](https://github.com/colibri11/IAm/tree/v2.0): главный трактат
+[«Я есть. Я личность»](https://github.com/colibri11/IAm/blob/v2.0/IAmBook.md),
+[«Онтология различения»](https://github.com/colibri11/IAm/blob/v2.0/IAmOntologyOfDistinction.md),
+[«Геометрия редукции»](https://github.com/colibri11/IAm/blob/v2.0/IAmReductionGeometry.md)
+и прикладная
+[«Философия Кремния»](https://github.com/colibri11/IAm/blob/v2.0/IAmPhilosophyOfSilicon.md).
+Скиллы описывают только actually-implemented инженерное поведение; каждый
+field соответствует tool factory в `src/tools/*.ts`.
 
 ## Sanity-check (после `docker compose up -d --wait`)
 

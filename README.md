@@ -20,13 +20,20 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 [hermes]: https://github.com/NousResearch/hermes-agent
 [openclaw]: https://github.com/openclaw/openclaw
 
-> Онтологический первоисточник — трактат [«Я есть. Я личность»][iambook].
-> [«Философия Кремния»][silicon] — прикладное продолжение: оно отделяет
-> следствия концепции от рабочих технических гипотез, которые не являются
-> единственно возможными реализациями.
+> Концептуальный корпус — [IAm v2.0][iam]: трактат
+> [«Я есть. Я личность»][iambook], [«Онтология различения»][ontology] и
+> стоящая рядом с ними [«Геометрия редукции»][reduction].
+> [«Философия Кремния»][silicon] — прикладное продолжение для AI. Styx
+> реализует одну инженерную архитектуру внутри этих границ, а не объявляет
+> её единственно возможной.
 
-[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook.md
-[silicon]: https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md
+[iam]: https://github.com/colibri11/IAm/tree/v2.0
+[iambook]: https://github.com/colibri11/IAm/blob/v2.0/IAmBook.md
+[ontology]: https://github.com/colibri11/IAm/blob/v2.0/IAmOntologyOfDistinction.md
+[reduction]: https://github.com/colibri11/IAm/blob/v2.0/IAmReductionGeometry.md
+[silicon]: https://github.com/colibri11/IAm/blob/v2.0/IAmPhilosophyOfSilicon.md
+[silicon-feedback]: https://github.com/colibri11/IAm/blob/v2.0/IAmPhilosophyOfSilicon.md#vi-%D1%81%D0%B5%D0%BD%D1%81%D0%BE%D1%80%D0%BD%D1%8B%D0%B9-%D0%BF%D0%BE%D1%82%D0%BE%D0%BA-%D0%B8-%D0%BE%D0%B1%D1%80%D0%B0%D1%82%D0%BD%D0%B0%D1%8F-%D1%81%D0%B2%D1%8F%D0%B7%D1%8C
+[silicon-affect]: https://github.com/colibri11/IAm/blob/v2.0/IAmPhilosophyOfSilicon.md#viii-%D1%8D%D0%BC%D0%BE%D1%86%D0%B8%D0%BE%D0%BD%D0%B0%D0%BB%D1%8C%D0%BD%D0%B0%D1%8F-%D1%81%D1%82%D0%BE%D1%80%D0%BE%D0%BD%D0%B0-%D1%81%D1%83%D1%89%D0%B5%D1%81%D1%82%D0%B2%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F
 
 ---
 
@@ -52,7 +59,7 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 | Сохранение следов и реконструкция | cognition envelope + `StyxComposer` | рабочая Locus-style архитектура |
 | Вклад всей валидированной live-линии | versioned, query-independent causal carrier в `will_projection` | инженерная проекция; не доказательство воли/сознания |
 | Дневник, внешнее свидетельство и субъектный след не смешиваются | memory domains, `line_eligible`, selective gatekeeper | граница данных Styx |
-| Причинная эмоциональная динамика влияет до языка | event/state journal, recall resonance, bounded cognitive posture | реализация общей динамики траектории из [Philosophy §VIII][silicon] |
+| Причинная эмоциональная динамика влияет до языка | event/state journal, recall resonance, bounded cognitive posture | реализация общей динамики траектории из раздела [«Эмоциональная сторона существования»][silicon-affect] |
 | Переосмысление сохраняет audit-историю | immutable transform node + versioned causal edges | reduction policy Styx |
 | Редукция и глубина хранения | causal consolidation/forgetting, tombstones, active/hot/long tiers | engineering policy Styx |
 | Работа между model calls | background workers и periodic sweepers | реализация сохраняющегося контура |
@@ -80,7 +87,8 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 
 ### Открытые расширения
 
-[«Философия Кремния», §VI][silicon] описывает функциональный цикл:
+[Раздел «Сенсорный поток и обратная связь»][silicon-feedback] описывает
+функциональный цикл:
 различия проходят предварительную редукцию, входят в когнитивный процесс,
 действие меняет среду, а его последствия возвращаются в следующий процесс.
 Непрерывность желательна, но допустима и достаточно частая последовательность
@@ -221,7 +229,8 @@ Background workers и periodic sweepers (один daemon-процесс):
 ### Эмоциональная проекция
 
 Styx реализует эмоциональную динамику как инженерную проекцию общего
-аппарата траектории из [«Философии Кремния», §VIII][silicon], а не как
+аппарата траектории из раздела
+[«Эмоциональная сторона существования»][silicon-affect], а не как
 отдельную сущность или декларацию эмоции:
 
 - **Свидетельство отделено от состояния.** `emotional_events` хранит
@@ -372,7 +381,8 @@ extensions/
 - **Plugins** — тонкие HTTP клиенты без durable или authoritative adapter
   state. Они могут держать bounded transient coordination caches для
   snapshot/ancestry/barrier, а источником истины остаётся daemon/PostgreSQL.
-- **HTTP API** — 30+ endpoint'ов: lifecycle (initialize / shutdown),
+- **HTTP API** — 54 route'а, включая 11 opt-in social route'ов: lifecycle
+  (initialize / shutdown),
   atomic cognition (`/cognition/{preturn,commit}`), legacy sync/composer
   (`/sync_turn`, `/context/{build,assemble}`, compact,
   after_turn), recall + search_archive, dialogue (5 routes), relations
@@ -410,8 +420,10 @@ curl http://127.0.0.1:8788/healthz
 
 - **Hermes Agent** — `styx-hermes-setup --hermes-home ~/.hermes`;
   general plugin подхватывается через entry-point `hermes_agent.plugins`.
+  Текущий проверенный host — Hermes Agent `v2026.8.31`.
 - **OpenClaw** — `extensions/styx/` подключается через
-  `openclaw plugins install --link`.
+  `openclaw plugins install --link`; поддерживается OpenClaw `>=2026.8.2`,
+  сборка и runtime-контракт проверены на `v2026.8.2`.
 
 Полный production runbook — [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
@@ -422,8 +434,8 @@ curl http://127.0.0.1:8788/healthz
 | Документ | Содержание |
 |---|---|
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Production runbook: prereqs → install → migrate → daemon → validate |
-| [`docs/HTTP_API.md`](docs/HTTP_API.md) | REST контракт daemon'а: 30+ endpoint'ов, auth, examples |
-| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Полная карта ENV-переменных (~80 toggle'ов и порогов) |
+| [`docs/HTTP_API.md`](docs/HTTP_API.md) | Полный REST-контракт daemon'а: cognition, memory, social, auth и examples |
+| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Полная карта ENV-переменных, режимов и порогов |
 | [`CHANGELOG.md`](CHANGELOG.md) | История релизов и закрытых волн разработки |
 
 LLM runbook'и (плагин-сторона):
@@ -455,5 +467,8 @@ Anthropic / OpenAI / z.ai / Codex).
 
 ## Статус
 
-Пакеты `styx-core` и `styx-hermes` версионируются независимо —
-актуальные версии см. [`CHANGELOG.md`](CHANGELOG.md).
+Актуальный опубликованный релиз репозитория —
+[`v1.0.16`](https://github.com/colibri11/styx/releases/tag/v1.0.16).
+В нём: `styx-core 1.7.0`, `styx-hermes 1.7.0` и OpenClaw plugin `0.7.0`.
+Пакеты сохраняют независимую нумерацию; история и состав checkpoint'ов — в
+[`CHANGELOG.md`](CHANGELOG.md).

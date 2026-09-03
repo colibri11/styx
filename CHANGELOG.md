@@ -7,11 +7,12 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
-## [Unreleased — prepared: styx-core 1.7.0 / styx-hermes 1.7.0 / OpenClaw 0.7.0]
+## [styx-core 1.7.0 / styx-hermes 1.7.0 / OpenClaw 0.7.0] — 2026-09-03
 
-Подготовлено, но не опубликовано: изолированный контур scoped social evidence
-с явными участниками, областями, свидетельствами и разрешениями. Версии не
-означают наличие tag/release.
+Опубликовано в репозиторном релизе
+[`v1.0.16`](https://github.com/colibri11/styx/releases/tag/v1.0.16):
+изолированный контур scoped social evidence с явными участниками, областями,
+свидетельствами и разрешениями.
 
 ### Добавлено
 
@@ -58,7 +59,7 @@
 - Cross-cutting deterministic audit Waves 38–42 закрыт. Опциональный
   последовательный SGLang probe достиг `/v1/*`, но bounded response завершился
   невалидным JSON (`schema_invalid`); deterministic gate не затронут.
-- Push/tag/release не выполнялись.
+- Опубликованы commit `0795ece`, tag `v1.0.16` и GitHub Release.
 
 ## [Prepared checkpoint — styx-core 1.6.0 / styx-hermes 1.6.0 / OpenClaw 0.6.0]
 

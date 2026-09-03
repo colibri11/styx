@@ -1,5 +1,10 @@
 # styx-hermes
 
+Текущая версия пакета: **1.7.0** (репозиторный релиз
+[`v1.0.16`](https://github.com/colibri11/styx/releases/tag/v1.0.16)).
+Адаптер проверен с Hermes Agent **v2026.8.31**; при смене host-версии нужен
+повторный drift-check.
+
 Тонкая Hermes-обёртка для styx-core. Регистрирует слоты Hermes
 (`MemoryProvider`, два `Transport`, `pre_llm_call` и `post_llm_call` hooks)
 и проксирует все вызовы по HTTP в `styx-core` daemon.
@@ -41,5 +46,6 @@ Hermes читает отдельный `STYX_SOCIAL_TOKEN` и передаёт �
 `X-Styx-Social-Token`; verified act дополнительно получает exact-body HMAC
 подпись. Обычный daemon bearer не заменяет этот credential.
 
-См. корневой `README.md` репо для установочного пути и
-`docs/HTTP_API.md` для контракта API.
+См. корневой [`README.md`](../../README.md) для установочного пути,
+[`docs/HTTP_API.md`](../../docs/HTTP_API.md) для контракта API и
+[`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) для порядка обновления.

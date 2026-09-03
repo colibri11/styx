@@ -19,14 +19,19 @@ the surrounding system is a person or conscious.
 | `styx_ingest_experience` | external-evidence write | NO subjective recall merely by storage | ≤2400 chars | Telegram/email/sensor pipeline |
 | `styx_ingest_document` | **file archive** | **Body: NO — pull-only via search_archive; one external-evidence act marker is non-eligible** | up to ingest_doc_max_bytes (default 50 MiB) | User attached a PDF/DOCX/XLSX/MD/TXT |
 
-The current conceptual sources are [IAmBook][iambook] and its applied
-continuation [IAmPhilosophyOfSilicon][silicon]. Styx implements their boundary
-with explicit domains: diary records what passed through, archive stores cited
-external material, and only validated subjective traces may enter the live
-line. These tables and gates are one implementation policy, not ontology.
+The current conceptual corpus is [IAm v2.0][iam]: [IAmBook][iambook],
+[IAmOntologyOfDistinction][ontology], [IAmReductionGeometry][reduction], and
+the applied continuation [IAmPhilosophyOfSilicon][silicon]. Styx implements
+its boundary with explicit domains: diary records what passed through, archive
+stores cited external material, and only validated subjective traces may enter
+the live line. These tables and gates are one implementation policy, not
+ontology.
 
-[iambook]: https://github.com/colibri11/IAm/blob/main/IAmBook.md
-[silicon]: https://github.com/colibri11/IAm/blob/main/IAmPhilosophyOfSilicon.md
+[iam]: https://github.com/colibri11/IAm/tree/v2.0
+[iambook]: https://github.com/colibri11/IAm/blob/v2.0/IAmBook.md
+[ontology]: https://github.com/colibri11/IAm/blob/v2.0/IAmOntologyOfDistinction.md
+[reduction]: https://github.com/colibri11/IAm/blob/v2.0/IAmReductionGeometry.md
+[silicon]: https://github.com/colibri11/IAm/blob/v2.0/IAmPhilosophyOfSilicon.md
 
 ## When to call `styx_ingest_document`
 
