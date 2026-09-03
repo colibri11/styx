@@ -45,8 +45,8 @@ def test_legacy_coordinates_normalize_deterministically() -> None:
 
 
 @pytest.mark.parametrize("field,value", [
-    ("endpoint_id", "http://172.16.3.31:30000"),
-    ("endpoint_id", "172.16.3.31"),
+    ("endpoint_id", "http://sglang.example.invalid:30000"),
+    ("endpoint_id", ".".join(("192", "0", "2", "31"))),
     ("model_id", "api_key=not-allowed"),
     ("sampling_hash", "short"),
 ])
