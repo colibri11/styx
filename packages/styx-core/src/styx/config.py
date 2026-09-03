@@ -294,6 +294,7 @@ class StyxConfig:
     http_bind: str = "127.0.0.1"
     http_port: int = 8788
     http_token: str | None = None
+    social_principals_file: str | None = None
     # Postgres connection pool (D20). pg_pool_min — минимум живых
     # connections, pg_pool_max — верхняя граница. FastAPI handler
     # acquires conn per request, release back to pool на exit.
@@ -560,6 +561,7 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         "http_bind",
         "http_port",
         "http_token",
+        "social_principals_file",
         "pg_pool_min",
         "pg_pool_max",
         "daemon_url",
@@ -868,6 +870,7 @@ def load(hermes_home: str | os.PathLike[str] | None = None) -> StyxConfig:
         http_bind=str(merged.get("http_bind", "127.0.0.1")),
         http_port=int(merged.get("http_port", 8788)),
         http_token=_optional_str(merged.get("http_token")),
+        social_principals_file=_optional_str(merged.get("social_principals_file")),
         pg_pool_min=int(merged.get("pg_pool_min", 2)),
         pg_pool_max=int(merged.get("pg_pool_max", 10)),
         daemon_url=str(merged.get("daemon_url", "http://127.0.0.1:8788")),
@@ -1488,6 +1491,7 @@ def _read_env() -> dict[str, Any]:
             else None
         ),
         "http_token": os.environ.get("STYX_HTTP_TOKEN"),
+        "social_principals_file": os.environ.get("STYX_SOCIAL_PRINCIPALS_FILE"),
         "pg_pool_min": (
             int(os.environ["STYX_PG_POOL_MIN"])
             if os.environ.get("STYX_PG_POOL_MIN")

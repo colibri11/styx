@@ -21,10 +21,56 @@
 | `STYX_HTTP_BIND` | `127.0.0.1` | Address binding daemon'а. |
 | `STYX_HTTP_PORT` | `8788` | Port HTTP API. |
 | `STYX_HTTP_TOKEN` | — | Bearer-token для всех non-healthz routes. **Обязателен** если `STYX_HTTP_BIND` не loopback (daemon откажется стартовать иначе). |
+| `STYX_SOCIAL_PRINCIPALS_FILE` | — | Путь к отдельному hash-only registry для `/social/*`. Unset отключает social surface deny-by-default. Не заменяет `STYX_HTTP_TOKEN`. |
+| `STYX_SOCIAL_TOKEN` | — | Raw social credential только для Hermes-клиента; daemon его не читает. OpenClaw использует sensitive option `socialToken`. |
 | `STYX_DAEMON_URL` | `http://127.0.0.1:8788` | URL daemon'а для plugin'ов. |
 | `STYX_PG_POOL_MIN` | `1` | Минимум connection'ов в pool. |
 | `STYX_PG_POOL_MAX` | `4` | Максимум connection'ов. |
 | `STYX_SESSION_NAMESPACE` | `default` | Префикс для derived `agent_id` (изоляция инсталляций). |
+
+### Social principal registry
+
+Social routes требуют отдельный `X-Styx-Social-Token`. Его открытое значение
+не хранится в конфиге: registry содержит только lowercase SHA-256 hash,
+разрешённые локальные `agent_ids` и controlled capabilities:
+
+```json
+{
+  "principals": [
+    {
+      "principal_id": "social-operator",
+      "token_sha256": "<64 lowercase hex characters>",
+      "agent_ids": ["agent_demo"],
+      "capabilities": [
+        "social:scope-admin",
+        "social:attest",
+        "social:encounter",
+        "social:read"
+      ]
+    }
+  ]
+}
+```
+
+Registry загружается при старте daemon, ограничен 256 principals и должен
+управляться оператором с файловыми permissions, исключающими чтение другими
+пользователями. Неизвестные поля, невалидные hashes/capabilities и пустые
+agent grants останавливают startup. Principal grant разрешает действовать от
+имени конкретного локального agent, но не открывает social evidence другого
+scope: для cross-principal visibility дополнительно нужен явный durable
+`social_visibility_grant`. Token и путь registry не возвращаются API и не
+должны попадать в логи.
+
+Hermes-клиент принимает raw credential через `STYX_SOCIAL_TOKEN`; OpenClaw —
+через sensitive plugin option `socialToken`. Оба посылают его только в
+`X-Styx-Social-Token` на `/social/*`. Эти client-настройки не заменяют daemon
+registry `STYX_SOCIAL_PRINCIPALS_FILE`. Для `trust_level=verified` Hermes и
+OpenClaw дополнительно вычисляют `X-Styx-Social-Signature` как HMAC-SHA256
+точных UTF-8 bytes JSON body тем же raw social credential. Daemon проверяет
+подпись до записи и хранит только её SHA-256 coordinate; raw token/signature в
+ledger не попадают. Этот HMAC доказывает владение предъявленным credential и
+целостность request body, но не является независимой identity signature или
+механизмом non-repudiation.
 
 ## Embeddings
 

@@ -13,6 +13,24 @@ schema автогенерируется на `GET /openapi.json`, интерак
   случайно открытого endpoint'а.
 - `/healthz`, `/readyz` — без auth всегда (для probe).
 
+### Отдельная авторизация `/social/*`
+
+Social routes дополнительно требуют `X-Styx-Social-Token`. Обычный
+`Authorization: Bearer` по-прежнему обязателен, если настроен
+`STYX_HTTP_TOKEN`, но сам по себе не даёт social-доступ.
+
+Daemon загружает operator-managed JSON registry из
+`STYX_SOCIAL_PRINCIPALS_FILE`. В нём хранятся только SHA-256 token hashes,
+разрешённые `agent_ids` и capabilities `social:scope-admin`, `social:attest`,
+`social:encounter`, `social:read`. Если registry не настроен, весь route family
+возвращает `404`; неверный/отсутствующий social token — `401`; попытка выйти за
+agent/capability grant — `404`, чтобы не давать enumeration oracle.
+
+Registry grant на source agent позволяет owner-like чтение его локального
+ledger. Cross-principal visibility и delivery дополнительно требуют живой
+durable grant на конкретные scope, capability и evidence class. Он не
+наследуется из `/relations/*` и не переносится между scopes.
+
 ## Opt-in LLM wrap (`?wrap_for_llm=1` / `X-Wrap-For-LLM: 1`)
 
 Волна 30 (memory markers). 11 LLM-facing endpoint'ов (см. список
@@ -116,6 +134,54 @@ materialized carrier; semantic change также продвигает line versi
 mixed-version deployment. Hermes/OpenClaw используют fallback только при
 HTTP `404` от соответствующего cognition endpoint; timeout, `401`, `422` или
 `5xx` являются fail-open ошибкой текущего вызова и не запускают второй writer.
+
+## Scoped social evidence
+
+Social ledger отделён от subjective memory и knowledge graph. Actor обозначает
+локальную identity coordinate, encounter — факт ограниченного контакта, а
+attestation — отдельный явный act с `source_act_id`. Создание actor/encounter,
+текстовая фраза, classifier/model output, self-report или generic graph link не
+создают attestation автоматически.
+
+Pair projection вычисляется только внутри одного `scope_id` и совпадающих
+protocol coordinates. Возможные статусы: `mutual_positive`, `mutual_denied`,
+`unilateral`, `undetermined`, `scope_dissolved`. Это локальный результат
+заданных правил, не глобальный флаг сознания, личности или социального статуса.
+
+| Endpoint | Registry capability | Основные request fields | Response |
+|---|---|---|---|
+| `POST /social/actors` | `social:scope-admin` | `agent_id`, identity namespace/key/kind, evidence hash; optional private label/principal | `actor_id`, `duplicate`, `status` |
+| `POST /social/scopes` | `social:scope-admin` | `agent_id`, scope key, protocol id/version, policy hash | `scope_id`, `duplicate`, `status` |
+| `POST /social/encounters` | `social:encounter` | actor/scope UUIDs, key, direction, channel, evidence hash, confidence и source act/observation | `encounter_id`, `duplicate` |
+| `POST /social/attestations` | `social:attest` | scope/actor UUIDs, key, kind/verdict/protocol, обязательный completed `source_act_id`, bounded evidence/signature metadata, trust | attestation id и projection version/status |
+| `POST /social/attestations/revise` | `social:attest` | тот же contract плюс обязательный `supersedes_attestation_id` | новый append-only attestation и projection |
+| `POST /social/scopes/dissolve` | `social:scope-admin` | `agent_id`, `scope_id` | scope status `dissolved`, `duplicate` |
+| `POST /social/grants` | `social:scope-admin` | key, scope, grantee principal, capability/class; read требует exact `evidence_id` либо projection actor pair; optional expiry | `grant_id`, `duplicate` |
+| `POST /social/grants/revoke` | `social:scope-admin` | `revocation_key`, exact `grant_id` | `grant_id`, `revoked`, `duplicate` |
+| `POST /social/query` | owner `social:read` или exact actor-pair visibility grant | scope и два actor UUID | canonical actor order, projection status/version/policy/time |
+| `POST /social/explain` | owner `social:read` | `agent_id`, `scope_id` | content-free scope coordinates, counts и bounded projections |
+| `POST /social/deliver` | receiver `social:read` + source visibility grant | delivery key, source scope/class/id, `receiving_agent_id` | durable delivery id, observation id, `duplicate` |
+
+Для `trust_level=verified` обязателен `X-Styx-Social-Signature`: lowercase
+HMAC-SHA256 точных UTF-8 bytes JSON body с raw social token как key. Hermes и
+OpenClaw clients вычисляют его автоматически только для явных attestation
+методов. HMAC подтверждает possession credential и целостность body, но не
+является независимой identity signature/non-repudiation. Две reciprocal записи
+одного principal не образуют mutual status.
+
+Все request models запрещают неизвестные поля. Hash fields — 64 lowercase hex;
+UUID coordinates agent-scoped. Идемпотентный повтор с тем же key/payload
+возвращает `duplicate=true`; тот же key с другой семантикой либо несовместимая
+revision/protocol/scope дают `409`. Невалидный shape даёт sanitised `422` без
+echo request values, закрытая или чужая coordinate — generic `404`.
+
+`/social/explain` не возвращает private labels, encounter summaries или raw
+evidence. `/social/deliver` — единственный явный мост в cognition: после обоих
+уровней grant он создаёт bounded preliminary observation и durable receipt.
+Эта запись не попадает напрямую в carrier/prompt; влияние возможно только
+после обычных presentation, consumption и act reduction.
+Текущая authority проверяется до receipt replay: после expiry, revoke или
+dissolution закрывается также exact retry ранее успешного `delivery_key`.
 
 ## Endpoint'ы
 

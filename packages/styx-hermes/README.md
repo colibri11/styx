@@ -35,5 +35,11 @@ Legacy `/pre_llm_inject` и `/affect/observe_turn` + provider `sync_turn`
 snapshot/ancestry и idempotent retry; после рестарта источником истины остаётся
 daemon/PostgreSQL (`styx daemon run`).
 
+Клиент также предоставляет только явные `social_*` methods для scoped social
+ledger. Они не вызываются lifecycle hooks автоматически. Для `/social/*`
+Hermes читает отдельный `STYX_SOCIAL_TOKEN` и передаёт его только как
+`X-Styx-Social-Token`; verified act дополнительно получает exact-body HMAC
+подпись. Обычный daemon bearer не заменяет этот credential.
+
 См. корневой `README.md` репо для установочного пути и
 `docs/HTTP_API.md` для контракта API.

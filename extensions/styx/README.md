@@ -37,6 +37,12 @@ Commit создаёт durable reduction outcome; canonical reducer
 асинхронно выводит 0..4 evidence-bound residues и перестраивает causal
 carrier. Повтор advancement key с изменённым bounded request получает `409`.
 
+Typed client содержит отдельные явные операции scoped social evidence, но ни
+context engine, ни hooks не вызывают их по dialogue/model output. Sensitive
+option `socialToken` посылается только в `X-Styx-Social-Token` на `/social/*`;
+verified act дополнительно подписывается exact-body HMAC. Без credential
+social surface остаётся deny-by-default.
+
 Архитектурный контракт — в корневом `README.md` и `docs/HTTP_API.md`.
 
 ## Связь с docker-стиком

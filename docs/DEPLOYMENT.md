@@ -13,7 +13,7 @@
 
 ## 0. Breaking changes при апгрейде
 
-### Текущий переход: versioned causal graph и migrations 0009–0012
+### Текущий переход: causal continuity и migrations 0009–0014
 
 Core и оба host adapter'а нужно обновлять как один rollout. Миграция
 `0009_cognitive_continuity.sql`:
@@ -71,6 +71,14 @@ versioned causal DAG:
 - carrier-v1 cache инвалидируется и перестраивается из полного active
   node+edge snapshot по carrier v2.
 
+Migration `0014_social_attestations.sql` добавляет отдельный agent-scoped
+social ledger: actors, scopes, encounters, append-only attestations,
+versioned pair projections, exact-target visibility grants, их append-only
+revocation audit и delivery receipts. Он не
+создаёт глобальный статус личности/сознания и не переносит generic knowledge
+graph relations в social state. Никакой backfill из текста, classifier output,
+actor или encounter не выполняется: attestation всегда отдельный явный act.
+
 `STYX_CAUSAL_FORGETTING_ENABLED=0` остаётся безопасным default. Включать его
 следует только после проверки нового carrier на реальных данных и выбора
 retention thresholds из `docs/CONFIGURATION.md`; отсутствие embedding,
@@ -108,9 +116,14 @@ auth, validation или `5xx`.
    `/openapi.json`, включая `/cognition/observations`. Проверить, что
    `/analytics?agent_id=...` содержит causal graph counters, а ready carrier
    сообщает `causal_carrier_v2`.
-4. Обновить `styx-hermes` и OpenClaw plugin, затем перезапустить host
+4. Если нужен social API, до старта daemon подготовить отдельный registry с
+   `principal_id`, SHA-256 hash токена, точными `agent_ids` и минимальными
+   capabilities. Хранить файл вне checkout с доступом только service account,
+   указать `STYX_SOCIAL_PRINCIPALS_FILE` и перезапустить daemon. Без registry
+   `/social/*` должен отвечать `404`; registry перечитывается только при старте.
+5. Обновить `styx-hermes` и OpenClaw plugin, затем перезапустить host
    процессы. Не оставлять mixed-version fallback постоянным режимом.
-5. Выполнить два последовательных хода с tool result. Для Hermes передавать
+6. Выполнить два последовательных хода с tool result. Для Hermes передавать
    физический `host_key` уже в preturn; OpenClaw v2026.8.2 сам доставляет
    accepted advancement key через durable `commitTurn` outbox. Commit должен
    вернуть `reduction_id` и status; второй preturn — явные
@@ -118,6 +131,33 @@ auth, validation или `5xx`.
    появиться в `observations`. Отдельно опубликованный post-act observation
    должен пройти lease/consumption. Повтор commit с тем же body возвращает
    `duplicate=true`, а с изменённым body — `409` без новых rows.
+
+Social credential передаётся только явно авторизованному client: Hermes читает
+`STYX_SOCIAL_TOKEN`, OpenClaw — sensitive option `socialToken`. Он не равен
+`STYX_HTTP_TOKEN` и посылается только заголовком `X-Styx-Social-Token` на
+`/social/*`. Не сохраняйте raw token в registry, tracked compose/config,
+command history или diagnostics. Verified attestation clients автоматически
+добавляют HMAC-SHA256 exact-body подпись в `X-Styx-Social-Signature`; daemon
+не принимает `trust_level=verified` без валидной подписи. Это подтверждение
+владения credential и целостности body, а не независимая identity signature
+или non-repudiation.
+
+Перед включением cross-principal delivery проверьте deny-by-default path:
+
+- owner registry grant разрешает только заявленные agent/capability;
+- transfer имеет отдельный неистёкший и неотозванный visibility grant на
+  точный evidence id либо actor pair;
+- owner-only `/social/explain` возвращает только coordinates/counts/projections без
+  labels, summaries и raw evidence;
+- `/social/deliver` создаёт ровно один receipt и observation при одинаковом
+  retry, пока grant и scope остаются действующими, но ничего не внедряет
+  напрямую в cognitive carrier. Authority проверяется до receipt replay:
+  expiry, revoke или dissolution закрывают и exact retry старого key.
+
+Для мониторинга используйте owner-authorized `/social/explain` либо
+закрытый операторский SQL. Обычный `/analytics` намеренно не содержит social
+counts/status. Не экспортируйте `private_label`, summaries, token hashes,
+evidence refs или identity coordinates в общие metrics/logs.
 
 OpenClaw-плагин требует v2026.8.2: `assemble` сохраняет rich messages и строит
 session-fenced snapshot, а `commitTurn` атомарно и идемпотентно продвигает
@@ -130,6 +170,9 @@ session-fenced snapshot, а `commitTurn` атомарно и идемпотен�
 operation ledger и versioned edges.
 Для rollback возвращайте согласованный snapshot БД либо сохраняйте новый core
 до завершения обратной миграции данных.
+После начала social writes rollback на binary без `0014` не удаляет новые
+таблицы, но прекращает их обслуживание и delivery; сначала остановите social
+clients и сохраните ledger/receipts для последующего совместимого возврата.
 
 ### Исторический переход: causal affect continuity и migration 0008
 

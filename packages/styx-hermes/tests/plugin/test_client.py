@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,14 +16,27 @@ def client_no_token(monkeypatch: pytest.MonkeyPatch) -> StyxCoreClient:
     # В Docker окружении STYX_HTTP_TOKEN может быть в env — тест должен
     # явно сбросить чтобы проверить путь "ни token, ни env".
     monkeypatch.delenv("STYX_HTTP_TOKEN", raising=False)
+    monkeypatch.delenv("STYX_SOCIAL_TOKEN", raising=False)
     return StyxCoreClient(base_url="http://daemon.local:8788", token=None)
 
 
 @pytest.fixture
 def client_with_token(monkeypatch: pytest.MonkeyPatch) -> StyxCoreClient:
     monkeypatch.delenv("STYX_HTTP_TOKEN", raising=False)
+    monkeypatch.delenv("STYX_SOCIAL_TOKEN", raising=False)
     return StyxCoreClient(
         base_url="http://daemon.local:8788", token="test-token-12345"
+    )
+
+
+@pytest.fixture
+def client_with_social_token(monkeypatch: pytest.MonkeyPatch) -> StyxCoreClient:
+    monkeypatch.delenv("STYX_HTTP_TOKEN", raising=False)
+    monkeypatch.delenv("STYX_SOCIAL_TOKEN", raising=False)
+    return StyxCoreClient(
+        base_url="http://daemon.local:8788",
+        token="ordinary-token",
+        social_token="social-principal-token",
     )
 
 
@@ -294,6 +308,220 @@ def test_ready_event_claim_and_resolve_are_explicit_host_primitives(
         assert kwargs["json"]["outcome"] == "deferred"
 
 
+def test_social_token_is_per_request_and_never_reuses_http_bearer(
+    client_with_social_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_with_social_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(200, {"actor_id": "actor-1"})
+        client_with_social_token.social_create_actor(
+            "agent-a",
+            identity_namespace="local",
+            actor_key="actor-a",
+            actor_kind="local_agent",
+            identity_evidence_hash="a" * 64,
+        )
+        social_call = mock_post.call_args
+        assert social_call.args[0].endswith("/social/actors")
+        assert social_call.kwargs["headers"] == {
+            "X-Styx-Social-Token": "social-principal-token"
+        }
+        assert client_with_social_token._session.headers["Authorization"] == (
+            "Bearer ordinary-token"
+        )
+
+        client_with_social_token.sync_turn("agent-a")
+        ordinary_call = mock_post.call_args
+        assert ordinary_call.kwargs["headers"] is None
+
+
+def test_social_methods_are_explicit_and_match_route_payloads(
+    client_with_social_token: StyxCoreClient,
+) -> None:
+    scope_id = "11111111-1111-4111-8111-111111111111"
+    issuer_id = "22222222-2222-4222-8222-222222222222"
+    subject_id = "33333333-3333-4333-8333-333333333333"
+    source_act_id = "44444444-4444-4444-8444-444444444444"
+    prior_attestation_id = "55555555-5555-4555-8555-555555555555"
+    attestation_id = "66666666-6666-4666-8666-666666666666"
+    with patch.object(client_with_social_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(200, {"ok": True})
+        client_with_social_token.social_create_actor(
+            "agent-a",
+            identity_namespace="workspace",
+            actor_key="peer-a",
+            actor_kind="external_agent",
+            identity_evidence_hash="a" * 64,
+            private_label="private label",
+            attestation_principal_id="principal-a",
+        )
+        client_with_social_token.social_create_scope(
+            "agent-a",
+            scope_key="scope-a",
+            protocol_id="protocol-a",
+            protocol_version="1",
+            policy_hash="b" * 64,
+        )
+        client_with_social_token.social_record_encounter(
+            "agent-a",
+            encounter_key="encounter-a",
+            scope_id=scope_id,
+            observer_actor_id=issuer_id,
+            encountered_actor_id=subject_id,
+            direction="inbound",
+            channel_kind="hermes",
+            source_act_id=source_act_id,
+            evidence_hash="c" * 64,
+            confidence=0.8,
+            summary="bounded encounter",
+        )
+        client_with_social_token.social_attest(
+            "agent-a",
+            scope_id=scope_id,
+            issuer_actor_id=issuer_id,
+            subject_actor_id=subject_id,
+            attestation_key="attest-a",
+            verdict="positive",
+            protocol_id="protocol-a",
+            protocol_version="1",
+            source_act_id=source_act_id,
+            source_action_ordinal=2,
+            evidence_refs=[{"source": "action", "ordinal": 2}],
+            trust_level="verified",
+            signature_metadata={"algorithm": "test"},
+        )
+        client_with_social_token.social_revise_attestation(
+            "agent-a",
+            supersedes_attestation_id=prior_attestation_id,
+            scope_id=scope_id,
+            issuer_actor_id=issuer_id,
+            subject_actor_id=subject_id,
+            attestation_key="attest-a-revision",
+            verdict="undetermined",
+            protocol_id="protocol-a",
+            protocol_version="1",
+            source_act_id=source_act_id,
+            trust_level="unverified",
+        )
+        client_with_social_token.social_dissolve_scope(
+            "agent-a", scope_id=scope_id
+        )
+        client_with_social_token.social_create_grant(
+            "agent-a",
+            grant_key="grant-a",
+            scope_id=scope_id,
+            grantee_principal_id="principal-b",
+            capability="social:read",
+            evidence_class="attestation",
+            evidence_id=attestation_id,
+            expires_at="2026-09-03T00:00:00+00:00",
+        )
+        client_with_social_token.social_revoke_grant(
+            "agent-a",
+            revocation_key="grant-a-revoke",
+            grant_id=attestation_id,
+        )
+        client_with_social_token.social_query(
+            "agent-a",
+            scope_id=scope_id,
+            actor_a_id=issuer_id,
+            actor_b_id=subject_id,
+        )
+        client_with_social_token.social_explain(
+            "agent-a",
+            scope_id=scope_id,
+        )
+        client_with_social_token.social_deliver(
+            "agent-a",
+            delivery_key="delivery-a",
+            scope_id=scope_id,
+            receiving_agent_id="agent-b",
+            evidence_class="attestation",
+            evidence_id=attestation_id,
+        )
+
+    calls = mock_post.call_args_list
+    assert [call.args[0].removeprefix("http://daemon.local:8788") for call in calls] == [
+        "/social/actors",
+        "/social/scopes",
+        "/social/encounters",
+        "/social/attestations",
+        "/social/attestations/revise",
+        "/social/scopes/dissolve",
+        "/social/grants",
+        "/social/grants/revoke",
+        "/social/query",
+        "/social/explain",
+        "/social/deliver",
+    ]
+    assert all(
+        call.kwargs["headers"]["X-Styx-Social-Token"]
+        == "social-principal-token"
+        for call in calls
+    )
+    assert calls[2].kwargs["json"] == {
+        "agent_id": "agent-a",
+        "encounter_key": "encounter-a",
+        "scope_id": scope_id,
+        "observer_actor_id": issuer_id,
+        "encountered_actor_id": subject_id,
+        "direction": "inbound",
+        "channel_kind": "hermes",
+        "source_act_id": source_act_id,
+        "source_observation_id": None,
+        "summary": "bounded encounter",
+        "evidence_hash": "c" * 64,
+        "confidence": 0.8,
+    }
+    signed_body = json.loads(calls[3].kwargs["data"])
+    assert signed_body["supersedes_attestation_id"] is None
+    assert len(calls[3].kwargs["headers"]["X-Styx-Social-Signature"]) == 64
+    assert calls[4].kwargs["json"]["supersedes_attestation_id"] == (
+        prior_attestation_id
+    )
+    assert calls[8].kwargs["json"] == {
+        "agent_id": "agent-a",
+        "scope_id": scope_id,
+        "actor_a_id": issuer_id,
+        "actor_b_id": subject_id,
+    }
+    assert calls[9].kwargs["json"] == {
+        "agent_id": "agent-a",
+        "scope_id": scope_id,
+    }
+    assert calls[10].kwargs["json"] == {
+        "agent_id": "agent-a",
+        "delivery_key": "delivery-a",
+        "scope_id": scope_id,
+        "evidence_class": "attestation",
+        "evidence_id": attestation_id,
+        "receiving_agent_id": "agent-b",
+    }
+    forbidden = {"is_conscious", "is_person", "personality"}
+    payloads = [
+        call.kwargs.get("json") or json.loads(call.kwargs["data"])
+        for call in calls
+    ]
+    assert all(not (forbidden & set(payload)) for payload in payloads)
+
+
+def test_social_call_without_social_token_sends_no_principal_header(
+    client_with_token: StyxCoreClient,
+) -> None:
+    with patch.object(client_with_token._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(404, {"detail": "not found"})
+        with pytest.raises(requests.HTTPError):
+            client_with_token.social_query(
+                "agent-a",
+                scope_id="11111111-1111-4111-8111-111111111111",
+                actor_a_id="22222222-2222-4222-8222-222222222222",
+                actor_b_id="33333333-3333-4333-8333-333333333333",
+            )
+        assert mock_post.call_args.kwargs["headers"] is None
+        assert client_with_token._session.headers["Authorization"] == (
+            "Bearer test-token-12345"
+        )
+
+
 def test_5xx_raises(client_no_token: StyxCoreClient) -> None:
     with patch.object(client_no_token._session, "post") as mock_post:
         mock_post.return_value = _mock_response(503, {"detail": "down"})
@@ -325,3 +553,21 @@ def test_default_token_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STYX_HTTP_TOKEN", "env-token")
     c = StyxCoreClient()
     assert c._session.headers.get("Authorization") == "Bearer env-token"
+
+
+def test_default_social_token_from_env_is_not_a_session_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STYX_HTTP_TOKEN", raising=False)
+    monkeypatch.setenv("STYX_SOCIAL_TOKEN", "env-social-token")
+    c = StyxCoreClient(base_url="http://daemon.local:8788")
+    assert "X-Styx-Social-Token" not in c._session.headers
+    with patch.object(c._session, "post") as mock_post:
+        mock_post.return_value = _mock_response(200, {"scope_id": "scope"})
+        c.social_explain(
+            "agent-a",
+            scope_id="11111111-1111-4111-8111-111111111111",
+        )
+    assert mock_post.call_args.kwargs["headers"] == {
+        "X-Styx-Social-Token": "env-social-token"
+    }

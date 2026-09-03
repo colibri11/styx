@@ -14,6 +14,8 @@
 // Типы 1:1 матчат Pydantic models в
 // packages/styx-core/src/styx/http/models.py.
 
+import { createHmac } from "node:crypto";
+
 export type StyxLogger = {
   debug?: (msg: string, ...args: unknown[]) => void;
   info?: (msg: string, ...args: unknown[]) => void;
@@ -41,6 +43,8 @@ export function fmtErr(err: unknown): string {
 export type StyxClientOptions = {
   baseUrl: string;
   httpToken?: string;
+  /** Separate deny-by-default principal credential for `/social/*`. */
+  socialToken?: string;
   timeoutMs?: number;
   logger?: StyxLogger;
   fetchImpl?: typeof fetch;
@@ -851,6 +855,216 @@ export type ConfirmUsageResponse = {
   missing: string[];
 };
 
+// ── scoped social evidence (wave 42) ────────────────────────────────────
+//
+// These are explicit host operations.  The client never derives an
+// attestation from dialogue, model output, actor kind, or an encounter, and
+// exposes no global person/consciousness classification.
+
+export type SocialActorKind =
+  | "local_agent"
+  | "external_agent"
+  | "human"
+  | "collective"
+  | "unknown";
+export type SocialVerdict = "positive" | "negative" | "undetermined";
+export type SocialAttestationKind = "direct" | "self" | "revocation" | "reported";
+export type SocialTrustLevel = "verified" | "unverified";
+export type SocialProjectionStatus =
+  | "mutual_positive"
+  | "mutual_denied"
+  | "unilateral"
+  | "undetermined"
+  | "scope_dissolved";
+
+export type SocialActorRequest = {
+  agent_id: string;
+  identity_namespace: string;
+  actor_key: string;
+  actor_kind: SocialActorKind;
+  private_label?: string | null;
+  identity_evidence_hash: string;
+  attestation_principal_id?: string | null;
+};
+
+export type SocialActorResponse = {
+  actor_id: string;
+  duplicate: boolean;
+  status: "active" | "merged" | "retired";
+};
+
+export type SocialScopeRequest = {
+  agent_id: string;
+  scope_key: string;
+  protocol_id: string;
+  protocol_version: string;
+  policy_hash: string;
+};
+
+export type SocialScopeResponse = {
+  scope_id: string;
+  duplicate: boolean;
+  status: "active" | "dissolved";
+};
+
+export type SocialEncounterRequest = {
+  agent_id: string;
+  encounter_key: string;
+  scope_id: string;
+  observer_actor_id: string;
+  encountered_actor_id: string;
+  direction: "inbound" | "outbound" | "bidirectional";
+  channel_kind: string;
+  source_act_id?: string | null;
+  source_observation_id?: string | null;
+  summary?: string | null;
+  evidence_hash: string;
+  confidence: number;
+};
+
+export type SocialEncounterResponse = {
+  encounter_id: string;
+  duplicate: boolean;
+};
+
+export type SocialAttestationRequest = {
+  agent_id: string;
+  scope_id: string;
+  issuer_actor_id: string;
+  subject_actor_id: string;
+  attestation_key: string;
+  attestation_kind?: SocialAttestationKind;
+  verdict: SocialVerdict;
+  protocol_id: string;
+  protocol_version: string;
+  source_act_id: string;
+  source_action_ordinal?: number | null;
+  evidence_refs?: Array<Record<string, unknown>>;
+  trust_level: SocialTrustLevel;
+  signature_metadata?: Record<string, unknown>;
+  /** Direct-create route accepts only absent/null; use socialRevise for a revision. */
+  supersedes_attestation_id?: null;
+};
+
+export type SocialAttestationRevisionRequest = Omit<
+  SocialAttestationRequest,
+  "supersedes_attestation_id"
+> & {
+  supersedes_attestation_id: string;
+};
+
+export type SocialAttestationResponse = {
+  attestation_id: string;
+  duplicate: boolean;
+  projection_version: number;
+  projection_status: SocialProjectionStatus;
+};
+
+export type SocialScopeDissolveRequest = {
+  agent_id: string;
+  scope_id: string;
+};
+
+export type SocialScopeDissolveResponse = {
+  scope_id: string;
+  duplicate: boolean;
+  status: "dissolved";
+};
+
+export type SocialGrantRequest = {
+  agent_id: string;
+  grant_key: string;
+  scope_id: string;
+  grantee_principal_id: string;
+  capability: "social:read" | "social:encounter";
+  evidence_class: "actor" | "encounter" | "attestation" | "projection";
+  evidence_id?: string | null;
+  actor_a_id?: string | null;
+  actor_b_id?: string | null;
+  expires_at?: string | null;
+};
+
+export type SocialGrantResponse = {
+  grant_id: string;
+  duplicate: boolean;
+};
+
+export type SocialGrantRevokeRequest = {
+  agent_id: string;
+  revocation_key: string;
+  grant_id: string;
+};
+
+export type SocialGrantRevokeResponse = {
+  grant_id: string;
+  duplicate: boolean;
+  revoked: true;
+};
+
+export type SocialQueryRequest = {
+  agent_id: string;
+  scope_id: string;
+  actor_a_id: string;
+  actor_b_id: string;
+};
+
+export type SocialQueryResponse = {
+  scope_id: string;
+  actor_low_id: string;
+  actor_high_id: string;
+  projection_version: number;
+  status: SocialProjectionStatus;
+  policy_hash: string | null;
+  computed_at: string | null;
+};
+
+export type SocialExplainRequest = {
+  agent_id: string;
+  scope_id: string;
+};
+
+export type SocialExplainResponse = {
+  scope: {
+    id: string;
+    protocol_id: string;
+    protocol_version: string;
+    policy_hash: string;
+    status: "active" | "dissolved";
+    created_at: string;
+    dissolved_at: string | null;
+  };
+  counts: {
+    actors: number;
+    encounters: number;
+    attestations: number;
+    projections: number;
+    deliveries: number;
+  };
+  projections: Array<{
+    actor_low_id: string;
+    actor_high_id: string;
+    projection_version: number;
+    status: SocialProjectionStatus;
+    policy_hash: string;
+    computed_at: string;
+  }>;
+};
+
+export type SocialDeliverRequest = {
+  agent_id: string;
+  delivery_key: string;
+  scope_id: string;
+  evidence_class: "attestation" | "encounter";
+  evidence_id: string;
+  receiving_agent_id: string;
+};
+
+export type SocialDeliverResponse = {
+  delivery_id: string;
+  observation_id: string;
+  duplicate: boolean;
+};
+
 // ── error / client ───────────────────────────────────────────────────────
 
 export class StyxHttpError extends Error {
@@ -971,6 +1185,52 @@ export type StyxClient = {
   confirmUsage: (
     body: ConfirmUsageRequest,
   ) => Promise<ConfirmUsageResponse>;
+  // Explicit scoped-social operations.  None are called by context lifecycle
+  // hooks or inferred from model/dialogue content.
+  socialActor: (
+    body: SocialActorRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialActorResponse>;
+  socialScope: (
+    body: SocialScopeRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialScopeResponse>;
+  socialEncounter: (
+    body: SocialEncounterRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialEncounterResponse>;
+  socialAttestation: (
+    body: SocialAttestationRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialAttestationResponse>;
+  socialRevise: (
+    body: SocialAttestationRevisionRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialAttestationResponse>;
+  socialDissolve: (
+    body: SocialScopeDissolveRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialScopeDissolveResponse>;
+  socialGrant: (
+    body: SocialGrantRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialGrantResponse>;
+  socialGrantRevoke: (
+    body: SocialGrantRevokeRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialGrantRevokeResponse>;
+  socialQuery: (
+    body: SocialQueryRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialQueryResponse>;
+  socialExplain: (
+    body: SocialExplainRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialExplainResponse>;
+  socialDeliver: (
+    body: SocialDeliverRequest,
+    options?: StyxRequestOptions,
+  ) => Promise<SocialDeliverResponse>;
 };
 
 // Волна 30: paths которые core маршрутизирует под opt-in LLM wrap
@@ -1005,6 +1265,12 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     if (options.httpToken) {
       headers["authorization"] = `Bearer ${options.httpToken}`;
     }
+    // The ordinary daemon bearer does not authorize social operations.  Keep
+    // the principal token on the social route family only, so it can never be
+    // leaked to memory/context endpoints or their logs.
+    if (options.socialToken && path.startsWith("/social/")) {
+      headers["x-styx-social-token"] = options.socialToken;
+    }
     if (LLM_FACING_PATHS.has(path)) {
       headers["x-wrap-for-llm"] = "1";
     }
@@ -1017,6 +1283,21 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     requestOptions?: StyxRequestOptions,
   ): Promise<TResp> {
     const url = `${baseUrl}${path}`;
+    const serializedBody = JSON.stringify(body);
+    const headers = buildHeaders(path);
+    if (
+      options.socialToken
+      && (path === "/social/attestations" || path === "/social/attestations/revise")
+      && typeof body === "object"
+      && body !== null
+      && "trust_level" in body
+      && body.trust_level === "verified"
+    ) {
+      headers["x-styx-social-signature"] = createHmac(
+        "sha256",
+        options.socialToken,
+      ).update(serializedBody, "utf8").digest("hex");
+    }
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
@@ -1029,8 +1310,8 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     try {
       const resp = await fetchImpl(url, {
         method: "POST",
-        headers: buildHeaders(path),
-        body: JSON.stringify(body),
+        headers,
+        body: serializedBody,
         signal: controller.signal,
       });
       const text = await resp.text();
@@ -1124,5 +1405,25 @@ export function createStyxClient(options: StyxClientOptions): StyxClient {
     explainLifetime: (body) => postCall("/explain/lifetime", body),
     explainTopK: (body) => postCall("/explain/topK", body),
     confirmUsage: (body) => postCall("/confirm_usage", body),
+    socialActor: (body, options) => postCall("/social/actors", body, options),
+    socialScope: (body, options) => postCall("/social/scopes", body, options),
+    socialEncounter: (body, options) =>
+      postCall("/social/encounters", body, options),
+    socialAttestation: (body, options) =>
+      postCall("/social/attestations", body, options),
+    socialRevise: (body, options) =>
+      postCall("/social/attestations/revise", body, options),
+    socialDissolve: (body, options) =>
+      postCall("/social/scopes/dissolve", body, options),
+    socialGrant: (body, options) =>
+      postCall("/social/grants", body, options),
+    socialGrantRevoke: (body, options) =>
+      postCall("/social/grants/revoke", body, options),
+    socialQuery: (body, options) =>
+      postCall("/social/query", body, options),
+    socialExplain: (body, options) =>
+      postCall("/social/explain", body, options),
+    socialDeliver: (body, options) =>
+      postCall("/social/deliver", body, options),
   };
 }

@@ -794,4 +794,6 @@ assert.ok(hugeCommit.agent_id.length <= 256 && hugeCommit.agent_id.includes("sha
 assert.ok(hugeCommit.session_id.length <= 256 && hugeCommit.session_id.includes("sha256"));
 assert.ok(hugeCommit.model.length <= 512 && hugeCommit.model.includes("sha256"));
 
+await import("./test-social-client.mjs");
+
 console.log("OpenClaw extension contract tests passed");

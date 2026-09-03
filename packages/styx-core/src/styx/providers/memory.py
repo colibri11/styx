@@ -3975,6 +3975,109 @@ class StyxMemoryCore:
             ),
         }
 
+    # -- scoped social evidence (wave 42) -------------------------------
+
+    def _social_write(self, operation: str, function: Any, /, **kwargs: Any) -> dict[str, Any]:
+        if self._conn is None:
+            raise RuntimeError(f"{operation} called before initialize")
+        with self._write_lock:
+            if self._conn is None:
+                raise RuntimeError(f"provider shut down during {operation}")
+            with self._guarded_write(operation):
+                result = function(self._conn, self._agent_id, **kwargs)
+                self._conn.commit()
+                return result
+
+    def social_create_actor(self, *, principal_id: str, **data: Any) -> dict[str, Any]:
+        from styx.storage.social import create_actor
+        return self._social_write("social_create_actor", create_actor, principal_id=principal_id, **data)
+
+    def social_create_scope(
+        self, *, principal_id: str, **data: Any
+    ) -> dict[str, Any]:
+        from styx.storage.social import create_scope
+        return self._social_write(
+            "social_create_scope", create_scope, principal_id=principal_id, **data
+        )
+
+    def social_create_encounter(
+        self, *, principal_id: str, **data: Any
+    ) -> dict[str, Any]:
+        from styx.storage.social import create_encounter
+        return self._social_write(
+            "social_create_encounter", create_encounter,
+            principal_id=principal_id, **data,
+        )
+
+    def social_create_attestation(
+        self, *, principal_id: str, **data: Any
+    ) -> dict[str, Any]:
+        from styx.storage.social import create_attestation
+        return self._social_write(
+            "social_create_attestation", create_attestation,
+            principal_id=principal_id, **data,
+        )
+
+    def social_dissolve_scope(
+        self, *, principal_id: str, scope_id: str
+    ) -> dict[str, Any]:
+        from styx.storage.social import dissolve_scope
+        return self._social_write(
+            "social_dissolve_scope", dissolve_scope,
+            principal_id=principal_id, scope_id=scope_id,
+        )
+
+    def social_create_grant(
+        self, *, principal_id: str, **data: Any
+    ) -> dict[str, Any]:
+        from styx.storage.social import create_grant
+        return self._social_write(
+            "social_create_grant", create_grant, principal_id=principal_id, **data
+        )
+
+    def social_revoke_grant(
+        self, *, principal_id: str, revocation_key: str, grant_id: str
+    ) -> dict[str, Any]:
+        from styx.storage.social import revoke_grant
+        return self._social_write(
+            "social_revoke_grant",
+            revoke_grant,
+            principal_id=principal_id,
+            revocation_key=revocation_key,
+            grant_id=grant_id,
+        )
+
+    def social_deliver(
+        self, *, principal_id: str, **data: Any
+    ) -> dict[str, Any]:
+        from styx.storage.social import deliver_evidence
+        return self._social_write(
+            "social_deliver", deliver_evidence,
+            principal_id=principal_id,
+            pending_cap=(self._config.cognition_observation_pending_cap if self._config else 1024),
+            event_cap=(self._config.cognition_ready_event_cap if self._config else 1024),
+            global_event_cap=(self._config.cognition_ready_global_cap if self._config else 100_000),
+            **data,
+        )
+
+    def social_query(self, **data: Any) -> dict[str, Any]:
+        from styx.storage.social import query_projection
+        if self._conn is None:
+            raise RuntimeError("social_query called before initialize")
+        with self._write_lock:
+            result = query_projection(self._conn, self._agent_id, **data)
+            self._conn.commit()
+            return result
+
+    def social_explain(self, **data: Any) -> dict[str, Any]:
+        from styx.storage.social import explain_scope
+        if self._conn is None:
+            raise RuntimeError("social_explain called before initialize")
+        with self._write_lock:
+            result = explain_scope(self._conn, self._agent_id, **data)
+            self._conn.commit()
+            return result
+
     # -- setup wizard ----------------------------------------------------
 
     def get_config_schema(self) -> list[dict[str, Any]]:

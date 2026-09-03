@@ -98,6 +98,7 @@ def test_analytics_happy(stack) -> None:
     assert by_kind["note"] == 1
     assert by_kind["episode"] == 1  # dialogue → kind=episode default
     assert a["dialogue_messages_count"] == 1
+    assert "social_evidence" not in a
 
     g = body["global"]
     assert g["total_memories"] == 4

@@ -77,7 +77,7 @@ const OPENCLAW_EXECUTION_PROVENANCE = {
   model_revision: null,
   endpoint_id: "openclaw-default",
   adapter: "styx-openclaw",
-  adapter_version: "0.6.0",
+  adapter_version: "0.7.0",
   protocol: "unknown" as const,
   sampling_hash: null,
   toolset_hash: null,
@@ -268,7 +268,7 @@ export function createStyxContextEngine(params: StyxContextEngineParams) {
     info: {
       id: "styx",
       name: "Styx",
-      version: "0.6.0",
+      version: "0.7.0",
       ownsCompaction,
       acceptedHostParams: ["sessionTarget", "runtimeSettings", "runtimeContext"],
       transcriptSemantics: {

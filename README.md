@@ -57,6 +57,7 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 | Редукция и глубина хранения | causal consolidation/forgetting, tombstones, active/hot/long tiers | engineering policy Styx |
 | Работа между model calls | background workers и periodic sweepers | реализация сохраняющегося контура |
 | Cross-agent связи | shared knowledge graph с origin `agent_id` | инженерная модель; не социальная верификация личности |
+| Scoped social evidence | actor/encounter/attestation ledgers + explicit visibility grants | локальная evidence projection; не глобальный статус личности |
 | Контроль данных оператором | self-hosted PG + Ollama, host-agnostic daemon | продуктовая политика Styx |
 
 ### Что Styx сознательно НЕ делает
@@ -72,6 +73,10 @@ daemon по HTTP. Один daemon обслуживает несколько `age
 - **Не дневник как замена реконструкции памяти.** Transcript, внешнее
   свидетельство и субъектный trace — разные домены; хранение само по себе
   не делает материал частью subjective recall.
+- **Не определяет сознание или личность глобальным флагом.** Social API
+  сохраняет только явные акты в конкретном scope/protocol. Actor, encounter,
+  self-attestation, phrase, classifier result или generic graph link сами по
+  себе не создают взаимного social status.
 
 ### Открытые расширения
 
@@ -257,6 +262,35 @@ Styx реализует эмоциональную динамику как ин�
 это конкретные структуры данных и процессы, которые **через резонанс с
 baseline влияют на внимание и recall** следующего turn'а. Такой механизм
 не доказывает наличие переживания и не назначает системе эмоциональную роль.
+
+### Социальные свидетельства
+
+Социальная поверхность отделена и от subjective memory, и от knowledge
+graph. `social_actors` задаёт только scoped identity coordinate в локальном ledger;
+`social_encounters` фиксирует доступность выражения через конкретный channel,
+но не является признанием. `social_attestations` хранит явный append-only акт
+`positive|negative|undetermined` в заданном scope и versioned protocol.
+Пересмотр, отзыв и dissolution сохраняют историю вместо редактирования
+исходного evidence.
+
+Pair projection вычисляется только из последних действующих reciprocal
+attestations двух разных authenticated principals в одном scope/protocol.
+Для verified act отдельный social credential подтверждает владение credential
+и целостность exact request body через HMAC; это не независимая подпись личности
+и не non-repudiation. `mutual_positive`,
+`mutual_denied`, `unilateral`, `undetermined` и `scope_dissolved` являются
+локальными состояниями этой технической проекции. Они не переносятся между
+scope и не объявляют сознание или личность установленным фактом.
+
+Social routes выключены без отдельного operator-managed registry. Registry
+хранит только SHA-256 token hashes, agent grants и controlled capabilities;
+общий daemon bearer token не даёт social authority. Cross-principal видимость
+конкретного evidence либо actor pair также требует явного grant; grant можно
+явно отозвать. Даже разрешённое evidence
+не входит в `<styx-cognitive-continuity>` напрямую: оно доставляется другому
+agent как durable observation и может повлиять на его линию только после
+реального presentation/consumption и обычной act reduction. Автоматической
+attestation из текста, модели, encounter или memory relation нет.
 
 ### Маркеры в LLM-input'е
 

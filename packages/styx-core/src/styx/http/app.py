@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from styx import __version__
 from styx.config import StyxConfig
+from styx.http.social_auth import load_social_principals
 from styx.http.routes import (
     affect as affect_route,
     agent as agent_route,
@@ -28,6 +32,7 @@ from styx.http.routes import (
     reinterpret as reinterpret_route,
     relations as relations_route,
     search_archive as search_archive_route,
+    social as social_route,
     sync_turn as sync_turn_route,
 )
 
@@ -51,6 +56,20 @@ def create_app(config: StyxConfig) -> FastAPI:
     )
     app.state.config = config
     app.state.started_at = time.monotonic()
+    app.state.social_principals = load_social_principals(
+        config.social_principals_file
+    )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError):
+        # Pydantic normally echoes the rejected input. Social inputs may hold
+        # private labels/evidence, so this route family returns no value copy.
+        if request.url.path.startswith("/social/"):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "invalid social request"},
+            )
+        return await request_validation_exception_handler(request, exc)
 
     app.include_router(healthz_route.router)
     app.include_router(agent_route.router)
@@ -72,4 +91,5 @@ def create_app(config: StyxConfig) -> FastAPI:
     app.include_router(analytics_route.router)
     app.include_router(confirm_usage_route.router)
     app.include_router(maintenance_route.router)
+    app.include_router(social_route.router)
     return app

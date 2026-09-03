@@ -15,6 +15,18 @@ import pytest
 DSN_ENV = "STYX_TEST_DATABASE_URL"
 
 _STYX_DROP_STMTS = [
+    # Scoped social evidence (wave 42), child ledgers before actors/scopes.
+    "DROP TABLE IF EXISTS social_delivery_receipts CASCADE",
+    "DROP TABLE IF EXISTS social_grant_operations CASCADE",
+    "DROP TABLE IF EXISTS social_scope_operations CASCADE",
+    "DROP TABLE IF EXISTS social_visibility_grants CASCADE",
+    "DROP TABLE IF EXISTS social_pair_projections CASCADE",
+    "DROP TABLE IF EXISTS social_attestations CASCADE",
+    "DROP TABLE IF EXISTS social_encounters CASCADE",
+    "DROP TABLE IF EXISTS social_identity_operations CASCADE",
+    "DROP TABLE IF EXISTS social_scopes CASCADE",
+    "DROP TABLE IF EXISTS social_actors CASCADE",
+    "DROP FUNCTION IF EXISTS styx_social_append_only() CASCADE",
     # Host readiness ledger (wave 41) references cognitive snapshots.
     "DROP TABLE IF EXISTS cognitive_ready_events CASCADE",
     "DROP TABLE IF EXISTS ready_event_state CASCADE",

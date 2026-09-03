@@ -7,7 +7,60 @@
 пакет где это неоднозначно (`[1.0.2]`/`[1.0.3]` ниже — релизы `styx-hermes`,
 `styx-core` тогда оставался на 1.0.1).
 
-## [Unreleased — prepared: styx-core 1.6.0 / styx-hermes 1.6.0 / OpenClaw 0.6.0]
+## [Unreleased — prepared: styx-core 1.7.0 / styx-hermes 1.7.0 / OpenClaw 0.7.0]
+
+Подготовлено, но не опубликовано: изолированный контур scoped social evidence
+с явными участниками, областями, свидетельствами и разрешениями. Версии не
+означают наличие tag/release.
+
+### Добавлено
+
+- Additive migration `0014_social_attestations.sql`: agent-scoped ledgers
+  actors, scopes, encounters, attestations, pair projections, visibility
+  grants и delivery receipts.
+- Отдельный hash-only registry социальных principals с grant'ами на agent и
+  capability; отсутствие registry полностью закрывает social API.
+- Явные операции encounter, signed attestation, revision, dissolution,
+  exact-target grant/revocation, projection/explain и delivery;
+  Hermes/OpenClaw получают отдельный credential только для этого route family.
+
+### Изменено
+
+- Взаимность вычисляется локально внутри одного scope/protocol из двух
+  подтверждённых act'ов разных principals. Одностороннее свидетельство, self-report,
+  чужой report, текстовая фраза или generic knowledge-graph relation не
+  создают взаимность.
+- Получатель видит разрешённое social evidence только после отдельного
+  visibility grant и durable delivery receipt — как обычное preliminary
+  observation. Оно не внедряется напрямую в carrier или model prompt.
+
+### Надёжность и безопасность
+
+- Нет глобальных флагов consciousness/personality, общего каталога actors или
+  автоматического attestation по classifier/model output.
+- Registry хранит только SHA-256 токенов; обычный daemon bearer не заменяет
+  social principal. Для cross-principal transfer agent/capability grant не
+  заменяет scope/evidence grant, а закрытые координаты не перечисляются через
+  ошибки.
+- Verified act требует HMAC exact-body подпись; private validation input не
+  отражается в HTTP error/log. Обычный `/analytics` не раскрывает social
+  counts, а delegated grant-check выполняется атомарно с операцией.
+- Revision/revocation/dissolution сохраняют append-only историю; projection
+  versioned и ограничена своей scope/policy.
+
+### Проверка текущего checkpoint
+
+- Targeted pure/auth/storage/HTTP gates, real PostgreSQL concurrency и
+  end-to-end visibility/delivery прошли без ошибок.
+- Fresh Docker core на real PostgreSQL + Ollama: **1853 passed / 16 expected
+  skipped / 0 failed**; полный Hermes: **236 passed / 0 failed**. OpenClaw
+  build/contract suite green; host runtime: **5 passed / 3 expected skipped**.
+- Cross-cutting deterministic audit Waves 38–42 закрыт. Опциональный
+  последовательный SGLang probe достиг `/v1/*`, но bounded response завершился
+  невалидным JSON (`schema_invalid`); deterministic gate не затронут.
+- Push/tag/release не выполнялись.
+
+## [Prepared checkpoint — styx-core 1.6.0 / styx-hermes 1.6.0 / OpenClaw 0.6.0]
 
 Подготовлено, но не опубликовано: host-owned event-driven continuity и
 model-independent execution provenance. Версии не означают наличие tag/release.

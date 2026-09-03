@@ -17,6 +17,10 @@ EXPECTED_TABLES = {
     "cognitive_act_reductions",
     "causal_operations", "memory_tombstones",
     "cognitive_ready_events", "ready_event_state",
+    "social_actors", "social_identity_operations", "social_scopes",
+    "social_encounters", "social_attestations", "social_pair_projections",
+    "social_visibility_grants", "social_delivery_receipts",
+    "social_scope_operations", "social_grant_operations",
 }
 EXPECTED_INDEXES = {
     "sessions_agent_started_idx",
@@ -48,6 +52,9 @@ EXPECTED_INDEXES = {
     "memory_tombstones_operation_idx",
     "cognitive_ready_events_claim_idx", "cognitive_ready_events_lease_idx",
     "cognitive_acts_execution_provenance_idx",
+    "social_attestations_pair_idx", "social_attestations_single_revision_uq",
+    "social_encounters_scope_idx", "social_grants_lookup_idx",
+    "social_delivery_receipts_receiver_idx",
 }
 
 
@@ -80,6 +87,7 @@ def test_migration_applies_to_empty_db(clean_db: str) -> None:
             "0011_durable_observations.sql",
             "0012_causal_rewiring.sql",
             "0013_ready_events_model_provenance.sql",
+            "0014_social_attestations.sql",
     ]
 
     with psycopg.connect(clean_db) as conn:
@@ -103,6 +111,7 @@ def test_migration_is_idempotent(clean_db: str) -> None:
             "0011_durable_observations.sql",
             "0012_causal_rewiring.sql",
             "0013_ready_events_model_provenance.sql",
+            "0014_social_attestations.sql",
     ]
     assert second == []
 

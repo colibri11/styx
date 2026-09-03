@@ -2,7 +2,7 @@
   "id": "styx",
   "name": "Styx",
   "description": "Self-hosted memory/context subsystem with fenced cognitive-continuity envelopes, structural memory and knowledge graph over styx-core.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "kind": "context-engine",
   "activation": {
     "onStartup": true
@@ -41,6 +41,10 @@
         "type": "string",
         "description": "Bearer-токен для styx-core daemon (Authorization: Bearer), если daemon запущен с STYX_HTTP_TOKEN."
       },
+      "socialToken": {
+        "type": "string",
+        "description": "Отдельный principal-токен для явно вызванных social API; не используется для автоматической аттестации."
+      },
       "agentMapping": {
         "type": "object",
         "additionalProperties": { "type": "string" },
@@ -71,6 +75,11 @@
       "label": "Styx HTTP token",
       "sensitive": true,
       "help": "Bearer-токен; должен совпадать с STYX_HTTP_TOKEN на стороне daemon'а."
+    },
+    "socialToken": {
+      "label": "Styx social principal token",
+      "sensitive": true,
+      "help": "Отдельный X-Styx-Social-Token. Без него social API остаётся закрыт по умолчанию."
     },
     "agentMapping": {
       "label": "Agent mapping",

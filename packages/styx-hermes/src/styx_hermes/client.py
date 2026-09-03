@@ -6,12 +6,16 @@
 Конфигурация:
 - ``base_url`` — обычно ``STYX_DAEMON_URL`` (default ``http://127.0.0.1:8788``)
 - ``token`` — ``STYX_HTTP_TOKEN`` (если задан, daemon на non-loopback'е).
+- ``social_token`` — отдельный ``STYX_SOCIAL_TOKEN`` для явных social routes.
 
 Контракт endpoint'ов — ``.design/host-agnostic-split-v1.md`` § 6.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
 import os
 from typing import Any
@@ -45,6 +49,7 @@ class StyxCoreClient:
         base_url: str | None = None,
         token: str | None = None,
         *,
+        social_token: str | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         long_timeout_s: float = LONG_TIMEOUT_S,
         affect_timeout_s: float = AFFECT_TIMEOUT_S,
@@ -53,6 +58,11 @@ class StyxCoreClient:
             base_url or os.environ.get("STYX_DAEMON_URL", "http://127.0.0.1:8788")
         ).rstrip("/")
         self._token = token if token is not None else os.environ.get("STYX_HTTP_TOKEN")
+        self._social_token = (
+            social_token
+            if social_token is not None
+            else os.environ.get("STYX_SOCIAL_TOKEN")
+        )
         self._timeout = timeout_s
         self._long_timeout = long_timeout_s
         self._affect_timeout = affect_timeout_s
@@ -627,6 +637,330 @@ class StyxCoreClient:
             return {"status": "unknown_error", "detail": body}
         return _parse_response("/reinterpret", resp)
 
+    # ── scoped social evidence (wave 42) ──────────────────────────────
+
+    def social_create_actor(
+        self,
+        agent_id: str,
+        *,
+        identity_namespace: str,
+        actor_key: str,
+        actor_kind: str,
+        identity_evidence_hash: str,
+        private_label: str | None = None,
+        attestation_principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Register one owner-scoped actor coordinate, without attesting it."""
+        return self._post(
+            "/social/actors",
+            {
+                "agent_id": agent_id,
+                "identity_namespace": identity_namespace,
+                "actor_key": actor_key,
+                "actor_kind": actor_kind,
+                "private_label": private_label,
+                "identity_evidence_hash": identity_evidence_hash,
+                "attestation_principal_id": attestation_principal_id,
+            },
+            social_auth=True,
+        )
+
+    def social_create_scope(
+        self,
+        agent_id: str,
+        *,
+        scope_key: str,
+        protocol_id: str,
+        protocol_version: str,
+        policy_hash: str,
+    ) -> dict[str, Any]:
+        """Create an empty local social scope; no membership is inferred."""
+        return self._post(
+            "/social/scopes",
+            {
+                "agent_id": agent_id,
+                "scope_key": scope_key,
+                "protocol_id": protocol_id,
+                "protocol_version": protocol_version,
+                "policy_hash": policy_hash,
+            },
+            social_auth=True,
+        )
+
+    def social_record_encounter(
+        self,
+        agent_id: str,
+        *,
+        encounter_key: str,
+        scope_id: str,
+        observer_actor_id: str,
+        encountered_actor_id: str,
+        direction: str,
+        channel_kind: str,
+        evidence_hash: str,
+        confidence: float,
+        source_act_id: str | None = None,
+        source_observation_id: str | None = None,
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Record an explicit encounter; this never creates an attestation."""
+        return self._post(
+            "/social/encounters",
+            {
+                "agent_id": agent_id,
+                "encounter_key": encounter_key,
+                "scope_id": scope_id,
+                "observer_actor_id": observer_actor_id,
+                "encountered_actor_id": encountered_actor_id,
+                "direction": direction,
+                "channel_kind": channel_kind,
+                "source_act_id": source_act_id,
+                "source_observation_id": source_observation_id,
+                "summary": summary,
+                "evidence_hash": evidence_hash,
+                "confidence": confidence,
+            },
+            social_auth=True,
+        )
+
+    def social_attest(
+        self,
+        agent_id: str,
+        *,
+        scope_id: str,
+        issuer_actor_id: str,
+        subject_actor_id: str,
+        attestation_key: str,
+        verdict: str,
+        protocol_id: str,
+        protocol_version: str,
+        source_act_id: str,
+        trust_level: str,
+        attestation_kind: str = "direct",
+        source_action_ordinal: int | None = None,
+        evidence_refs: list[dict[str, Any]] | None = None,
+        signature_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit one explicit issuer act; no text classifier calls this API."""
+        return self._social_attestation(
+            "/social/attestations",
+            agent_id=agent_id,
+            scope_id=scope_id,
+            issuer_actor_id=issuer_actor_id,
+            subject_actor_id=subject_actor_id,
+            attestation_key=attestation_key,
+            verdict=verdict,
+            protocol_id=protocol_id,
+            protocol_version=protocol_version,
+            source_act_id=source_act_id,
+            trust_level=trust_level,
+            attestation_kind=attestation_kind,
+            source_action_ordinal=source_action_ordinal,
+            evidence_refs=evidence_refs,
+            signature_metadata=signature_metadata,
+            supersedes_attestation_id=None,
+        )
+
+    def social_revise_attestation(
+        self,
+        agent_id: str,
+        *,
+        supersedes_attestation_id: str,
+        scope_id: str,
+        issuer_actor_id: str,
+        subject_actor_id: str,
+        attestation_key: str,
+        verdict: str,
+        protocol_id: str,
+        protocol_version: str,
+        source_act_id: str,
+        trust_level: str,
+        attestation_kind: str = "direct",
+        source_action_ordinal: int | None = None,
+        evidence_refs: list[dict[str, Any]] | None = None,
+        signature_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append a revision; the superseded attestation is never edited."""
+        return self._social_attestation(
+            "/social/attestations/revise",
+            agent_id=agent_id,
+            scope_id=scope_id,
+            issuer_actor_id=issuer_actor_id,
+            subject_actor_id=subject_actor_id,
+            attestation_key=attestation_key,
+            verdict=verdict,
+            protocol_id=protocol_id,
+            protocol_version=protocol_version,
+            source_act_id=source_act_id,
+            trust_level=trust_level,
+            attestation_kind=attestation_kind,
+            source_action_ordinal=source_action_ordinal,
+            evidence_refs=evidence_refs,
+            signature_metadata=signature_metadata,
+            supersedes_attestation_id=supersedes_attestation_id,
+        )
+
+    def _social_attestation(
+        self,
+        path: str,
+        *,
+        agent_id: str,
+        scope_id: str,
+        issuer_actor_id: str,
+        subject_actor_id: str,
+        attestation_key: str,
+        verdict: str,
+        protocol_id: str,
+        protocol_version: str,
+        source_act_id: str,
+        trust_level: str,
+        attestation_kind: str,
+        source_action_ordinal: int | None,
+        evidence_refs: list[dict[str, Any]] | None,
+        signature_metadata: dict[str, Any] | None,
+        supersedes_attestation_id: str | None,
+    ) -> dict[str, Any]:
+        return self._post(
+            path,
+            {
+                "agent_id": agent_id,
+                "scope_id": scope_id,
+                "issuer_actor_id": issuer_actor_id,
+                "subject_actor_id": subject_actor_id,
+                "attestation_key": attestation_key,
+                "attestation_kind": attestation_kind,
+                "verdict": verdict,
+                "protocol_id": protocol_id,
+                "protocol_version": protocol_version,
+                "source_act_id": source_act_id,
+                "source_action_ordinal": source_action_ordinal,
+                "evidence_refs": evidence_refs or [],
+                "trust_level": trust_level,
+                "signature_metadata": signature_metadata or {},
+                "supersedes_attestation_id": supersedes_attestation_id,
+            },
+            social_auth=True,
+        )
+
+    def social_dissolve_scope(
+        self,
+        agent_id: str,
+        *,
+        scope_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/social/scopes/dissolve",
+            {"agent_id": agent_id, "scope_id": scope_id},
+            social_auth=True,
+        )
+
+    def social_create_grant(
+        self,
+        agent_id: str,
+        *,
+        grant_key: str,
+        scope_id: str,
+        grantee_principal_id: str,
+        capability: str,
+        evidence_class: str,
+        evidence_id: str | None = None,
+        actor_a_id: str | None = None,
+        actor_b_id: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/social/grants",
+            {
+                "agent_id": agent_id,
+                "grant_key": grant_key,
+                "scope_id": scope_id,
+                "grantee_principal_id": grantee_principal_id,
+                "capability": capability,
+                "evidence_class": evidence_class,
+                "evidence_id": evidence_id,
+                "actor_a_id": actor_a_id,
+                "actor_b_id": actor_b_id,
+                "expires_at": expires_at,
+            },
+            social_auth=True,
+        )
+
+    def social_query(
+        self,
+        agent_id: str,
+        *,
+        scope_id: str,
+        actor_a_id: str,
+        actor_b_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/social/query",
+            {
+                "agent_id": agent_id,
+                "scope_id": scope_id,
+                "actor_a_id": actor_a_id,
+                "actor_b_id": actor_b_id,
+            },
+            social_auth=True,
+        )
+
+    def social_revoke_grant(
+        self,
+        agent_id: str,
+        *,
+        revocation_key: str,
+        grant_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/social/grants/revoke",
+            {
+                "agent_id": agent_id,
+                "revocation_key": revocation_key,
+                "grant_id": grant_id,
+            },
+            social_auth=True,
+        )
+
+    def social_explain(
+        self,
+        agent_id: str,
+        *,
+        scope_id: str,
+    ) -> dict[str, Any]:
+        """Read bounded audit coordinates, never private evidence content."""
+        return self._post(
+            "/social/explain",
+            {
+                "agent_id": agent_id,
+                "scope_id": scope_id,
+            },
+            social_auth=True,
+        )
+
+    def social_deliver(
+        self,
+        agent_id: str,
+        *,
+        delivery_key: str,
+        scope_id: str,
+        receiving_agent_id: str,
+        evidence_class: str,
+        evidence_id: str,
+    ) -> dict[str, Any]:
+        """Explicitly bridge one granted social event into an observation."""
+        return self._post(
+            "/social/deliver",
+            {
+                "agent_id": agent_id,
+                "delivery_key": delivery_key,
+                "scope_id": scope_id,
+                "evidence_class": evidence_class,
+                "evidence_id": evidence_id,
+                "receiving_agent_id": receiving_agent_id,
+            },
+            social_auth=True,
+        )
+
     # ── internals ──────────────────────────────────────────────────────
 
     def _get(self, path: str, *, auth: bool = True) -> dict[str, Any]:
@@ -646,6 +980,7 @@ class StyxCoreClient:
         *,
         timeout: float | None = None,
         wrap_for_llm: bool = False,
+        social_auth: bool = False,
     ) -> dict[str, Any]:
         """POST к styx-core.
 
@@ -661,13 +996,38 @@ class StyxCoreClient:
         headers: dict[str, str] = {}
         if wrap_for_llm:
             headers["X-Wrap-For-LLM"] = "1"
+        if social_auth and self._social_token:
+            # The ordinary daemon bearer does not authorize cross-agent
+            # social access.  Keep this principal credential per-request so
+            # it cannot leak to health, cognition, recall or other routes.
+            headers["X-Styx-Social-Token"] = self._social_token
+        signed_body: bytes | None = None
+        if (
+            social_auth
+            and path in {"/social/attestations", "/social/attestations/revise"}
+            and payload.get("trust_level") == "verified"
+            and self._social_token
+        ):
+            signed_body = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+            headers["X-Styx-Social-Signature"] = hmac.new(
+                self._social_token.encode("utf-8"), signed_body, hashlib.sha256
+            ).hexdigest()
         try:
-            resp = self._session.post(
-                url,
-                json=payload,
-                timeout=timeout or self._timeout,
-                headers=headers or None,
-            )
+            request_kwargs: dict[str, Any] = {
+                "timeout": timeout or self._timeout,
+                "headers": headers or None,
+            }
+            if signed_body is None:
+                request_kwargs["json"] = payload
+            else:
+                request_kwargs["data"] = signed_body
+            resp = self._session.post(url, **request_kwargs)
         except requests.RequestException as exc:
             log.warning("styx-core POST %s failed: %s", path, exc)
             raise
@@ -684,11 +1044,14 @@ def _parse_response(path: str, resp: "requests.Response") -> dict[str, Any]:
     except ValueError:
         body = {}
     if not (200 <= resp.status_code < 300):
-        log.warning(
-            "styx-core %s returned %d: %s",
-            path,
-            resp.status_code,
-            body if body else resp.text[:200],
-        )
+        if path.startswith("/social/"):
+            log.warning("styx-core %s returned %d", path, resp.status_code)
+        else:
+            log.warning(
+                "styx-core %s returned %d: %s",
+                path,
+                resp.status_code,
+                body if body else resp.text[:200],
+            )
         resp.raise_for_status()
     return body if isinstance(body, dict) else {}

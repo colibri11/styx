@@ -39,6 +39,7 @@ import {
 type PluginConfig = {
   daemonUrl?: string;
   httpToken?: string;
+  socialToken?: string;
   agentMapping?: Record<string, string>;
   requestTimeoutMs?: number;
   logging?: boolean;
@@ -59,6 +60,7 @@ export default definePluginEntry({
     const client = createStyxClient({
       baseUrl: cfg.daemonUrl ?? "http://127.0.0.1:8788",
       httpToken: cfg.httpToken,
+      socialToken: cfg.socialToken,
       timeoutMs: cfg.requestTimeoutMs ?? 30_000,
       logger,
     });
