@@ -124,6 +124,32 @@ def test_chat_json_request_payload_shape() -> None:
     assert "options" not in body
 
 
+def test_chat_json_passes_json_schema_as_ollama_format() -> None:
+    client = OllamaChatClient(base_url="http://x", model="m")
+    captured: dict[str, Any] = {}
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["ok"],
+        "properties": {"ok": {"type": "boolean"}},
+    }
+
+    def _cap(req: urllib.request.Request, timeout: float | None = None) -> _FakeResponse:
+        captured["body"] = req.data
+        return _FakeResponse(_ok_envelope({"ok": True}))
+
+    with patch.object(urllib.request, "urlopen", _cap):
+        out = client.chat_json(
+            [{"role": "user", "content": "hi"}], json_schema=schema
+        )
+
+    assert out == {"ok": True}
+    body = json.loads(captured["body"].decode("utf-8"))
+    assert body["format"] == schema
+    assert body["stream"] is False
+    assert "options" not in body
+
+
 # ── Errors: terminal vs transient ──────────────────────────────────────
 
 

@@ -1,8 +1,5 @@
 # styx-core
 
-Текущая версия пакета: **1.7.0** (репозиторный релиз
-[`v1.0.16`](https://github.com/colibri11/styx/releases/tag/v1.0.16)).
-
 Host-agnostic ядро Styx — дирижёра динамической части контекстного окна
 LLM-агента. Содержит storage layer (Postgres + pgvector), recall pipeline,
 focus tracker, hot-tier, eviction relevance, salient inject, working set

@@ -772,7 +772,7 @@ wheels = [
 
 [[package]]
 name = "styx-core"
-version = "1.7.0"
+version = "1.7.1"
 source = { editable = "packages/styx-core" }
 dependencies = [
     { name = "fastapi" },

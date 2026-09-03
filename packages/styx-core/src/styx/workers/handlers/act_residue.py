@@ -50,7 +50,8 @@ MAX_OBSERVATIONS = 16
 MAX_PROMPT_CHARS = 32_000
 MAX_RESIDUES = 4
 MAX_RESIDUE_CONTENT_CHARS = 1_200
-MAX_REASON_CHARS = 300
+TARGET_REASON_CHARS = 240
+MAX_REASON_CHARS = 2_048
 MAX_EVIDENCE_REFS = 8
 
 ALLOWED_KINDS = frozenset({"decision", "episode", "concept", "note"})
@@ -93,24 +94,13 @@ SYSTEM_PROMPT = """Ты выполняешь техническую редукц
 Верни только строгий JSON:
 {
   "no_residue": <true|false>,
-  "reason": <короткая строка|null>,
+  "reason": <короткая строка не более 240 символов|null>,
   "residues": [
     {
       "kind": "decision|episode|concept|note",
       "causal_role": "choice|updated_belief|goal|constraint|unresolved_tension|affective_coordinate",
       "content": <краткая формулировка наблюдаемого устойчивого остатка>,
       "confidence": <число 0..1>,
-      "affect": {
-        "valence_delta": <число -1..1>,
-        "arousal_delta": <число -1..1>,
-        "dominance_delta": <число -1..1>,
-        "valence": <опционально число -1..1>,
-        "arousal": <опционально число -1..1>,
-        "dominance": <опционально число -1..1>,
-        "intensity": <опционально число 0..1>,
-        "cause_status": <опционально unknown|active|resolved|superseded>,
-        "cause_confidence": <опционально число 0..1>
-      },
       "evidence_refs": [
         {"source": "channel_input|channel_output", "key": <top-level key>} |
         {"source": "action", "ordinal": <integer>} |
@@ -127,7 +117,12 @@ reason и residues=[]. Иначе no_residue=false, reason=null и 1..4 residues
 Каждый residue обязан ссылаться только на переданные channel/action/observation.
 Поле affect обязательно только для causal_role=affective_coordinate и запрещено
 для остальных ролей. Оно описывает лишь evidence-bound координату/изменение,
-не отдельную сущность и не самостоятельный второй источник состояния.
+не отдельную сущность и не самостоятельный второй источник состояния. Его
+форма: обязательные valence_delta/arousal_delta/dominance_delta в [-1,1];
+опционально полный набор valence/arousal/dominance в [-1,1], intensity и
+cause_confidence в [0,1], cause_status=unknown|active|resolved|superseded.
+Не меняй causal_role на affective_coordinate только ради добавления affect:
+без различимого аффективного evidence используй наблюдаемую неаффективную роль.
 """
 
 
@@ -137,6 +132,188 @@ class ActCoordinates:
     channel_output_keys: frozenset[str]
     action_ordinals: frozenset[int]
     observation_ids: frozenset[str]
+
+
+def _act_residue_json_schema(coordinates: ActCoordinates) -> dict[str, Any]:
+    """Build the strict Ollama format schema for one projected act.
+
+    Evidence coordinates are values, not merely shapes: a model cannot turn a
+    carrier ``trace_coordinates.memory_id`` into an observation reference or
+    invent an action ordinal that was not present in the bounded projection.
+    """
+    evidence_variants: list[dict[str, Any]] = []
+    for source, keys in (
+        ("channel_input", coordinates.channel_input_keys),
+        ("channel_output", coordinates.channel_output_keys),
+    ):
+        if keys:
+            evidence_variants.append({
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["source", "key"],
+                "properties": {
+                    "source": {"const": source},
+                    "key": {"enum": sorted(keys)},
+                },
+            })
+    if coordinates.action_ordinals:
+        evidence_variants.append({
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["source", "ordinal"],
+            "properties": {
+                "source": {"const": "action"},
+                "ordinal": {"enum": sorted(coordinates.action_ordinals)},
+            },
+        })
+    if coordinates.observation_ids:
+        evidence_variants.append({
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["source", "observation_id"],
+            "properties": {
+                "source": {"const": "observation"},
+                "observation_id": {"enum": sorted(coordinates.observation_ids)},
+            },
+        })
+
+    no_residue = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["no_residue", "reason", "residues"],
+        "properties": {
+            "no_residue": {"const": True},
+            "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": TARGET_REASON_CHARS,
+            },
+            "residues": {"type": "array", "maxItems": 0},
+        },
+    }
+    if not evidence_variants:
+        # A residue cannot satisfy its mandatory evidence_refs without any
+        # projected coordinates.  Expose only the honest no-residue branch
+        # instead of sending an empty/unsatisfiable oneOf to the backend.
+        return {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            **no_residue,
+        }
+
+    number_delta = {"type": "number", "minimum": -1, "maximum": 1}
+    number_unit = {"type": "number", "minimum": 0, "maximum": 1}
+    affect_optional = {
+        "intensity": number_unit,
+        "cause_status": {
+            "enum": ["unknown", "active", "resolved", "superseded"]
+        },
+        "cause_confidence": number_unit,
+    }
+
+    def affect_shape(*, with_absolute_vad: bool) -> dict[str, Any]:
+        properties: dict[str, Any] = {
+            "valence_delta": number_delta,
+            "arousal_delta": number_delta,
+            "dominance_delta": number_delta,
+            **affect_optional,
+        }
+        required = ["valence_delta", "arousal_delta", "dominance_delta"]
+        if with_absolute_vad:
+            properties.update({
+                "valence": number_delta,
+                "arousal": number_delta,
+                "dominance": number_delta,
+            })
+            required.extend(["valence", "arousal", "dominance"])
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": required,
+            "properties": properties,
+        }
+
+    common_properties = {
+        "kind": {"enum": sorted(ALLOWED_KINDS)},
+        "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_RESIDUE_CONTENT_CHARS,
+        },
+        "confidence": number_unit,
+        "evidence_refs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": MAX_EVIDENCE_REFS,
+            "uniqueItems": True,
+            "items": {"$ref": "#/$defs/evidence_ref"},
+        },
+    }
+    non_affective = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "kind", "causal_role", "content", "confidence", "evidence_refs"
+        ],
+        "properties": {
+            **common_properties,
+            "causal_role": {
+                "enum": sorted(ALLOWED_CAUSAL_ROLES - {"affective_coordinate"})
+            },
+        },
+    }
+    affective = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "kind", "causal_role", "content", "confidence", "affect",
+            "evidence_refs",
+        ],
+        "properties": {
+            **common_properties,
+            "causal_role": {"const": "affective_coordinate"},
+            "affect": {"$ref": "#/$defs/affect"},
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+            "evidence_ref": {"oneOf": evidence_variants},
+            "affect": {
+                "oneOf": [
+                    affect_shape(with_absolute_vad=False),
+                    affect_shape(with_absolute_vad=True),
+                ]
+            },
+            "residue": {"oneOf": [non_affective, affective]},
+        },
+        "oneOf": [
+            no_residue,
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["no_residue", "reason", "residues"],
+                "properties": {
+                    "no_residue": {"const": False},
+                    "reason": {"type": "null"},
+                    "residues": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_RESIDUES,
+                        "contains": {
+                            "type": "object",
+                            "required": ["causal_role"],
+                            "properties": {
+                                "causal_role": {"const": "affective_coordinate"}
+                            },
+                        },
+                        "minContains": 0,
+                        "maxContains": 1,
+                        "items": {"$ref": "#/$defs/residue"},
+                    },
+                },
+            },
+        ],
+    }
 
 
 def _validate_payload(raw: Any) -> tuple[str, uuid.UUID, str, str, int]:
@@ -533,10 +710,12 @@ def _validate_response(
     if not isinstance(residues_raw, list) or len(residues_raw) > MAX_RESIDUES:
         raise ValueError(f"residues должен быть list длиной 0..{MAX_RESIDUES}")
     if no_residue:
-        if not isinstance(reason, str) or not (1 <= len(reason) <= MAX_REASON_CHARS):
-            raise ValueError("no_residue=true требует reason 1..300")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("no_residue=true требует reason: непустую строку")
         if residues_raw:
             raise ValueError("no_residue и residues взаимоисключающие")
+        if len(reason) > MAX_REASON_CHARS:
+            reason = reason[: MAX_REASON_CHARS - 1].rstrip() + "…"
         return True, redact_journal_text(reason), []
     if reason is not None:
         raise ValueError("no_residue=false требует reason=null")
@@ -566,6 +745,11 @@ def _validate_response(
             affective_count += 1
             if affective_count > 1:
                 raise ValueError("допускается не более одного affective_coordinate")
+        elif "affect" in item:
+            # Presence itself is forbidden.  Treat ``affect: null`` as a
+            # contract violation too, keeping post-validation congruent with
+            # the disjoint JSON Schema branches.
+            raise ValueError("affect разрешён только для affective_coordinate")
         affect = _validate_affect(item.get("affect"), causal_role=causal_role)
         if not isinstance(content, str) or not (
             1 <= len(content) <= MAX_RESIDUE_CONTENT_CHARS
@@ -582,9 +766,14 @@ def _validate_response(
             1 <= len(refs_raw) <= MAX_EVIDENCE_REFS
         ):
             raise ValueError("residue.evidence_refs должен быть list длиной 1..8")
-        refs = [_validate_evidence_ref(ref, coordinates) for ref in refs_raw]
-        if len({json.dumps(ref, sort_keys=True) for ref in refs}) != len(refs):
-            raise ValueError("residue.evidence_refs содержит дубликаты")
+        refs: list[dict[str, Any]] = []
+        seen_refs: set[str] = set()
+        for raw_ref in refs_raw:
+            ref = _validate_evidence_ref(raw_ref, coordinates)
+            ref_key = json.dumps(ref, sort_keys=True, separators=(",", ":"))
+            if ref_key not in seen_refs:
+                seen_refs.add(ref_key)
+                refs.append(ref)
         residue = {
             "kind": kind,
             "causal_role": causal_role,
@@ -703,10 +892,13 @@ def create_act_residue_handler() -> Handler:
                 separators=(",", ":"),
             )
             user_prompt = "finalized_act_evidence:\n" + canonical_input
-            raw_response = ctx.llm.chat_json(messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ])
+            raw_response = ctx.llm.chat_json(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                json_schema=_act_residue_json_schema(coordinates),
+            )
             try:
                 no_residue, _reason, residues = _validate_response(
                     raw_response, coordinates

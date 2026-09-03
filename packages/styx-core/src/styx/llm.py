@@ -6,9 +6,9 @@
 - ``emotional/sentiment.py`` — hot-path VAD extraction inline в
   ``sync_turn`` (волна 7d).
 
-Sync API. Запрос идёт с ``format=json, stream=false``; Ollama
-гарантирует валидный JSON в ``message.content`` если модель умеет
-(qwen3:4b-local умеет — Modelfile ``temperature=0``).
+Sync API. Запрос идёт с ``format=json, stream=false`` либо с переданной
+caller'ом JSON Schema в ``format``; Ollama ограничивает structured output
+этой схемой, если модель/backend поддерживает constrained decoding.
 
 Errors:
 
@@ -166,7 +166,7 @@ def _tolerant_json_extract(content: str) -> Any | None:
 
 
 class OllamaChatClient:
-    """Sync HTTP клиент для Ollama ``/api/chat`` с ``format=json``.
+    """Sync HTTP клиент для Ollama ``/api/chat`` со structured output.
 
     ``timeout_s`` — per-attempt таймаут urllib. ``max_attempts`` — общее
     число попыток (1 = no retry, 2 = одна повторная попытка).
@@ -199,13 +199,17 @@ class OllamaChatClient:
         self,
         messages: list[dict[str, str]],
         *,
+        json_schema: dict[str, Any] | None = None,
         timeout_s: float | None = None,
         max_attempts: int | None = None,
     ) -> dict[str, Any]:
-        """POST ``/api/chat`` с ``format=json`` и парсингом ответа.
+        """POST ``/api/chat`` с JSON mode/schema и парсингом ответа.
 
         ``timeout_s`` / ``max_attempts`` overrides — для hot-path
         sentiment'а, который хочет 0.8s + 1 attempt.
+
+        ``json_schema`` передаётся объектом в Ollama ``format``. Без неё
+        сохраняется общий legacy-режим ``format=json``.
 
         Возвращает уже распарсенный JSON-объект из ``message.content``.
         Не словарь — может быть list/scalar если LLM такое сгенерил;
@@ -222,7 +226,7 @@ class OllamaChatClient:
             {
                 "model": self._model,
                 "messages": messages,
-                "format": "json",
+                "format": json_schema if json_schema is not None else "json",
                 "stream": False,
             }
         ).encode("utf-8")
